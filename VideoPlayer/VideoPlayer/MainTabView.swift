@@ -16,17 +16,14 @@ struct MainTabView: View {
                 .opacity(selectedTab == 1 ? 1 : 0).allowsHitTesting(selectedTab == 1)
             PikPakWebDAVView(vm: vm, homeToken: pikPakHomeToken, isActive: selectedTab == 2)
                 .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
-            MediaView(vm: vm)
-                .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
             PirateBayView(vm: vm)
-                .opacity(selectedTab == 4 ? 1 : 0).allowsHitTesting(selectedTab == 4)
+                .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
 
             HStack(spacing: 5) {
                 dockButton("Library", "play.rectangle.fill", 0)
                 dockButton("Offcloud", "cloud.fill", 1)
                 dockButton("PikPak", "externaldrive.fill", 2)
-                dockButton("Media", "dot.radiowaves.left.and.right", 3)
-                dockButton("Torrents", "sailboat.fill", 4)
+                dockButton("Discover", "sailboat.fill", 3)
             }
             .padding(6)
             .background(.ultraThinMaterial, in: Capsule())
@@ -102,21 +99,18 @@ private struct PirateBayResult: Decodable, Identifiable {
     let added: String
     let status: String
     let category: String
-
     enum CodingKeys: String, CodingKey {
         case id, name, leechers, seeders, size, username, added, status, category
         case infoHash = "info_hash"
     }
-
     var seedCount: Int { Int(seeders) ?? 0 }
     var leechCount: Int { Int(leechers) ?? 0 }
     var byteCount: Int64 { Int64(size) ?? 0 }
+    var addedDate: Date { Date(timeIntervalSince1970: TimeInterval(added) ?? 0) }
     var magnet: String {
-        var parts = URLComponents()
-        parts.scheme = "magnet"
+        var parts = URLComponents(); parts.scheme = "magnet"
         parts.queryItems = [
-            URLQueryItem(name: "xt", value: "urn:btih:\(infoHash)"),
-            URLQueryItem(name: "dn", value: name),
+            URLQueryItem(name: "xt", value: "urn:btih:\(infoHash)"), URLQueryItem(name: "dn", value: name),
             URLQueryItem(name: "tr", value: "udp://tracker.opentrackr.org:1337/announce"),
             URLQueryItem(name: "tr", value: "udp://open.stealth.si:80/announce"),
             URLQueryItem(name: "tr", value: "udp://tracker.torrent.eu.org:451/announce")
@@ -125,78 +119,141 @@ private struct PirateBayResult: Decodable, Identifiable {
     }
 }
 
+private enum PirateBaySection: String, CaseIterable, Identifiable {
+    case movies = "Movies", tv = "TV Shows", adult = "XXX"
+    var id: String { rawValue }
+    var icon: String { switch self { case .movies: return "film.stack.fill"; case .tv: return "tv.fill"; case .adult: return "18.circle.fill" } }
+    var gradient: [Color] { switch self { case .movies: return [.blue, .purple]; case .tv: return [.cyan, .indigo]; case .adult: return [.pink, .red] } }
+    func accepts(_ code: Int) -> Bool {
+        switch self {
+        case .movies: return [201, 202, 207, 209].contains(code)
+        case .tv: return [205, 208].contains(code)
+        case .adult: return (500..<600).contains(code)
+        }
+    }
+}
+
+private enum PirateBayQuality: String, CaseIterable, Identifiable {
+    case fullHD = "1080p", ultraHD = "2160p"
+    var id: String { rawValue }
+    var icon: String { self == .fullHD ? "rectangle.inset.filled" : "sparkles.tv.fill" }
+    func accepts(_ name: String) -> Bool {
+        let value = name.lowercased()
+        switch self {
+        case .fullHD: return value.contains("1080p") || value.contains("1080i")
+        case .ultraHD: return value.contains("2160p") || value.contains("4k") || value.contains("uhd")
+        }
+    }
+}
+
 @MainActor
-private final class PirateBaySearchModel: ObservableObject {
-    @Published var results: [PirateBayResult] = []
+private final class PirateBayLatestModel: ObservableObject {
+    @Published var items: [PirateBayResult] = []
     @Published var isLoading = false
     @Published var error: String?
 
-    func search(_ raw: String) async {
-        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { results = []; error = nil; return }
+    func refresh() async {
         isLoading = true; error = nil
         defer { isLoading = false }
-        var parts = URLComponents(string: "https://apibay.org/q.php")!
-        parts.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "cat", value: "0")]
-        guard let url = parts.url else { error = "Invalid search"; return }
+        var parts = URLComponents(string: "https://apibay.org/precompiled/data_top100_recent.json")!
+        parts.queryItems = [URLQueryItem(name: "refresh", value: String(Int(Date().timeIntervalSince1970 / 60)))]
         do {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 20
-            request.cachePolicy = .reloadIgnoringLocalCacheData
+            var request = URLRequest(url: parts.url!); request.timeoutInterval = 25; request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
             let decoded = try JSONDecoder().decode([PirateBayResult].self, from: data)
-            results = decoded.filter { $0.id != "0" && !$0.infoHash.isEmpty }.sorted { $0.seedCount > $1.seedCount }
-            if results.isEmpty { error = "No results found" }
-        } catch {
-            results = []
-            self.error = "Search service is unavailable"
-        }
+            items = decoded.filter { $0.id != "0" }.sorted { $0.addedDate > $1.addedDate }
+        } catch { self.error = "Latest releases are unavailable"; items = [] }
     }
 }
 
 private struct PirateBayView: View {
     @ObservedObject var vm: AppViewModel
-    @StateObject private var model = PirateBaySearchModel()
-    @State private var query = ""
+    @StateObject private var model = PirateBayLatestModel()
+    @State private var section: PirateBaySection?
+    @State private var quality: PirateBayQuality?
     @State private var notice: String?
     @State private var addingID: String?
-    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationStack {
             ZStack {
-                AppTheme.bg.ignoresSafeArea()
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        searchBar
-                        if model.isLoading { ProgressView().tint(.green).padding(.top, 40) }
-                        if let error = model.error, !model.isLoading {
-                            Text(error).foregroundStyle(.secondary).padding(.top, 34)
-                        }
-                        ForEach(model.results) { item in resultCard(item) }
-                    }
-                    .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 105)
+                LinearGradient(colors: [AppTheme.bg, Color.indigo.opacity(0.12), AppTheme.bg], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
+                Group {
+                    if section == nil { sectionPicker }
+                    else if quality == nil { qualityPicker }
+                    else { resultsView }
                 }
+                .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .move(edge: .leading).combined(with: .opacity)))
             }
-            .navigationTitle("Torrent Search")
+            .navigationTitle(quality.map { "\(section?.rawValue ?? "") · \($0.rawValue)" } ?? section?.rawValue ?? "Discover")
             .navigationBarTitleDisplayMode(.large)
-            .overlay(alignment: .top) {
-                if let notice { Text(notice).font(.subheadline.bold()).padding(.horizontal, 18).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) }
+            .toolbar {
+                if section != nil {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button { withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) { if quality != nil { quality = nil } else { section = nil } } } label: {
+                            Label("Back", systemImage: "chevron.left").foregroundStyle(.green)
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) { Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(.green) } }
             }
+            .overlay(alignment: .top) { if let notice { Text(notice).font(.subheadline.bold()).padding(.horizontal, 18).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
+            .task { if model.items.isEmpty { await model.refresh() } }
         }
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search movies, shows, and files", text: $query)
-                .textInputAutocapitalization(.never).autocorrectionDisabled().focused($searchFocused)
-                .submitLabel(.search).onSubmit { Task { await model.search(query) } }
-            if !query.isEmpty { Button { query = ""; model.results = [] } label: { Image(systemName: "xmark.circle.fill") }.foregroundStyle(.secondary) }
-            Button { searchFocused = false; Task { await model.search(query) } } label: { Image(systemName: "arrow.right.circle.fill").font(.title2).foregroundStyle(.green) }
+    private var sectionPicker: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                Text("Choose a library").font(.subheadline.weight(.medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(PirateBaySection.allCases) { value in
+                    Button { withAnimation(.spring(response: 0.48, dampingFraction: 0.84)) { section = value } } label: {
+                        HStack(spacing: 18) {
+                            Image(systemName: value.icon).font(.system(size: 31, weight: .semibold)).frame(width: 64, height: 64).background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 20))
+                            VStack(alignment: .leading, spacing: 5) { Text(value.rawValue).font(.system(size: 27, weight: .black, design: .rounded)); Text("Latest releases").font(.subheadline).opacity(0.72) }
+                            Spacer(); Image(systemName: "chevron.right").font(.title3.bold())
+                        }
+                        .foregroundStyle(.white).padding(22).background(LinearGradient(colors: value.gradient, startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 30))
+                        .shadow(color: value.gradient[0].opacity(0.32), radius: 22, y: 12)
+                    }.buttonStyle(.plain)
+                }
+            }.padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 110)
         }
-        .padding(.horizontal, 14).padding(.vertical, 12).background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var qualityPicker: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            ForEach(PirateBayQuality.allCases) { value in
+                Button { withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { quality = value } } label: {
+                    VStack(spacing: 14) {
+                        Image(systemName: value.icon).font(.system(size: 38, weight: .semibold))
+                        Text(value.rawValue).font(.system(size: 34, weight: .black, design: .rounded))
+                        Text(value == .fullHD ? "Full HD" : "Ultra HD · 4K").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.white).frame(maxWidth: .infinity).padding(.vertical, 32).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32))
+                    .overlay(RoundedRectangle(cornerRadius: 32).stroke(LinearGradient(colors: section?.gradient ?? [.green, .blue], startPoint: .leading, endPoint: .trailing), lineWidth: 2))
+                }.buttonStyle(.plain)
+            }
+            Spacer()
+        }.padding(.horizontal, 22).padding(.bottom, 80)
+    }
+
+    private var filteredItems: [PirateBayResult] {
+        guard let section, let quality else { return [] }
+        return model.items.filter { section.accepts(Int($0.category) ?? 0) && quality.accepts($0.name) }
+    }
+
+    private var resultsView: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                if model.isLoading { ProgressView().tint(.green).padding(.top, 50) }
+                else if let error = model.error { Text(error).foregroundStyle(.secondary).padding(.top, 50) }
+                else if filteredItems.isEmpty { Text("No new \(quality?.rawValue ?? "") releases right now").foregroundStyle(.secondary).padding(.top, 50) }
+                ForEach(filteredItems) { resultCard($0) }
+            }.padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 105)
+        }.refreshable { await model.refresh() }
     }
 
     private func resultCard(_ item: PirateBayResult) -> some View {
@@ -205,29 +262,18 @@ private struct PirateBayView: View {
             HStack(spacing: 12) {
                 Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green)
                 Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange)
-                Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary)
-                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary); Spacer()
             }.font(.caption.bold())
             HStack(spacing: 10) {
-                Button {
-                    UIPasteboard.general.string = item.magnet; toast("Magnet copied")
-                } label: { Label("Copy", systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
-                    .buttonStyle(.bordered).tint(.white)
+                Button { UIPasteboard.general.string = item.magnet; toast("Magnet copied") } label: { Label("Copy", systemImage: "doc.on.doc").frame(maxWidth: .infinity) }.buttonStyle(.bordered)
                 Button {
                     addingID = item.id
-                    Task {
-                        let error = await vm.addMagnetToPikPak(item.magnet)
-                        addingID = nil; toast(error ?? "Added to PikPak")
-                    }
+                    Task { let error = await vm.addMagnetToPikPak(item.magnet); addingID = nil; toast(error ?? "Added to PikPak") }
                 } label: {
-                    if addingID == item.id { ProgressView().frame(maxWidth: .infinity) }
-                    else { Label("Add to PikPak", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity) }
-                }
-                .buttonStyle(.borderedProminent).tint(.green).disabled(addingID != nil)
+                    if addingID == item.id { ProgressView().frame(maxWidth: .infinity) } else { Label("Add to PikPak", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity) }
+                }.buttonStyle(.borderedProminent).tint(.green).disabled(addingID != nil)
             }
-        }
-        .padding(15).background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.07)))
+        }.padding(15).background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.07)))
     }
 
     private func toast(_ text: String) {
