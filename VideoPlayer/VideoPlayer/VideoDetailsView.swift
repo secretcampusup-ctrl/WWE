@@ -153,6 +153,7 @@ struct VideoDetailsView: View {
 
                         VStack(spacing: 12) {
                             primaryPlayButton
+                            vrPlayButton
 
                             HStack(spacing: 12) {
                                 actionButton(
@@ -682,6 +683,21 @@ struct VideoDetailsView: View {
         return String(format: "Play E%02d", value.episode)
     }
 
+    private var vrPlayButton: some View {
+        Button {
+            RoutedVideoPlayerView.forceNextVRPlayback()
+            playAndClose()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "view.3d").font(.system(size: 17, weight: .bold))
+                Text("Play in VR 360").font(.system(size: 16, weight: .bold))
+            }
+            .foregroundColor(.white).frame(maxWidth: .infinity).padding(.vertical, 14)
+            .background(LinearGradient(colors: [.purple, .blue], startPoint: .leading, endPoint: .trailing), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isBusy)
+    }
     private var primaryPlayButton: some View {
         Button(action: playAndClose) {
             HStack(spacing: 10) {

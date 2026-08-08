@@ -1590,8 +1590,25 @@ struct RoutedVideoPlayerView: View {
     var httpHeaders: [String: String]? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
+    private let forceVR: Bool
+
+    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+        self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
+        self.httpHeaders = httpHeaders; self.onProgress = onProgress
+        self.forceVR = Self.consumeForcedVRPlayback()
+    }
+
+    static func forceNextVRPlayback() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "force_next_vr_playback")
+    }
+
+    private static func consumeForcedVRPlayback() -> Bool {
+        let stamp = UserDefaults.standard.double(forKey: "force_next_vr_playback")
+        UserDefaults.standard.removeObject(forKey: "force_next_vr_playback")
+        return stamp > 0 && Date().timeIntervalSince1970 - stamp < 15
+    }
     var body: some View {
-        if Self.isVRVideo(url: url, title: title) {
+        if forceVR || Self.isVRVideo(url: url, title: title) {
             DedicatedVRPlayerView(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders, onProgress: onProgress)
         } else {
             VideoPlayerView(url: url, title: title, resumeAt: resumeAt, linkId: linkId, httpHeaders: httpHeaders, onProgress: onProgress)
@@ -1602,7 +1619,9 @@ struct RoutedVideoPlayerView: View {
         let raw = (title + " " + url.lastPathComponent).lowercased()
         let normalized = raw.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
         let tokens = Set(normalized.split { !$0.isLetter && !$0.isNumber }.map(String.init))
-        if !tokens.isDisjoint(with: ["vr", "360", "360vr", "equirectangular", "spherical", "sbs", "ou", "180vr"]) { return true }
+        if !tokens.isDisjoint(with: ["vr", "360", "360vr", "equirectangular", "spherical", "sbs", "ou", "180vr", "vr180", "3dh", "3dv", "oculus", "quest", "fisheye"]) { return true }
+        let knownResolutions = ["3840x1920", "4096x2048", "5760x2880", "7680x3840", "8192x4096"]
+        if knownResolutions.contains { raw.contains($0) } { return true }
         return raw.contains("side-by-side") || raw.contains("top-bottom") || raw.contains("projection=360")
     }
 }
