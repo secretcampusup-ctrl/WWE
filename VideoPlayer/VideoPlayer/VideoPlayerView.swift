@@ -153,7 +153,6 @@ struct VideoPlayerView: View {
                         }
                         Spacer()
                         Button {
-                            guard supportsVR360 else { return }
                             isVR360Mode.toggle()
                             scheduleAutoHide()
                         } label: {
@@ -318,7 +317,6 @@ struct VideoPlayerView: View {
             Spacer(minLength: 0)
 
             Button {
-                guard supportsVR360 else { return }
                 withAnimation(.easeInOut(duration: 0.25)) { isVR360Mode.toggle() }
                 scheduleAutoHide()
             } label: {
@@ -784,6 +782,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         loadingIndicator.startAnimating()
         let media = VLCMedia(url: url)
         media.addOption(":avcodec-hw=none")
+        if isVR360Mode { media.addOption(":projection-mode=1") }
         media.addOption(":network-caching=3000")
         media.addOption(":file-caching=1500")
         media.addOption(":drop-late-frames")
@@ -904,6 +903,12 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
         } else {
             motionManager.stopDeviceMotionUpdates()
+        }
+        if let restartURL = currentURL, mediaPlayer.media != nil {
+            let resume = max(0, Double(mediaPlayer.time.intValue) / 1000)
+            mediaPlayer.stop()
+            currentURL = nil
+            play(url: restartURL, resumeAt: resume)
         }
     }
 
