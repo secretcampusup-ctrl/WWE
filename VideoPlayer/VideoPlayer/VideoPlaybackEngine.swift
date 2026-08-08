@@ -70,9 +70,9 @@ final class VideoPlaybackEngine: ObservableObject {
     /// just for the queue, which is a common cause of stalls/jetsam on 8K content.
     /// Once actual resolution is known, high-res clips are trimmed down to
     /// `highResForwardBufferSeconds` (see the presentationSize observer below).
-    private let forwardBufferSeconds: TimeInterval = 300
+    private let forwardBufferSeconds: TimeInterval = 900
     /// Cap used once we know a clip is very high resolution (8K-class).
-    private let highResForwardBufferSeconds: TimeInterval = 30
+    private let highResForwardBufferSeconds: TimeInterval = 120
 
     /// Allow high bitrates needed for 4K (0 = no artificial cap).
     private let unlimitedPeakBitRate: Double = 0
@@ -636,9 +636,9 @@ final class VideoPlaybackEngine: ObservableObject {
         let state = ProcessInfo.processInfo.thermalState
         switch state {
         case .serious, .critical:
-            item.preferredPeakBitRate = thermalThrottledPeakBitRate
+            item.preferredPeakBitRate = unlimitedPeakBitRate
             if #available(iOS 11.0, *) {
-                item.preferredMaximumResolution = thermalThrottledMaxResolution
+                item.preferredMaximumResolution = .zero
             }
         case .nominal, .fair:
             fallthrough

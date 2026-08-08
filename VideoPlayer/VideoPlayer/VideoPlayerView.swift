@@ -802,7 +802,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let media = VLCMedia(url: url)
         media.addOption(":avcodec-hw=none")
         if isVR360Mode { media.addOption(":projection-mode=1") }
-        media.addOption(":network-caching=3000")
+        media.addOption(":network-caching=10000")
+        media.addOption(":http-reconnect")
         media.addOption(":file-caching=1500")
         media.addOption(":drop-late-frames")
         mediaPlayer.drawable = videoView
@@ -1793,7 +1794,8 @@ private final class DedicatedVRSurfaceView: UIView {
         let media = VLCMedia(url: url)
         media.addOption(":projection-mode=1")
         media.addOption(":avcodec-hw=none")
-        media.addOption(":network-caching=2500")
+        media.addOption(":network-caching=10000")
+        media.addOption(":http-reconnect")
         media.addOption(":file-caching=1500")
         if let agent = headers?["User-Agent"] { media.addOption(":http-user-agent=\(agent)") }
         if let referer = headers?["Referer"] ?? headers?["Referrer"] { media.addOption(":http-referrer=\(referer)") }

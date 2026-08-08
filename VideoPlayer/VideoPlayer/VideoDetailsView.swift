@@ -696,7 +696,6 @@ struct VideoDetailsView: View {
             .background(LinearGradient(colors: [.purple, .blue], startPoint: .leading, endPoint: .trailing), in: Capsule())
         }
         .buttonStyle(.plain)
-        .disabled(isBusy)
     }
     private var primaryPlayButton: some View {
         Button(action: playAndClose) {
