@@ -51,7 +51,22 @@ struct VideoPlayerView: View {
         let label = (title + " " + url.lastPathComponent).lowercased()
         return ["360", "vr", "equirect", "spherical", "sbs", "side-by-side"].contains { label.contains($0) }
     }
-    private var supportsVR360: Bool { false }
+    /// Real detection, not a stub. An equirectangular 360° source is ~2:1
+    /// (width:height) — a far more reliable signal than filenames, since a
+    /// huge share of real VR files never carry a "vr"/"360" hint in their
+    /// name at all (re-encoded, downloaded, or renamed along the way). Once
+    /// the decoder reports real dimensions we check the ratio; before that
+    /// (or for packed formats where ratio alone isn't distinctive) we still
+    /// honor the filename hint so detection can fire immediately on appear.
+    private var supportsVR360: Bool {
+        let width = usesMKVPlayer ? mkvControls.videoWidth : Int(engine.resolutionWidth)
+        let height = usesMKVPlayer ? mkvControls.videoHeight : Int(engine.resolutionHeight)
+        if width > 0, height > 0 {
+            let ratio = Double(width) / Double(height)
+            if ratio > 1.85 && ratio < 2.15 { return true }
+        }
+        return filenameSuggestsVR360
+    }
     /// Wires the detection above into the actual toggle. Runs at most once per
     /// loaded video (per `vrAutoDetected`) and only when the user hasn't already
     /// touched the VR button themselves (per `userOverrideVR`) — this was
@@ -170,6 +185,7 @@ struct VideoPlayerView: View {
                 }
                         }
                         Spacer()
+                        vrToggleButton
                         orientationLockButton
 
                         Button {
@@ -332,6 +348,8 @@ struct VideoPlayerView: View {
 
             Spacer(minLength: 0)
 
+            vrToggleButton
+
             orientationLockButton
 
             Button {
@@ -457,6 +475,31 @@ struct VideoPlayerView: View {
             showControls.toggle()
         }
         if showControls { scheduleAutoHide() } else { hideTask?.cancel() }
+    }
+
+    /// Manual, always-present VR toggle. Auto-detection (filename hint +
+    /// aspect-ratio once dimensions load) is only ever a heuristic — it can
+    /// miss an oddly-named file, or misfire on an ordinary widescreen clip.
+    /// This button is the guaranteed fallback: whatever the detector
+    /// decided, the person can flip it themselves in one tap, on every
+    /// video, every time. Marking `userOverrideVR` freezes auto-detection
+    /// so it never fights the explicit choice for the rest of this playback.
+    private var vrToggleButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isVR360Mode.toggle()
+            }
+            userOverrideVR = true
+            vrAutoDetected = true
+            scheduleAutoHide()
+        } label: {
+            Image(systemName: "view.3d")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(isVR360Mode ? .green : .white)
+                .frame(width: 40, height: 40)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .accessibilityLabel(isVR360Mode ? "Switch to normal view" : "Switch to VR 360° view")
     }
 
     private var orientationLockButton: some View {
@@ -1606,7 +1649,13 @@ struct RoutedVideoPlayerView: View {
     private static func consumeForcedVRPlayback() -> Bool {
         let stamp = UserDefaults.standard.double(forKey: "force_next_vr_playback")
         UserDefaults.standard.removeObject(forKey: "force_next_vr_playback")
-        return stamp > 0 && Date().timeIntervalSince1970 - stamp < 15
+        // "Play in VR 360" is tapped *before* the link is resolved — for
+        // PikPak/Offcloud/WebDAV sources that resolution is a real network
+        // round trip and can easily take longer than a few seconds. A short
+        // window here silently drops the user's choice and the video opens
+        // flat with no VR anywhere in sight. 10 minutes comfortably covers
+        // slow resolves while still expiring if the flag is ever abandoned.
+        return stamp > 0 && Date().timeIntervalSince1970 - stamp < 600
     }
     var body: some View {
         if forceVR || Self.isVRVideo(url: url, title: title) {
@@ -1620,10 +1669,32 @@ struct RoutedVideoPlayerView: View {
         let raw = (title + " " + url.lastPathComponent).lowercased()
         let normalized = raw.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
         let tokens = Set(normalized.split { !$0.isLetter && !$0.isNumber }.map(String.init))
-        if !tokens.isDisjoint(with: ["vr", "360", "360vr", "equirectangular", "spherical", "sbs", "ou", "180vr", "vr180", "3dh", "3dv", "oculus", "quest", "fisheye"]) { return true }
-        let knownResolutions = ["3840x1920", "4096x2048", "5760x2880", "7680x3840", "8192x4096"]
-        if knownResolutions.contains { raw.contains($0) } { return true }
-        return raw.contains("side-by-side") || raw.contains("top-bottom") || raw.contains("projection=360")
+        let vrTokens: Set<String> = [
+            "vr", "360", "360vr", "vr360", "equirectangular", "equirect", "spherical",
+            "sbs", "ou", "tb", "180vr", "vr180", "3dh", "3dv", "oculus", "quest",
+            "fisheye", "monoscopic", "stereoscopic", "psvr", "gearvr", "skybox",
+            "insta360", "theta", "180", "8k180", "6k180", "5k180"
+        ]
+        if !tokens.isDisjoint(with: vrTokens) { return true }
+        if raw.contains("side-by-side") || raw.contains("top-bottom") || raw.contains("projection=360")
+            || raw.contains("360°") || raw.contains("360 degree") { return true }
+        // Resolution tags ("5760x2880", "7680x3840", ...) show up in real
+        // filenames far more often than the word "vr" or "360" ever does.
+        // Instead of matching a short fixed list, catch any WxH-looking
+        // token and flag it when its ratio lands on the ~2:1 equirectangular
+        // band — this is what makes detection work on files whose names
+        // were never hand-tagged as VR in the first place.
+        if let regex = try? NSRegularExpression(pattern: "(\\d{3,5})x(\\d{3,5})") {
+            let fullRange = NSRange(raw.startIndex..., in: raw)
+            for match in regex.matches(in: raw, range: fullRange) {
+                guard let wRange = Range(match.range(at: 1), in: raw),
+                      let hRange = Range(match.range(at: 2), in: raw),
+                      let w = Double(raw[wRange]), let h = Double(raw[hRange]), h > 0 else { continue }
+                let ratio = w / h
+                if ratio > 1.85 && ratio < 2.15 { return true }
+            }
+        }
+        return false
     }
 }
 
