@@ -872,7 +872,7 @@ struct DownloadManagerView: View {
         }
         .preferredColorScheme(.dark)
         .fullScreenCover(item: $playback) { item in
-            VideoPlayerView(url: item.url, title: item.title)
+            RoutedVideoPlayerView(url: item.url, title: item.title)
         }
     }
 

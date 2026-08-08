@@ -86,7 +86,7 @@ struct RecentVideosView: View {
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             }) {
                 if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
-                    VideoPlayerView(
+                    RoutedVideoPlayerView(
                         url: url,
                         title: file.name,
                         resumeAt: vm.nowPlayingResumeAt,

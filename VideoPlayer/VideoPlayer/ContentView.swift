@@ -65,7 +65,7 @@ struct ContentView: View {
                 dismissKeyboard()
             }) {
                 if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
-                    VideoPlayerView(
+                    RoutedVideoPlayerView(
                         url: url,
                         title: file.name,
                         resumeAt: vm.nowPlayingResumeAt,
@@ -918,7 +918,7 @@ struct FavoritesAllView: View {
         .preferredColorScheme(.dark)
         .fullScreenCover(isPresented: $showPlayer) {
             if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
-                VideoPlayerView(
+                RoutedVideoPlayerView(
                     url: url,
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
@@ -1098,7 +1098,7 @@ struct PlaylistAllView: View {
         .preferredColorScheme(.dark)
         .fullScreenCover(isPresented: $showPlayer) {
             if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
-                VideoPlayerView(
+                RoutedVideoPlayerView(
                     url: url,
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,

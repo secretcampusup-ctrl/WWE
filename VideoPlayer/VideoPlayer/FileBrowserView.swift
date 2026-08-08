@@ -94,7 +94,7 @@ struct FileBrowserView: View {
         }
         .fullScreenCover(isPresented: $showingPlayer) {
             if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
-                VideoPlayerView(
+                RoutedVideoPlayerView(
                     url: url,
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
