@@ -1,0 +1,9 @@
+platform :ios, '16.0'
+
+target 'VideoPlayer' do
+  use_frameworks!
+  # Required by VideoPlayerView (MKV / VLC path). Keep even when AVPlayer is default.
+  pod 'MobileVLCKit'
+  pod 'Kingfisher', '~> 8.0'
+  pod 'KingfisherWebP', '~> 1.7'
+end

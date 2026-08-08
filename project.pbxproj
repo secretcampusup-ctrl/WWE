@@ -1,0 +1,377 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000049 /* WebLoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000049 /* WebLoginView.swift */; };
+		AA000001 /* VideoPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001 /* VideoPlayerApp.swift */; };
+		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000002 /* ContentView.swift */; };
+		AA000003 /* VideoPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000003 /* VideoPlayerView.swift */; };
+		AA000004 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000004 /* AppViewModel.swift */; };
+		AA000005 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000005 /* Models.swift */; };
+		AA000006 /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000006 /* AddServerView.swift */; };
+		AA000007 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000007 /* FileBrowserView.swift */; };
+		AA000008 /* WebDAVClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000008 /* WebDAVClient.swift */; };
+		AA000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB000009 /* Assets.xcassets */; };
+		AA000010 /* VideoPlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000011 /* VideoPlaybackEngine.swift */; };
+		AA000011 /* VideoThumbnailLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000012 /* VideoThumbnailLoader.swift */; };
+		AA000012 /* LinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000013 /* LinkResolver.swift */; };
+		AA000015 /* WebDAVSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000016 /* WebDAVSettingsView.swift */; };
+		AA000016 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000017 /* MainTabView.swift */; };
+		AA000017 /* RecentVideosView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000018 /* RecentVideosView.swift */; };
+		AA000020 /* OffcloudClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000021 /* OffcloudClient.swift */; };
+		AA000021 /* OffcloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000022 /* OffcloudView.swift */; };
+		AA000022 /* VideoDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000023 /* VideoDetailsView.swift */; };
+		AA000023 /* BackgroundVideoCacheManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000024 /* BackgroundVideoCacheManager.swift */; };
+		AA000024 /* VideoDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000025 /* VideoDownloadManager.swift */; };
+		AA000050 /* HLSSegmentDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000050 /* HLSSegmentDownloader.swift */; };
+		AA000025 /* ThumbnailDiagnosticScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000026 /* ThumbnailDiagnosticScreen.swift */; };
+		AA000026 /* PikPakLinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000027 /* PikPakLinkResolver.swift */; };
+		AA000027 /* PikPakView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000028 /* PikPakView.swift */; };
+		AA000028 /* PikPakClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000029 /* PikPakClient.swift */; };
+		AA000029 /* PikPakLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000030 /* PikPakLibraryView.swift */; };
+		AA000030 /* PikPakWebDAVView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000031 /* PikPakWebDAVView.swift */; };
+		AA000036 /* PikPakAutoSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000037 /* PikPakAutoSyncManager.swift */; };
+		AA000037 /* PikPakAutoSyncSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000038 /* PikPakAutoSyncSettingsView.swift */; };
+		AA000031 /* MediaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000032 /* MediaView.swift */; };
+		AA000032 /* MediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000033 /* MediaModels.swift */; };
+		AA000033 /* MediaRSSService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000034 /* MediaRSSService.swift */; };
+		AA000034 /* MediaSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000035 /* MediaSettingsView.swift */; };
+		AA000035 /* LinkResolver+CleanTitle.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000036 /* LinkResolver+CleanTitle.swift */; };
+
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		BB000049 /* WebLoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebLoginView.swift; sourceTree = "<group>"; };
+		BB000001 /* VideoPlayerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayerApp.swift; sourceTree = "<group>"; };
+		BB000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		BB000003 /* VideoPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayerView.swift; sourceTree = "<group>"; };
+		BB000004 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		BB000005 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		BB000006 /* AddServerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddServerView.swift; sourceTree = "<group>"; };
+		BB000007 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserView.swift; sourceTree = "<group>"; };
+		BB000008 /* WebDAVClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebDAVClient.swift; sourceTree = "<group>"; };
+		BB000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		BB000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB000011 /* VideoPlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlaybackEngine.swift; sourceTree = "<group>"; };
+		BB000012 /* VideoThumbnailLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoThumbnailLoader.swift; sourceTree = "<group>"; };
+		BB000013 /* LinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkResolver.swift; sourceTree = "<group>"; };
+		BB000016 /* WebDAVSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebDAVSettingsView.swift; sourceTree = "<group>"; };
+		BB000017 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		BB000018 /* RecentVideosView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentVideosView.swift; sourceTree = "<group>"; };
+		BB000021 /* OffcloudClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OffcloudClient.swift; sourceTree = "<group>"; };
+		BB000022 /* OffcloudView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OffcloudView.swift; sourceTree = "<group>"; };
+		BB000023 /* VideoDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDetailsView.swift; sourceTree = "<group>"; };
+		BB000024 /* BackgroundVideoCacheManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundVideoCacheManager.swift; sourceTree = "<group>"; };
+		BB000025 /* VideoDownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDownloadManager.swift; sourceTree = "<group>"; };
+		BB000050 /* HLSSegmentDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSSegmentDownloader.swift; sourceTree = "<group>"; };
+		BB000026 /* ThumbnailDiagnosticScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailDiagnosticScreen.swift; sourceTree = "<group>"; };
+		BB000027 /* PikPakLinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakLinkResolver.swift; sourceTree = "<group>"; };
+		BB000028 /* PikPakView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakView.swift; sourceTree = "<group>"; };
+		BB000029 /* PikPakClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakClient.swift; sourceTree = "<group>"; };
+		BB000030 /* PikPakLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakLibraryView.swift; sourceTree = "<group>"; };
+		BB000031 /* PikPakWebDAVView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakWebDAVView.swift; sourceTree = "<group>"; };
+		BB000037 /* PikPakAutoSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakAutoSyncManager.swift; sourceTree = "<group>"; };
+		BB000038 /* PikPakAutoSyncSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakAutoSyncSettingsView.swift; sourceTree = "<group>"; };
+		BB000032 /* MediaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaView.swift; sourceTree = "<group>"; };
+		BB000033 /* MediaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaModels.swift; sourceTree = "<group>"; };
+		BB000034 /* MediaRSSService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaRSSService.swift; sourceTree = "<group>"; };
+		BB000035 /* MediaSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaSettingsView.swift; sourceTree = "<group>"; };
+		BB000036 /* LinkResolver+CleanTitle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LinkResolver+CleanTitle.swift"; sourceTree = "<group>"; };
+
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		DD000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		EE000001 = {
+			isa = PBXGroup;
+			children = (
+				EE000002 /* VideoPlayer */,
+				EE000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		EE000002 /* VideoPlayer */ = {
+			isa = PBXGroup;
+			children = (
+				BB000001 /* VideoPlayerApp.swift */,
+				BB000002 /* ContentView.swift */,
+				BB000003 /* VideoPlayerView.swift */,
+				BB000004 /* AppViewModel.swift */,
+				BB000005 /* Models.swift */,
+				BB000006 /* AddServerView.swift */,
+				BB000007 /* FileBrowserView.swift */,
+				BB000008 /* WebDAVClient.swift */,
+				BB000011 /* VideoPlaybackEngine.swift */,
+				BB000012 /* VideoThumbnailLoader.swift */,
+				BB000013 /* LinkResolver.swift */,
+				BB000036 /* LinkResolver+CleanTitle.swift */,
+				BB000016 /* WebDAVSettingsView.swift */,
+				BB000017 /* MainTabView.swift */,
+				BB000018 /* RecentVideosView.swift */,
+				BB000021 /* OffcloudClient.swift */,
+				BB000022 /* OffcloudView.swift */,
+				BB000023 /* VideoDetailsView.swift */,
+				BB000024 /* BackgroundVideoCacheManager.swift */,
+				BB000025 /* VideoDownloadManager.swift */,
+				BB000050 /* HLSSegmentDownloader.swift */,
+				BB000049 /* WebLoginView.swift */,
+				BB000026 /* ThumbnailDiagnosticScreen.swift */,
+				BB000027 /* PikPakLinkResolver.swift */,
+				BB000028 /* PikPakView.swift */,
+				BB000029 /* PikPakClient.swift */,
+				BB000030 /* PikPakLibraryView.swift */,
+				BB000031 /* PikPakWebDAVView.swift */,
+				BB000037 /* PikPakAutoSyncManager.swift */,
+				BB000038 /* PikPakAutoSyncSettingsView.swift */,
+				BB000032 /* MediaView.swift */,
+				BB000033 /* MediaModels.swift */,
+				BB000034 /* MediaRSSService.swift */,
+				BB000035 /* MediaSettingsView.swift */,
+				BB000009 /* Assets.xcassets */,
+				BB000010 /* Info.plist */,
+			);
+			path = VideoPlayer;
+			sourceTree = "<group>";
+		};
+		EE000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CC000001 /* VideoPlayer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FF000001 /* VideoPlayer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FF000004 /* Build configuration list for PBXNativeTarget "VideoPlayer" */;
+			buildPhases = (
+				FF000002 /* Sources */,
+				DD000001 /* Frameworks */,
+				FF000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VideoPlayer;
+			productName = VideoPlayer;
+			productReference = CC000001 /* VideoPlayer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		FF000010 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					FF000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = FF000011 /* Build configuration list for PBXProject "VideoPlayer" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = EE000001;
+			productRefGroup = EE000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FF000001 /* VideoPlayer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FF000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000009 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FF000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001 /* VideoPlayerApp.swift in Sources */,
+				AA000002 /* ContentView.swift in Sources */,
+				AA000003 /* VideoPlayerView.swift in Sources */,
+				AA000004 /* AppViewModel.swift in Sources */,
+				AA000005 /* Models.swift in Sources */,
+				AA000006 /* AddServerView.swift in Sources */,
+				AA000007 /* FileBrowserView.swift in Sources */,
+				AA000008 /* WebDAVClient.swift in Sources */,
+				AA000010 /* VideoPlaybackEngine.swift in Sources */,
+				AA000011 /* VideoThumbnailLoader.swift in Sources */,
+				AA000012 /* LinkResolver.swift in Sources */,
+				AA000015 /* WebDAVSettingsView.swift in Sources */,
+				AA000016 /* MainTabView.swift in Sources */,
+				AA000017 /* RecentVideosView.swift in Sources */,
+				AA000020 /* OffcloudClient.swift in Sources */,
+				AA000021 /* OffcloudView.swift in Sources */,
+				AA000022 /* VideoDetailsView.swift in Sources */,
+				AA000023 /* BackgroundVideoCacheManager.swift in Sources */,
+				AA000024 /* VideoDownloadManager.swift in Sources */,
+				AA000050 /* HLSSegmentDownloader.swift in Sources */,
+				AA000049 /* WebLoginView.swift in Sources */,
+				AA000025 /* ThumbnailDiagnosticScreen.swift in Sources */,
+				AA000026 /* PikPakLinkResolver.swift in Sources */,
+				AA000027 /* PikPakView.swift in Sources */,
+				AA000028 /* PikPakClient.swift in Sources */,
+				AA000029 /* PikPakLibraryView.swift in Sources */,
+				AA000030 /* PikPakWebDAVView.swift in Sources */,
+				AA000036 /* PikPakAutoSyncManager.swift in Sources */,
+				AA000037 /* PikPakAutoSyncSettingsView.swift in Sources */,
+				AA000031 /* MediaView.swift in Sources */,
+				AA000032 /* MediaModels.swift in Sources */,
+				AA000033 /* MediaRSSService.swift in Sources */,
+				AA000034 /* MediaSettingsView.swift in Sources */,
+				AA000035 /* LinkResolver+CleanTitle.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		CFG00001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		CFG00002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		CFG00003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = VideoPlayer/Info.plist;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mortaza.minoz.VideoPlayer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CFG00004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = VideoPlayer/Info.plist;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mortaza.minoz.VideoPlayer;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FF000011 /* Build configuration list for PBXProject "VideoPlayer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFG00001 /* Debug */,
+				CFG00002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FF000004 /* Build configuration list for PBXNativeTarget "VideoPlayer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFG00003 /* Debug */,
+				CFG00004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = FF000010 /* Project object */;
+}

@@ -1,0 +1,1548 @@
+import SwiftUI
+import SceneKit
+import CoreMotion
+import AVKit
+import AVFoundation
+import UIKit
+import MobileVLCKit
+
+// MARK: - Player screen
+
+struct VideoPlayerView: View {
+    let url: URL
+    let title: String
+    var resumeAt: Double = 0
+    var linkId: UUID? = nil
+    /// Optional HTTP headers (WebDAV Basic Auth, etc.)
+    var httpHeaders: [String: String]? = nil
+    var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
+
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var engine = VideoPlaybackEngine()
+    @State private var showControls = true
+    @State private var isScrubbing = false
+    @State private var scrubProgress: Double = 0
+    @State private var hideTask: Task<Void, Never>?
+    @State private var isFillMode = false
+    @State private var isVR360Mode = false
+    @State private var isOrientationLocked = false
+    @State private var fillModeToken = 0
+    @State private var useExtendedPlayer = false
+    @State private var showExtendedPlayerPrompt = false
+    @State private var mkvFillMode = false
+    @State private var mkvResetZoomToken = 0
+    @StateObject private var mkvControls = MKVPlaybackControls()
+
+    // Temporary test mode: every file uses the main Apple player only.
+    // The MKV player remains in the project but is not selected.
+    private var usesMKVPlayer: Bool {
+        if useExtendedPlayer { return true }
+        let ext = url.pathExtension.lowercased()
+        return ["mkv", "webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(ext)
+    }
+    private var supportsVR360: Bool {
+        let label = (title + " " + url.lastPathComponent).lowercased()
+        if ["360", "vr", "equirect", "spherical", "sbs", "side-by-side"].contains(where: label.contains) { return true }
+        let width = usesMKVPlayer ? mkvControls.videoWidth : engine.resolutionWidth
+        let height = usesMKVPlayer ? mkvControls.videoHeight : engine.resolutionHeight
+        guard width >= 3000, height > 0 else { return false }
+        let ratio = Double(width) / Double(height)
+        return (1.85...2.15).contains(ratio)
+    }
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            // Full-bleed video — never reflows when chrome toggles.
+            if usesMKVPlayer {
+                MKVVideoPlayerView(
+                    url: url,
+                    controls: mkvControls,
+                    resumeAt: resumeAt,
+                    isFillMode: mkvFillMode,
+                    resetZoomToken: mkvResetZoomToken,
+                    isVR360Mode: isVR360Mode
+                )
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
+                    .ignoresSafeArea()
+            } else {
+            if isVR360Mode {
+                VR360PlayerView(player: engine.player) {
+                    withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+                    scheduleAutoHide()
+                }
+                .ignoresSafeArea()
+            } else {
+                ZoomableVideoView(
+                    player: engine.player,
+                    resetToken: engine.resetZoomToken,
+                    fillModeToken: fillModeToken,
+                    isFillMode: isFillMode,
+                    videoSize: CGSize(width: engine.resolutionWidth, height: engine.resolutionHeight),
+                    onSingleTap: {
+                        withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+                        scheduleAutoHide()
+                    },
+                    onInteractionChange: { engine.setInteracting($0) },
+                    onDoubleTap: {
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            isFillMode.toggle(); fillModeToken += 1
+                        }
+                    }
+                )
+                .equatable()
+                .ignoresSafeArea()
+            }
+            }
+
+            if !usesMKVPlayer, engine.isBuffering {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .padding(18)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .allowsHitTesting(false)
+            }
+
+            if !usesMKVPlayer, let error = engine.errorMessage {
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title)
+                        .foregroundColor(.yellow)
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                    Button("Retry") { engine.load(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders) }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                }
+                .padding(20)
+                .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+
+            // Chrome only — empty regions do NOT intercept touches (no full-screen hit target).
+            if usesMKVPlayer, showControls {
+                VStack {
+                    HStack {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 40, height: 40)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(VideoTitleFormatter.title(from: title))
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                            HStack(spacing: 6) {
+                    ResolutionBadgeView(tier: engine.resolutionTier, compact: true)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.15), in: Capsule())
+                    if resumeAt > 3 {
+                        Text("Resumed")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.orange)
+                    }
+                }
+                        }
+                        Spacer()
+                        Button {
+                            guard supportsVR360 else { return }
+                            isVR360Mode.toggle()
+                            scheduleAutoHide()
+                        } label: {
+                            Image(systemName: isVR360Mode ? "visionpro.fill" : "visionpro")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(isVR360Mode ? .green : .white)
+                                .frame(width: 40, height: 40)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        orientationLockButton
+
+                        Button {
+                            mkvFillMode.toggle()
+                            scheduleAutoHide()
+                        } label: {
+                            Image(systemName: mkvFillMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 40, height: 40)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        Menu {
+                            Button("0.5×") { mkvControls.setRate(0.5) }
+                            Button("1×") { mkvControls.setRate(1) }
+                            Button("1.5×") { mkvControls.setRate(1.5) }
+                            Button("2×") { mkvControls.setRate(2) }
+                            Divider()
+                            Button(mkvFillMode ? "Aspect Fit" : "Fill Screen") { mkvFillMode.toggle() }
+                            Button("Reset Zoom") { mkvResetZoomToken += 1 }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 40, height: 40)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    Spacer()
+                    VStack(spacing: 12) {
+                        HStack(spacing: 34) {
+                            Button { mkvControls.skip(by: -15) } label: {
+                                Image(systemName: "gobackward.15")
+                                    .font(.system(size: 25, weight: .medium))
+                                    .foregroundColor(.white)
+                            }
+                            Button { mkvControls.togglePlayback() } label: {
+                                Image(systemName: mkvControls.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 23, weight: .semibold))
+                                    .foregroundColor(.black)
+                                    .frame(width: 52, height: 52)
+                                    .background(Color.white, in: Circle())
+                            }
+                            Button { mkvControls.skip(by: 15) } label: {
+                                Image(systemName: "goforward.15")
+                                    .font(.system(size: 25, weight: .medium))
+                                    .foregroundColor(.white)
+                            }
+                        }
+                        InstantSeekBar(
+                            progress: isScrubbing ? scrubProgress : mkvControls.displayProgress,
+                            bufferProgress: mkvControls.displayProgress,
+                            currentLabel: isScrubbing
+                                ? mkvControls.formattedTime(forFraction: scrubProgress)
+                                : mkvControls.currentTimeFormatted,
+                            durationLabel: mkvControls.durationFormatted,
+                            onSeek: { value in
+                                mkvControls.seek(to: value)
+                                isScrubbing = false
+                                scheduleAutoHide()
+                            },
+                            onScrubbing: { value, active in
+                                isScrubbing = active
+                                scrubProgress = value
+                            }
+                        )
+                        .frame(height: SeekBarContainerView.preferredHeight)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 26)
+                }
+            } else if showControls {
+                VStack(spacing: 0) {
+                    topOverlay
+                    Spacer(minLength: 0)
+                        .allowsHitTesting(false)
+                    bottomOverlay
+                }
+
+            }
+        }
+        .statusBar(hidden: true)
+        .navigationBarHidden(true)
+        .onAppear {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            engine.onProgressTick = { seconds, duration, w, h in
+                onProgress?(seconds, duration, w, h)
+            }
+            if !usesMKVPlayer {
+                engine.load(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
+            }
+            scheduleAutoHide()
+        }
+        .onDisappear {
+            hideTask?.cancel()
+            ScreenOrientationLock.unlock()
+            isOrientationLocked = false
+            if !usesMKVPlayer {
+                if engine.durationSeconds > 0 {
+                    onProgress?(engine.currentSeconds, engine.durationSeconds, engine.resolutionWidth, engine.resolutionHeight)
+                }
+                engine.cleanup()
+            } else if mkvControls.durationSeconds > 0 {
+                onProgress?(mkvControls.currentSeconds, mkvControls.durationSeconds, mkvControls.videoWidth, mkvControls.videoHeight)
+            }
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+        .onChange(of: engine.errorMessage) { error in
+            guard error != nil, !usesMKVPlayer else { return }
+            engine.cleanup()
+            useExtendedPlayer = true
+        }
+        .onChange(of: isScrubbing) { scrubbing in
+            if scrubbing { hideTask?.cancel() } else { scheduleAutoHide() }
+        }
+    }
+
+    // MARK: - Top chrome
+
+    private var topOverlay: some View {
+        HStack(spacing: 12) {
+            Button {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 40, height: 40)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(VideoTitleFormatter.title(from: title))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    ResolutionBadgeView(tier: engine.resolutionTier, compact: true)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.15), in: Capsule())
+                    if resumeAt > 3 {
+                        Text("Resumed")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                guard supportsVR360 else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { isVR360Mode.toggle() }
+                scheduleAutoHide()
+            } label: {
+                Image(systemName: isVR360Mode ? "visionpro.fill" : "visionpro")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(isVR360Mode ? .green : .white)
+                    .frame(width: 40, height: 40)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .accessibilityLabel(isVR360Mode ? "Disable 360 VR" : "Enable 360 VR")
+            orientationLockButton
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    isFillMode.toggle()
+                    fillModeToken += 1
+                }
+                scheduleAutoHide()
+            } label: {
+                Image(systemName: isFillMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 40, height: 40)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            Menu {
+                Button("0.5×") { engine.setRate(0.5) }
+                Button("1×") { engine.setRate(1.0) }
+                Button("1.5×") { engine.setRate(1.5) }
+                Button("2×") { engine.setRate(2.0) }
+                Divider()
+                Button(isFillMode ? "Aspect Fit" : "Fill Screen") {
+                    isFillMode.toggle()
+                    fillModeToken += 1
+                }
+                Button("Reset Zoom") { engine.resetZoomToken += 1 }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 40, height: 40)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 16)
+        .background(
+            LinearGradient(
+                colors: [Color.black.opacity(0.72), Color.black.opacity(0)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .top)
+            .allowsHitTesting(false)
+        )
+    }
+
+    // MARK: - Bottom chrome
+
+    private var bottomOverlay: some View {
+        VStack(spacing: 0) {
+            // Transport — above the timeline
+            HStack(spacing: 36) {
+                Button { engine.skipBackward(); scheduleAutoHide() } label: {
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundColor(.white)
+                        .frame(width: 48, height: 48)
+                }
+                Button { engine.togglePlayPause(); scheduleAutoHide() } label: {
+                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundColor(.black)
+                        .frame(width: 64, height: 64)
+                        .background(
+                            LinearGradient(
+                                colors: [Color.white, Color.white.opacity(0.9)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            in: Circle()
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                }
+                Button { engine.skipForward(); scheduleAutoHide() } label: {
+                    Image(systemName: "goforward.15")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundColor(.white)
+                        .frame(width: 48, height: 48)
+                }
+            }
+            .padding(.top, 10)
+            .padding(.bottom, 12)
+
+            // Timeline
+            InstantSeekBar(
+                progress: isScrubbing ? scrubProgress : engine.progress,
+                bufferProgress: Double(engine.bufferPercent) / 100,
+                currentLabel: isScrubbing
+                    ? engine.formattedTime(forFraction: scrubProgress)
+                    : engine.currentTimeFormatted,
+                durationLabel: engine.durationFormatted,
+                onSeek: { value in
+                    scrubProgress = value
+                    isScrubbing = false
+                    engine.seek(to: value)
+                    scheduleAutoHide()
+                },
+                onScrubbing: { value, active in
+                    isScrubbing = active
+                    scrubProgress = value
+                }
+            )
+            .frame(height: SeekBarContainerView.preferredHeight)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 18)
+        }
+        .background(
+            LinearGradient(
+                colors: [Color.black.opacity(0.82), Color.black.opacity(0)],
+                startPoint: .bottom,
+                endPoint: .top
+            )
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
+        )
+    }
+
+    private func toggleMKVControls() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showControls.toggle()
+        }
+        if showControls { scheduleAutoHide() } else { hideTask?.cancel() }
+    }
+
+    private var orientationLockButton: some View {
+        Button {
+            if isOrientationLocked {
+                ScreenOrientationLock.unlock()
+                isOrientationLocked = false
+            } else if ScreenOrientationLock.lockToCurrentOrientation() {
+                isOrientationLocked = true
+            }
+            scheduleAutoHide()
+        } label: {
+            Image(systemName: isOrientationLocked ? "lock.fill" : "lock.open.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(isOrientationLocked ? .cyan : .white)
+                .frame(width: 40, height: 40)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .accessibilityLabel(isOrientationLocked ? "Unlock screen rotation" : "Lock screen rotation")
+    }
+
+    private func scheduleAutoHide() {
+        hideTask?.cancel()
+        guard showControls else { return }
+        hideTask = Task {
+            try? await Task.sleep(nanoseconds: 4_500_000_000)
+            guard !Task.isCancelled, !isScrubbing else { return }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    showControls = false
+                }
+            }
+        }
+    }
+
+}
+
+// MARK: - MKV playback
+
+@MainActor
+private final class MKVPlaybackControls: ObservableObject {
+    @Published var progress: Double = 0
+    @Published private(set) var requestedProgress: Double?
+    @Published var isPlaying = false
+    @Published var currentSeconds: Double = 0
+    @Published var durationSeconds: Double = 0
+    @Published var videoWidth = 0
+    @Published var videoHeight = 0
+    @Published var resolutionLabel = "MKV"
+    weak var surface: MKVPlayerSurface?
+
+    var displayProgress: Double { requestedProgress ?? progress }
+    var currentTimeFormatted: String { formatTime(currentSeconds) }
+    var durationFormatted: String { formatTime(durationSeconds) }
+    func formattedTime(forFraction fraction: Double) -> String {
+        formatTime(durationSeconds * min(1, max(0, fraction)))
+    }
+
+    func togglePlayback() { surface?.togglePlaybackFromControls() }
+    func seek(to fraction: Double) {
+        let target = min(1, max(0, fraction))
+        requestedProgress = target
+        surface?.seek(to: target)
+    }
+    func updateProgress(_ value: Double) {
+        progress = value
+        if let requestedProgress, abs(value - requestedProgress) < 0.025 {
+            self.requestedProgress = nil
+        }
+    }
+    func updateTime(current: Double, duration: Double) {
+        currentSeconds = max(0, current)
+        durationSeconds = max(0, duration)
+    }
+    func updateVideoSize(_ size: CGSize) {
+        videoWidth = Int(size.width)
+        videoHeight = Int(size.height)
+    }
+    func skip(by seconds: Int) { surface?.skip(by: seconds) }
+    func setRate(_ rate: Float) { surface?.setRate(rate) }
+
+    private func formatTime(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private struct VR360PlayerView: UIViewRepresentable {
+    let player: AVPlayer
+    let onSingleTap: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onSingleTap: onSingleTap) }
+
+    func makeUIView(context: Context) -> SCNView {
+        let view = SCNView(frame: .zero)
+        view.backgroundColor = .black
+        view.scene = SCNScene()
+        view.preferredFramesPerSecond = 60
+        view.isPlaying = true
+        view.rendersContinuously = true
+
+        let sphere = SCNSphere(radius: 10)
+        sphere.segmentCount = 192
+        sphere.isGeodesic = false
+        let material = SCNMaterial()
+        material.diffuse.contents = player
+        material.diffuse.wrapS = .repeat
+        material.diffuse.wrapT = .clamp
+        material.isDoubleSided = true
+        material.lightingModel = .constant
+        sphere.firstMaterial = material
+        let sphereNode = SCNNode(geometry: sphere)
+        sphereNode.scale = SCNVector3(-1, 1, 1)
+        view.scene?.rootNode.addChildNode(sphereNode)
+
+        let camera = SCNCamera()
+        camera.fieldOfView = 78
+        camera.zNear = 0.01
+        camera.zFar = 30
+        let cameraNode = SCNNode()
+        cameraNode.camera = camera
+        view.scene?.rootNode.addChildNode(cameraNode)
+        view.pointOfView = cameraNode
+        context.coordinator.attach(view: view, camera: cameraNode)
+        return view
+    }
+
+    func updateUIView(_ view: SCNView, context: Context) {
+        context.coordinator.onSingleTap = onSingleTap
+        if let sphere = view.scene?.rootNode.childNodes.first,
+           sphere.geometry?.firstMaterial?.diffuse.contents as? AVPlayer !== player {
+            sphere.geometry?.firstMaterial?.diffuse.contents = player
+        }
+    }
+
+    static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
+        coordinator.stop()
+        view.isPlaying = false
+        view.scene = nil
+    }
+
+    final class Coordinator: NSObject {
+        var onSingleTap: () -> Void
+        private let motion = CMMotionManager()
+        private weak var view: SCNView?
+        private weak var camera: SCNNode?
+        private var dragYaw: Float = 0
+        private var dragPitch: Float = 0
+        private var gestureStartYaw: Float = 0
+        private var gestureStartPitch: Float = 0
+
+        init(onSingleTap: @escaping () -> Void) { self.onSingleTap = onSingleTap }
+
+        func attach(view: SCNView, camera: SCNNode) {
+            self.view = view
+            self.camera = camera
+            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+            tap.require(toFail: pan)
+            view.addGestureRecognizer(tap)
+            view.addGestureRecognizer(pan)
+            view.addGestureRecognizer(pinch)
+            startMotion()
+        }
+
+        private func startMotion() {
+            guard motion.isDeviceMotionAvailable else { return }
+            motion.deviceMotionUpdateInterval = 1.0 / 60.0
+            motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] sample, _ in
+                guard let self, let attitude = sample?.attitude else { return }
+                self.apply(yaw: Float(attitude.yaw) + self.dragYaw, pitch: Float(attitude.pitch) + self.dragPitch)
+            }
+        }
+
+        private func apply(yaw: Float, pitch: Float) {
+            camera?.eulerAngles = SCNVector3(max(-1.45, min(1.45, pitch)), -yaw, 0)
+        }
+
+        @objc private func tapped() { onSingleTap() }
+
+        @objc private func panned(_ gesture: UIPanGestureRecognizer) {
+            let point = gesture.translation(in: view)
+            if gesture.state == .began {
+                gestureStartYaw = dragYaw
+                gestureStartPitch = dragPitch
+            }
+            dragYaw = gestureStartYaw + Float(point.x) * 0.004
+            dragPitch = max(-1.45, min(1.45, gestureStartPitch + Float(point.y) * 0.004))
+            if !motion.isDeviceMotionActive { apply(yaw: dragYaw, pitch: dragPitch) }
+        }
+
+        @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
+            guard let camera = camera?.camera else { return }
+            camera.fieldOfView = max(42, min(105, camera.fieldOfView / gesture.scale))
+            gesture.scale = 1
+        }
+
+        func stop() {
+            motion.stopDeviceMotionUpdates()
+            view?.gestureRecognizers?.forEach { view?.removeGestureRecognizer($0) }
+        }
+    }
+}
+private struct MKVVideoPlayerView: UIViewRepresentable {
+    let url: URL
+    let controls: MKVPlaybackControls
+    var resumeAt: Double = 0
+    var isFillMode = false
+    var resetZoomToken = 0
+    var isVR360Mode = false
+    var onSingleTap: (() -> Void)? = nil
+
+    func makeUIView(context: Context) -> MKVPlayerSurface {
+        let view = MKVPlayerSurface()
+        view.controls = controls
+        view.onSingleTap = onSingleTap
+        view.setFillMode(isFillMode)
+        view.setVR360Mode(isVR360Mode)
+        view.play(url: url, resumeAt: resumeAt)
+        return view
+    }
+
+    func updateUIView(_ uiView: MKVPlayerSurface, context: Context) {
+        uiView.controls = controls
+        uiView.onSingleTap = onSingleTap
+        uiView.setFillMode(isFillMode)
+        uiView.setVR360Mode(isVR360Mode)
+        uiView.resetZoomIfNeeded(token: resetZoomToken)
+        uiView.playIfNeeded(url: url)
+    }
+
+    static func dismantleUIView(_ uiView: MKVPlayerSurface, coordinator: ()) {
+        uiView.stop()
+    }
+}
+
+private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
+    private let mediaPlayer = VLCMediaPlayer()
+    private let motionManager = CMMotionManager()
+    private let scrollView = UIScrollView()
+    private let videoView = UIView()
+    private let loadingIndicator = UIActivityIndicatorView(style: .large)
+    private var currentURL: URL?
+    private var loadingTimer: Timer?
+    private var videoSize: CGSize = .zero
+    private var sourceFormat = "Video"
+    private var isFillMode = false
+    private var resetZoomToken = 0
+    private var isVR360Mode = false
+    private var vrYaw: Float = 0
+    private var vrPitch: Float = 0
+    private var vrFOV: Float = 80
+    private var vrPanStart = CGPoint.zero
+    var onSingleTap: (() -> Void)?
+    weak var controls: MKVPlaybackControls? {
+        didSet { controls?.surface = self }
+    }
+    private lazy var tapGesture = UITapGestureRecognizer(target: self, action: #selector(togglePlayback))
+    private lazy var doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+    private lazy var vrPanGesture = UIPanGestureRecognizer(target: self, action: #selector(handleVRPan(_:)))
+    private lazy var vrPinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handleVRPinch(_:)))
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        clipsToBounds = true
+
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 10
+        scrollView.bounces = false
+        scrollView.bouncesZoom = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        addSubview(scrollView)
+
+        videoView.backgroundColor = .black
+        videoView.isOpaque = true
+        videoView.layer.isOpaque = true
+        videoView.layer.shouldRasterize = false
+        scrollView.addSubview(videoView)
+        doubleTapGesture.numberOfTapsRequired = 2
+        tapGesture.require(toFail: doubleTapGesture)
+        scrollView.addGestureRecognizer(doubleTapGesture)
+        scrollView.addGestureRecognizer(tapGesture)
+        addGestureRecognizer(vrPanGesture)
+        addGestureRecognizer(vrPinchGesture)
+        vrPanGesture.isEnabled = false
+        vrPinchGesture.isEnabled = false
+        mediaPlayer.drawable = videoView
+
+        loadingIndicator.color = .white
+        loadingIndicator.hidesWhenStopped = true
+        addSubview(loadingIndicator)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scrollView.frame = bounds
+        loadingIndicator.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        // Only recompute the fitted frame (and do the heavier render-scale /
+        // clamp work) when the video's un-zoomed size actually changes —
+        // e.g. rotation or a new video loading. Contentinset changes made
+        // *during* a live pinch/pan also trigger layoutSubviews, and doing
+        // this work on every one of those ticks is what caused the
+        // shake-while-zooming and lag-while-panning.
+        guard scrollView.zoomScale == 1 else { return }
+        let fittedSize = fittedVideoSize()
+        guard videoView.bounds.size != fittedSize else { return }
+        videoView.frame = CGRect(origin: .zero, size: fittedSize)
+        scrollView.contentSize = fittedSize
+        updateScrollableArea()
+        clampOffset()
+        updateVideoRenderScale()
+    }
+
+    func play(url: URL, resumeAt: Double = 0) {
+        currentURL = url
+        let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
+        loadingIndicator.startAnimating()
+        let media = VLCMedia(url: url)
+        media.addOption(":avcodec-hw=none")
+        media.addOption(":network-caching=3000")
+        media.addOption(":file-caching=1500")
+        media.addOption(":drop-late-frames")
+        mediaPlayer.drawable = videoView
+        mediaPlayer.media = media
+        mediaPlayer.play()
+        if resumeAt > 3 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.mediaPlayer.time = VLCTime(int: Int32(resumeAt * 1000))
+            }
+        }
+        loadingTimer?.invalidate()
+        loadingTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.controls?.isPlaying = self.mediaPlayer.isPlaying
+            self.controls?.updateProgress(min(1, max(0, Double(self.mediaPlayer.position))))
+            // MobileVLCKit: `time` is non-optional VLCTime in current versions.
+            let currentTime = Double(self.mediaPlayer.time.intValue) / 1000
+            let duration = Double(self.mediaPlayer.media?.length.intValue ?? 0) / 1000
+            self.controls?.updateTime(current: currentTime, duration: duration)
+            let size = self.mediaPlayer.videoSize
+            if size.width > 1, size.height > 1 {
+                self.controls?.resolutionLabel = "\(Int(size.width))×\(Int(size.height)) · \(self.sourceFormat)"
+                self.controls?.updateVideoSize(size)
+            }
+            if size.width > 1, size.height > 1 {
+                let nextSize = CGSize(width: size.width, height: size.height)
+                if self.videoSize != nextSize {
+                    self.videoSize = nextSize
+                    self.setNeedsLayout()
+                }
+            }
+            if self.isVR360Mode {
+                _ = self.mediaPlayer.updateViewpoint(self.vrYaw, pitch: self.vrPitch, roll: 0, fov: self.vrFOV, absolute: true)
+            }
+            if self.mediaPlayer.isPlaying {
+                self.loadingIndicator.stopAnimating()
+            }
+        }
+    }
+
+    func playIfNeeded(url: URL) {
+        guard currentURL != url else { return }
+        play(url: url)
+    }
+
+    func stop() {
+        motionManager.stopDeviceMotionUpdates()
+        mediaPlayer.stop()
+        mediaPlayer.drawable = nil
+        loadingTimer?.invalidate()
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        videoView
+    }
+
+    // NOTE: contentOffset/contentInset must never be forced while the user's
+    // pinch or pan gesture is actively driving the scroll view — doing so
+    // fights UIKit's own live gesture tracking and is what produced the
+    // shaking on zoom and the stutter/lag on pan. `updateScrollableArea()`
+    // is cheap (arithmetic only) and safe to run live for centering;
+    // `clampOffset()` and `updateVideoRenderScale()` are deferred to
+    // gesture-end, since the latter rebuilds VLC's drawable and is expensive.
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        updateScrollableArea()
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // Intentionally empty: with bounces = false and a correctly sized
+        // content area, UIScrollView already keeps offsets in bounds while
+        // the user is actively dragging.
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        updateScrollableArea()
+        clampOffset()
+        updateVideoRenderScale()
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate {
+            clampOffset()
+            updateVideoRenderScale()
+        }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        clampOffset()
+        updateVideoRenderScale()
+    }
+
+    private func fittedVideoSize() -> CGSize {
+        guard videoSize.width > 0, videoSize.height > 0, bounds.width > 0, bounds.height > 0 else { return bounds.size }
+        let scale = isFillMode
+            ? max(bounds.width / videoSize.width, bounds.height / videoSize.height)
+            : min(bounds.width / videoSize.width, bounds.height / videoSize.height)
+        return CGSize(width: videoSize.width * scale, height: videoSize.height * scale)
+    }
+
+    func setFillMode(_ fill: Bool) {
+        guard isFillMode != fill else { return }
+        isFillMode = fill
+        scrollView.setZoomScale(1, animated: false)
+        setNeedsLayout()
+    }
+
+    func setVR360Mode(_ enabled: Bool) {
+        guard isVR360Mode != enabled else { return }
+        isVR360Mode = enabled
+        scrollView.isScrollEnabled = !enabled
+        vrPanGesture.isEnabled = enabled
+        vrPinchGesture.isEnabled = enabled
+        if enabled {
+            scrollView.setZoomScale(1, animated: false)
+            startVRMotion()
+            _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
+        } else {
+            motionManager.stopDeviceMotionUpdates()
+        }
+    }
+
+    private func startVRMotion() {
+        guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
+        motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, _ in
+            guard let self, self.isVR360Mode, let attitude = motion?.attitude else { return }
+            let yaw = self.vrYaw + Float(attitude.yaw * 180 / .pi)
+            let pitch = self.vrPitch + Float(attitude.pitch * 180 / .pi)
+            _ = self.mediaPlayer.updateViewpoint(yaw, pitch: max(-89, min(89, pitch)), roll: 0, fov: self.vrFOV, absolute: true)
+        }
+    }
+
+    @objc private func handleVRPan(_ gesture: UIPanGestureRecognizer) {
+        guard isVR360Mode else { return }
+        let translation = gesture.translation(in: self)
+        if gesture.state == .began { vrPanStart = CGPoint(x: CGFloat(vrYaw), y: CGFloat(vrPitch)) }
+        vrYaw = Float(vrPanStart.x - translation.x * 0.18)
+        vrPitch = max(-89, min(89, Float(vrPanStart.y + translation.y * 0.18)))
+        _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
+    }
+
+    @objc private func handleVRPinch(_ gesture: UIPinchGestureRecognizer) {
+        guard isVR360Mode else { return }
+        vrFOV = max(35, min(115, vrFOV / Float(gesture.scale)))
+        gesture.scale = 1
+        _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
+    }
+    func resetZoomIfNeeded(token: Int) {
+        guard token != resetZoomToken else { return }
+        resetZoomToken = token
+        scrollView.setZoomScale(1, animated: false)
+        scrollView.contentOffset = .zero
+        setNeedsLayout()
+    }
+
+    /// Keep VLC's drawable at the highest useful pixel density while zooming.
+    /// The cap is the source-video density, so this never invents or compresses pixels.
+    private func updateVideoRenderScale() {
+        guard videoSize.width > 0, videoSize.height > 0,
+              videoView.bounds.width > 0, videoView.bounds.height > 0 else { return }
+
+        let sourceDensity = min(
+            videoSize.width / videoView.bounds.width,
+            videoSize.height / videoView.bounds.height
+        )
+        let screenDensity = UIScreen.main.nativeScale
+        let desiredDensity = max(screenDensity, min(sourceDensity, screenDensity * scrollView.zoomScale))
+        if abs(videoView.contentScaleFactor - desiredDensity) > 0.05 {
+            videoView.contentScaleFactor = desiredDensity
+            videoView.layer.contentsScale = desiredDensity
+            // Keep the drawable attached during 8K playback.
+        }
+    }
+    private func updateScrollableArea() {
+        let scale = scrollView.zoomScale
+        scrollView.contentSize = CGSize(width: videoView.bounds.width * scale, height: videoView.bounds.height * scale)
+        let insetX = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
+        let insetY = max(0, (scrollView.bounds.height - scrollView.contentSize.height) / 2)
+        scrollView.contentInset = UIEdgeInsets(top: insetY, left: insetX, bottom: insetY, right: insetX)
+    }
+
+    private func clampOffset() {
+        let inset = scrollView.adjustedContentInset
+        let minX = -inset.left
+        let minY = -inset.top
+        let maxX = max(minX, scrollView.contentSize.width - scrollView.bounds.width + inset.right)
+        let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height + inset.bottom)
+        let fixed = CGPoint(x: scrollView.contentSize.width <= scrollView.bounds.width ? minX : min(maxX, max(minX, scrollView.contentOffset.x)), y: scrollView.contentSize.height <= scrollView.bounds.height ? minY : min(maxY, max(minY, scrollView.contentOffset.y)))
+        if abs(fixed.x - scrollView.contentOffset.x) > 0.5 || abs(fixed.y - scrollView.contentOffset.y) > 0.5 { scrollView.contentOffset = fixed }
+    }
+
+    @objc private func togglePlayback() {
+        onSingleTap?()
+    }
+
+    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        if scrollView.zoomScale > 1.05 {
+            scrollView.setZoomScale(1, animated: true)
+            return
+        }
+        let point = gesture.location(in: videoView)
+        let size = CGSize(width: scrollView.bounds.width / 2, height: scrollView.bounds.height / 2)
+        scrollView.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height), animated: true)
+    }
+
+    private func togglePlaybackState() {
+        if mediaPlayer.isPlaying {
+            mediaPlayer.pause()
+        } else {
+            mediaPlayer.play()
+        }
+    }
+
+    func togglePlaybackFromControls() { togglePlaybackState() }
+
+    func seek(to fraction: Double) {
+        mediaPlayer.position = Float(min(1, max(0, fraction)))
+    }
+
+    func setRate(_ rate: Float) { mediaPlayer.rate = rate }
+
+    func skip(by seconds: Int) {
+        if seconds >= 0 {
+            mediaPlayer.jumpForward(Int32(seconds))
+        } else {
+            mediaPlayer.jumpBackward(Int32(-seconds))
+        }
+    }
+}
+
+// MARK: - Timeline
+
+private final class SeekBarContainerView: UIView {
+    static let preferredHeight: CGFloat = 34
+}
+
+private struct InstantSeekBar: View {
+    let progress: Double
+    let bufferProgress: Double
+    let currentLabel: String
+    let durationLabel: String
+    let onSeek: (Double) -> Void
+    let onScrubbing: (Double, Bool) -> Void
+    @State private var draggedValue: Double?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(currentLabel).font(.caption2.monospacedDigit()).foregroundColor(.white)
+            GeometryReader { geometry in
+                let value = min(1, max(0, draggedValue ?? progress))
+                let bufferedValue = min(1, max(value, bufferProgress))
+                let thumbSize: CGFloat = 18
+                let usableWidth = max(1, geometry.size.width - thumbSize)
+                let crystalSky = LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.96),
+                        Color(red: 0.76, green: 0.91, blue: 1.0),
+                        Color(red: 0.34, green: 0.73, blue: 0.97)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .frame(height: 12)
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.30), lineWidth: 1)
+                        )
+                    Capsule()
+                        .fill(Color.white.opacity(0.34))
+                        .frame(
+                            width: thumbSize / 2 + usableWidth * bufferedValue,
+                            height: 7
+                        )
+                    Capsule()
+                        .fill(crystalSky)
+                        .frame(width: thumbSize / 2 + usableWidth * value, height: 7)
+                        .shadow(color: Color(red: 0.45, green: 0.80, blue: 1.0).opacity(0.28), radius: 4)
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: thumbSize, height: thumbSize)
+                        .overlay(Circle().fill(crystalSky).padding(3))
+                        .overlay(Circle().stroke(Color.white.opacity(0.72), lineWidth: 1))
+                        .shadow(color: Color(red: 0.45, green: 0.80, blue: 1.0).opacity(0.38), radius: 5)
+                        .offset(x: usableWidth * value)
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { gesture in
+                            let next = min(1, max(0, gesture.location.x / max(1, geometry.size.width)))
+                            draggedValue = next
+                            onScrubbing(next, true)
+                        }
+                        .onEnded { gesture in
+                            let selected = min(1, max(0, gesture.location.x / max(1, geometry.size.width)))
+                            draggedValue = nil
+                            onScrubbing(selected, false)
+                            onSeek(selected)
+                        }
+                )
+            }
+            .frame(height: 28)
+            Text(durationLabel).font(.caption2.monospacedDigit()).foregroundColor(.white)
+        }
+    }
+
+}
+
+// MARK: - Zoomable video
+
+private struct ZoomableVideoView: UIViewRepresentable, Equatable {
+    let player: AVPlayer
+    var resetToken: Int = 0
+    var fillModeToken: Int = 0
+    var isFillMode = false
+    var videoSize: CGSize = .zero
+    var onSingleTap: (() -> Void)?
+    var onInteractionChange: ((Bool) -> Void)?
+    var onDoubleTap: (() -> Void)?
+
+    // engine.progress/currentSeconds/bufferPercent tick ~4x/sec and force
+    // VideoPlayerView.body to re-evaluate. Without this, SwiftUI would call
+    // updateUIView on every one of those ticks — poking the UIKit surface on
+    // the main thread at the exact moments it's also driving a live pinch/pan
+    // gesture. Equatable + .equatable() at the call site lets SwiftUI skip
+    // updateUIView entirely when none of these actually changed.
+    // onSingleTap is a closure (not Equatable) and is intentionally excluded:
+    // it closes over @State bindings whose storage is shared across view
+    // generations, so an "older" copy still reads/writes current state correctly.
+    static func == (lhs: ZoomableVideoView, rhs: ZoomableVideoView) -> Bool {
+        lhs.player === rhs.player &&
+        lhs.resetToken == rhs.resetToken &&
+        lhs.fillModeToken == rhs.fillModeToken &&
+        lhs.isFillMode == rhs.isFillMode &&
+        lhs.videoSize == rhs.videoSize
+    }
+
+    func makeUIView(context: Context) -> ZoomablePlayerSurface {
+        let view = ZoomablePlayerSurface(player: player)
+        view.onSingleTap = onSingleTap
+        view.onInteractionChange = onInteractionChange
+        view.onDoubleTap = onDoubleTap
+        view.updateVideoSize(videoSize)
+        view.setFillMode(isFillMode)
+        return view
+    }
+
+    func updateUIView(_ view: ZoomablePlayerSurface, context: Context) {
+        view.updatePlayer(player)
+        view.onSingleTap = onSingleTap
+        view.onInteractionChange = onInteractionChange
+        view.onDoubleTap = onDoubleTap
+        view.updateVideoSize(videoSize)
+        if context.coordinator.resetToken != resetToken {
+            context.coordinator.resetToken = resetToken
+            view.resetZoom()
+        }
+        if context.coordinator.fillToken != fillModeToken {
+            context.coordinator.fillToken = fillModeToken
+            view.setFillMode(isFillMode)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var resetToken = 0; var fillToken = 0 }
+}
+
+private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
+    var onSingleTap: (() -> Void)?
+    /// Reports true for the entire span of a pinch or pan (through
+    /// deceleration), false once fully settled. Wired to
+    /// VideoPlaybackEngine.setInteracting so it can silence its periodic
+    /// UI publishes while a gesture is live — see the call site for why.
+    var onInteractionChange: ((Bool) -> Void)?
+    /// Fired on double-tap. Now toggles fill-screen mode (see
+    /// handleDoubleTap) instead of driving a local pinch-style zoom.
+    var onDoubleTap: (() -> Void)?
+    private let scrollView = UIScrollView()
+    private let contentView = UIView()
+    private let playerLayer = AVPlayerLayer()
+    private var doubleTap: UITapGestureRecognizer!
+    private var singleTap: UITapGestureRecognizer!
+    private var videoSize: CGSize = .zero
+    private var isFillMode = false
+    private var lastRenderScaleZoomScale: CGFloat = -1
+    private var isZooming = false { didSet { reportInteractionIfNeeded() } }
+    private var isPanning = false { didSet { reportInteractionIfNeeded() } }
+    private var reportedInteracting = false
+
+    private func reportInteractionIfNeeded() {
+        let active = isZooming || isPanning
+        guard active != reportedInteracting else { return }
+        reportedInteracting = active
+        onInteractionChange?(active)
+    }
+
+    init(player: AVPlayer) {
+        super.init(frame: .zero)
+        backgroundColor = .black
+        clipsToBounds = true
+
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 10
+        scrollView.bounces = false
+        scrollView.bouncesZoom = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        addSubview(scrollView)
+
+        contentView.backgroundColor = .black
+        contentView.clipsToBounds = true
+        scrollView.addSubview(contentView)
+
+        playerLayer.player = player
+        playerLayer.videoGravity = .resizeAspect
+        contentView.layer.addSublayer(playerLayer)
+
+        doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
+        doubleTap.numberOfTapsRequired = 2
+        singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap))
+        singleTap.require(toFail: doubleTap)
+        scrollView.addGestureRecognizer(doubleTap)
+        scrollView.addGestureRecognizer(singleTap)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scrollView.frame = bounds
+        // contentView always spans the full surface bounds. Letterboxing for
+        // a video whose aspect ratio doesn't match the screen's is handled
+        // entirely by AVPlayerLayer's own aspect-fit rendering inside this
+        // fixed-size layer — contentView itself is never resized down to the
+        // video's own fitted dimensions. That resizing is what used to leave
+        // contentInset permanently nonzero (computed once at zoomScale 1 and
+        // only ever resynced at gesture-end); as zoomScale changed mid-
+        // gesture that stale inset no longer matched, which is what dragged
+        // both pinch-zoom and double-tap-zoom toward one edge instead of
+        // staying centered. With contentView always == bounds, contentInset
+        // is always exactly zero — there's nothing left to go stale.
+        //
+        // Only redo the heavier render-scale/clamp work when the surface's
+        // own bounds actually change. contentInset changes made during a
+        // live pinch/pan also trigger layoutSubviews, and running this work
+        // on every one of those ticks caused the shake-while-zooming and
+        // lag-while-panning.
+        guard contentView.bounds.size != bounds.size else {
+            playerLayer.frame = contentView.bounds
+            return
+        }
+        let zoom = scrollView.zoomScale
+        scrollView.zoomScale = 1
+        contentView.frame = CGRect(origin: .zero, size: bounds.size)
+        scrollView.contentSize = bounds.size
+        playerLayer.frame = contentView.bounds
+        scrollView.zoomScale = zoom
+        updateScrollableArea()
+        clampOffset()
+        updateVideoRenderScale()
+        lastRenderScaleZoomScale = scrollView.zoomScale
+        // Fill mode's baseline ("cover") zoom depends on the container's own
+        // aspect ratio (see applyZoomBounds), so a rotation can leave the
+        // old baseline no longer covering the screen. Re-pin it here; this
+        // only runs when bounds actually changed (we're inside that guard)
+        // and only touches anything when fill mode is active, so it doesn't
+        // affect the fit-mode/pinch-zoom path at all.
+        if isFillMode {
+            let cover = coverZoomScale()
+            scrollView.minimumZoomScale = cover
+            if scrollView.zoomScale < cover {
+                scrollView.setZoomScale(cover, animated: false)
+                updateScrollableArea()
+                clampOffset()
+            }
+        }
+    }
+
+    func updatePlayer(_ player: AVPlayer) {
+        if playerLayer.player !== player { playerLayer.player = player }
+    }
+
+    func updateVideoSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, size != videoSize else { return }
+        videoSize = size
+        setNeedsLayout()
+    }
+
+    func setFillMode(_ fill: Bool) {
+        // Fill mode used to just switch playerLayer.videoGravity to
+        // .resizeAspectFill — AVPlayerLayer then crops to a fixed, centered
+        // rect with no way to pan it, which is why "fill" couldn't be
+        // panned left/right. Instead, gravity always stays .resizeAspect,
+        // and "fill" is implemented as zooming to the "cover" scale (see
+        // coverZoomScale()) — that's the smallest zoom at which the video's
+        // own fitted rect, scaled up, has no letterbox margin left on
+        // either axis. Because the fitted rect already matches the
+        // container exactly on one axis, cover-scale zoom only needs to
+        // grow the other axis to close its margin — so that axis now
+        // overflows the screen, and the existing clamp/pan machinery
+        // (clampOffset, already scoped to the video's own scaled rect)
+        // lets the user slide across that overflow same as any other zoom.
+        guard isFillMode != fill else { return }
+        isFillMode = fill
+        applyZoomBounds(animated: true)
+    }
+
+    func resetZoom() {
+        applyZoomBounds(animated: false)
+    }
+
+    /// Recomputes the zoom range for the current mode (fit: baseline 1,
+    /// fill: baseline coverZoomScale()) and snaps to that baseline,
+    /// centered. Used by both setFillMode and resetZoom so both land on the
+    /// same well-defined resting position.
+    private func applyZoomBounds(animated: Bool) {
+        let baseline = isFillMode ? coverZoomScale() : 1
+        scrollView.minimumZoomScale = baseline
+        scrollView.maximumZoomScale = max(10, baseline)
+        scrollView.setZoomScale(baseline, animated: animated)
+        updateScrollableArea()
+        scrollView.contentOffset = centeredOffset()
+        clampOffset()
+        updateVideoRenderScaleIfNeeded()
+    }
+
+    /// The zoom scale at which the video's fitted (letterboxed) rect,
+    /// scaled up, exactly covers the container on both axes — i.e. the
+    /// scale fill mode zooms to. 1 if video size isn't known yet.
+    private func coverZoomScale() -> CGFloat {
+        let displayed = displayedVideoSize()
+        let container = contentView.bounds.size
+        guard displayed.width > 0, displayed.height > 0,
+              container.width > 0, container.height > 0 else { return 1 }
+        return max(container.width / displayed.width, container.height / displayed.height)
+    }
+
+    /// The offset that centers the video's scaled rect in the viewport —
+    /// on an axis where the rect is smaller than the viewport this is the
+    /// same centering clampOffset already falls back to; on an axis where
+    /// it overflows (fill mode's cropped axis) this centers the crop
+    /// instead of resting at whichever edge contentOffset happened to be.
+    private func centeredOffset() -> CGPoint {
+        let zoom = scrollView.zoomScale
+        let displayed = displayedVideoSize()
+        let boundsSize = scrollView.bounds.size
+        let marginX = max(0, (contentView.bounds.width - displayed.width) / 2) * zoom
+        let marginY = max(0, (contentView.bounds.height - displayed.height) / 2) * zoom
+        let scaledW = displayed.width * zoom
+        let scaledH = displayed.height * zoom
+        return CGPoint(x: marginX + (scaledW - boundsSize.width) / 2,
+                       y: marginY + (scaledH - boundsSize.height) / 2)
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { contentView }
+
+    // NOTE: contentOffset/contentInset must never be forced while the user's
+    // pinch or pan gesture is actively driving the scroll view — doing so
+    // fights UIKit's own live gesture tracking. `clampOffset()` and the
+    // render-scale bump are deferred to gesture-end for that reason.
+    //
+    // scrollViewDidZoom still fires on every frame of a live pinch, though,
+    // and reassigning scrollView.contentInset/contentSize there (as this
+    // used to do via updateScrollableArea()) forces UIScrollView to redo its
+    // internal scroll-metric bookkeeping every single tick — that's what was
+    // actually producing the lag/shake while pinching. Repositioning the
+    // content view's own frame keeps it centered just as well and is
+    // effectively free per frame — the same technique Apple's PhotoScroller
+    // sample uses.
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        centerContentView()
+    }
+
+    private func centerContentView() {
+        let boundsSize = scrollView.bounds.size
+        var frame = contentView.frame
+        frame.origin.x = frame.width < boundsSize.width ? (boundsSize.width - frame.width) / 2 : 0
+        frame.origin.y = frame.height < boundsSize.height ? (boundsSize.height - frame.height) / 2 : 0
+        contentView.frame = frame
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // Hard-stop panning exactly at the video's edge instead of letting the
+        // drag overshoot into the letterbox and snap back on release. Only
+        // does this for a live pan (not zoom) — clamping every frame of a
+        // pinch is what previously caused the shake described in the comment
+        // on updateScrollableArea()/centerContentView(), so pinch stays on
+        // its existing deferred-to-gesture-end path, untouched.
+        guard isPanning, !isZooming else { return }
+        clampOffset()
+    }
+
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        isZooming = true
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        updateScrollableArea()
+        clampOffset()
+        updateVideoRenderScaleIfNeeded()
+        isZooming = false
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        isPanning = true
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate {
+            clampOffset()
+            updateVideoRenderScaleIfNeeded()
+            isPanning = false
+        }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        clampOffset()
+        updateVideoRenderScaleIfNeeded()
+        isPanning = false
+    }
+
+    /// The video image's own fitted (letterboxed) size within contentView,
+    /// at zoomScale 1 — the same rect AVPlayerLayer's .resizeAspect gravity
+    /// draws. Fill mode no longer switches gravity (see setFillMode); it
+    /// zooms this same fitted rect up to cover(), so this stays the single
+    /// source of truth for the video's own bounds at any zoom level.
+    private func displayedVideoSize() -> CGSize {
+        let container = contentView.bounds.size
+        guard videoSize.width > 0, videoSize.height > 0,
+              container.width > 0, container.height > 0 else { return container }
+        let scale = min(container.width / videoSize.width, container.height / videoSize.height)
+        return CGSize(width: videoSize.width * scale, height: videoSize.height * scale)
+    }
+
+    /// Only recompute the render scale when zoomScale has moved enough to matter —
+    /// avoids doing this work on every throttled scroll/zoom tick while panning.
+    private func updateVideoRenderScaleIfNeeded() {
+        let currentZoom = scrollView.zoomScale
+        guard abs(currentZoom - lastRenderScaleZoomScale) > 0.05 else { return }
+        lastRenderScaleZoomScale = currentZoom
+        // Push this to the next run-loop turn so it happens *after* UIKit has
+        // finished settling the scroll view from the gesture that just ended,
+        // instead of competing with it on the same frame — that overlap is
+        // what read as a hitch right at the moment of lifting a finger.
+        DispatchQueue.main.async { [weak self] in
+            self?.updateVideoRenderScale()
+        }
+    }
+
+    /// UIScrollView scales the view for pinch zoom. Raise only the video layer's
+    /// render density as it zooms, capped at the source frame's real pixels.
+    private func updateVideoRenderScale() {
+        guard videoSize.width > 0, videoSize.height > 0 else { return }
+        let displayed = displayedVideoSize()
+        guard displayed.width > 0, displayed.height > 0 else { return }
+
+        let sourceDensity = min(
+            videoSize.width / displayed.width,
+            videoSize.height / displayed.height
+        )
+        let targetDensity = min(sourceDensity, UIScreen.main.nativeScale * scrollView.zoomScale)
+        let density = max(1, targetDensity)
+        guard abs(playerLayer.contentsScale - density) > 0.05 else { return }
+        // AVPlayerLayer keeps rendering video frames on its own display link;
+        // setNeedsDisplay() has no effect on it and was dead weight. What
+        // does matter is that changing contentsScale on a layer that's
+        // actively showing content triggers an implicit Core Animation fade
+        // by default — disabling actions here removes that extra visible
+        // flicker/stutter.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        playerLayer.contentsScale = density
+        CATransaction.commit()
+    }
+    private func updateScrollableArea() {
+        let scale = scrollView.zoomScale
+        scrollView.contentSize = CGSize(
+            width: contentView.bounds.width * scale,
+            height: contentView.bounds.height * scale
+        )
+        let insetX = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
+        let insetY = max(0, (scrollView.bounds.height - scrollView.contentSize.height) / 2)
+        scrollView.contentInset = UIEdgeInsets(top: insetY, left: insetX, bottom: insetY, right: insetX)
+    }
+
+    /// Clamps panning to the actual video image, not the full contentView.
+    /// contentView always spans the full surface bounds while the video
+    /// itself is fitted and centered inside it (displayedVideoSize()),
+    /// leaving black margins on whichever axis doesn't match the screen's
+    /// aspect ratio. Clamping against contentSize/bounds directly (the old
+    /// behavior) only bounded panning to those full, letterbox-inclusive
+    /// dimensions — so once zoomed in, a drag could keep going past the
+    /// video's real edge into empty black space. This instead computes the
+    /// video's own scaled rect within contentView and keeps the viewport's
+    /// offset inside that rect — panning stops exactly at the video frame.
+    /// This is also what lets fill mode be pannable at all: fill zooms in
+    /// to coverZoomScale() (see setFillMode), which makes displayedVideoSize
+    /// scaled up overflow the container on one axis — the same clamp then
+    /// naturally allows sliding across that overflow instead of locking it.
+    private func clampOffset() {
+        let zoom = scrollView.zoomScale
+        let displayed = displayedVideoSize()
+        let boundsSize = scrollView.bounds.size
+        let marginX = max(0, (contentView.bounds.width - displayed.width) / 2) * zoom
+        let marginY = max(0, (contentView.bounds.height - displayed.height) / 2) * zoom
+        let scaledVideoWidth = displayed.width * zoom
+        let scaledVideoHeight = displayed.height * zoom
+
+        let x: CGFloat
+        if scaledVideoWidth <= boundsSize.width {
+            x = marginX - (boundsSize.width - scaledVideoWidth) / 2
+        } else {
+            let minX = marginX
+            let maxX = marginX + scaledVideoWidth - boundsSize.width
+            x = min(maxX, max(minX, scrollView.contentOffset.x))
+        }
+
+        let y: CGFloat
+        if scaledVideoHeight <= boundsSize.height {
+            y = marginY - (boundsSize.height - scaledVideoHeight) / 2
+        } else {
+            let minY = marginY
+            let maxY = marginY + scaledVideoHeight - boundsSize.height
+            y = min(maxY, max(minY, scrollView.contentOffset.y))
+        }
+
+        let fixed = CGPoint(x: x, y: y)
+        if abs(fixed.x - scrollView.contentOffset.x) > 0.5 || abs(fixed.y - scrollView.contentOffset.y) > 0.5 {
+            scrollView.contentOffset = fixed
+        }
+    }
+
+    @objc private func handleSingleTap() { onSingleTap?() }
+
+    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        // Double-tap now toggles fill-screen mode instead of doing a local
+        // 2x pinch-style zoom to the tap point. The toggle is owned by
+        // SwiftUI (isFillMode/fillModeToken) — onDoubleTap routes there, and
+        // the resulting setFillMode(_:) call (via updateUIView) already
+        // resets any active pinch zoom on its own, so no local zoom handling
+        // is needed here.
+        onDoubleTap?()
+    }
+
+}
+
+
+
+
+
+
+
