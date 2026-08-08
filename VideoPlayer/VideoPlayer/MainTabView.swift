@@ -122,26 +122,21 @@ private struct PirateBayResult: Decodable, Identifiable {
 private enum PirateBaySection: String, CaseIterable, Identifiable {
     case movies = "Movies", tv = "TV Shows", adult = "XXX"
     var id: String { rawValue }
-    var icon: String { switch self { case .movies: return "film.stack.fill"; case .tv: return "tv.fill"; case .adult: return "18.circle.fill" } }
-    var gradient: [Color] { switch self { case .movies: return [.blue, .purple]; case .tv: return [.cyan, .indigo]; case .adult: return [.pink, .red] } }
-    func accepts(_ code: Int) -> Bool {
-        switch self {
-        case .movies: return [201, 202, 207, 209].contains(code)
-        case .tv: return [205, 208].contains(code)
-        case .adult: return (500..<600).contains(code)
-        }
-    }
+    var icon: String { switch self { case .movies: return "film.fill"; case .tv: return "tv.fill"; case .adult: return "18.circle.fill" } }
+    var tint: Color { switch self { case .movies: return .blue; case .tv: return .cyan; case .adult: return .pink } }
 }
 
 private enum PirateBayQuality: String, CaseIterable, Identifiable {
     case fullHD = "1080p", ultraHD = "2160p"
     var id: String { rawValue }
-    var icon: String { self == .fullHD ? "rectangle.inset.filled" : "sparkles.tv.fill" }
-    func accepts(_ name: String) -> Bool {
-        let value = name.lowercased()
-        switch self {
-        case .fullHD: return value.contains("1080p") || value.contains("1080i")
-        case .ultraHD: return value.contains("2160p") || value.contains("4k") || value.contains("uhd")
+    func category(for section: PirateBaySection) -> Int {
+        switch (section, self) {
+        case (.movies, .fullHD): return 207
+        case (.movies, .ultraHD): return 211
+        case (.tv, .fullHD): return 208
+        case (.tv, .ultraHD): return 212
+        case (.adult, .fullHD): return 505
+        case (.adult, .ultraHD): return 507
         }
     }
 }
@@ -151,109 +146,145 @@ private final class PirateBayLatestModel: ObservableObject {
     @Published var items: [PirateBayResult] = []
     @Published var isLoading = false
     @Published var error: String?
+    private var requestID = UUID()
 
-    func refresh() async {
+    func load(section: PirateBaySection, quality: PirateBayQuality, query rawQuery: String = "") async {
+        let currentID = UUID(); requestID = currentID
         isLoading = true; error = nil
-        defer { isLoading = false }
-        var parts = URLComponents(string: "https://apibay.org/precompiled/data_top100_recent.json")!
-        parts.queryItems = [URLQueryItem(name: "refresh", value: String(Int(Date().timeIntervalSince1970 / 60)))]
+        defer { if requestID == currentID { isLoading = false } }
+        let category = quality.category(for: section)
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url: URL?
+        if query.isEmpty {
+            var parts = URLComponents(string: "https://apibay.org/precompiled/data_top100_\(category).json")!
+            parts.queryItems = [URLQueryItem(name: "refresh", value: String(Int(Date().timeIntervalSince1970 / 60)))]
+            url = parts.url
+        } else {
+            var parts = URLComponents(string: "https://apibay.org/q.php")!
+            parts.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "cat", value: String(category))]
+            url = parts.url
+        }
+        guard let url else { error = "Invalid request"; return }
         do {
-            var request = URLRequest(url: parts.url!); request.timeoutInterval = 25; request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            var request = URLRequest(url: url); request.timeoutInterval = 25; request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
             let decoded = try JSONDecoder().decode([PirateBayResult].self, from: data)
-            items = decoded.filter { $0.id != "0" }.sorted { $0.addedDate > $1.addedDate }
-        } catch { self.error = "Latest releases are unavailable"; items = [] }
+            guard requestID == currentID else { return }
+            items = decoded.filter { $0.id != "0" && !$0.infoHash.isEmpty }.sorted { $0.addedDate > $1.addedDate }
+            if items.isEmpty { error = "No results found" }
+        } catch {
+            guard requestID == currentID else { return }
+            items = []; error = "Could not load this category"
+        }
     }
 }
 
 private struct PirateBayView: View {
     @ObservedObject var vm: AppViewModel
     @StateObject private var model = PirateBayLatestModel()
-    @State private var section: PirateBaySection?
-    @State private var quality: PirateBayQuality?
+    @State private var section: PirateBaySection = .movies
+    @State private var quality: PirateBayQuality = .fullHD
+    @State private var query = ""
     @State private var notice: String?
     @State private var addingID: String?
+    @FocusState private var searchFocused: Bool
+    @Namespace private var categorySelection
+    @Namespace private var qualitySelection
 
     var body: some View {
         NavigationStack {
             ZStack {
-                LinearGradient(colors: [AppTheme.bg, Color.indigo.opacity(0.12), AppTheme.bg], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
-                Group {
-                    if section == nil { sectionPicker }
-                    else if quality == nil { qualityPicker }
-                    else { resultsView }
+                LinearGradient(colors: [AppTheme.bg, section.tint.opacity(0.10), AppTheme.bg], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
+                ScrollView {
+                    LazyVStack(spacing: 13) {
+                        categoryBar
+                        qualityBar
+                        searchBar
+                        statusArea
+                        ForEach(model.items) { resultCard($0) }
+                    }
+                    .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 105)
                 }
-                .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .move(edge: .leading).combined(with: .opacity)))
+                .refreshable { await reload() }
             }
-            .navigationTitle(quality.map { "\(section?.rawValue ?? "") · \($0.rawValue)" } ?? section?.rawValue ?? "Discover")
+            .navigationTitle("Discover")
             .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                if section != nil {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button { withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) { if quality != nil { quality = nil } else { section = nil } } } label: {
-                            Label("Back", systemImage: "chevron.left").foregroundStyle(.green)
-                        }
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) { Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(.green) } }
-            }
+            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { await reload() } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(.green) } } }
             .overlay(alignment: .top) { if let notice { Text(notice).font(.subheadline.bold()).padding(.horizontal, 18).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
-            .task { if model.items.isEmpty { await model.refresh() } }
+            .task { if model.items.isEmpty { await reload() } }
         }
     }
 
-    private var sectionPicker: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                Text("Choose a library").font(.subheadline.weight(.medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                ForEach(PirateBaySection.allCases) { value in
-                    Button { withAnimation(.spring(response: 0.48, dampingFraction: 0.84)) { section = value } } label: {
-                        HStack(spacing: 18) {
-                            Image(systemName: value.icon).font(.system(size: 31, weight: .semibold)).frame(width: 64, height: 64).background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 20))
-                            VStack(alignment: .leading, spacing: 5) { Text(value.rawValue).font(.system(size: 27, weight: .black, design: .rounded)); Text("Latest releases").font(.subheadline).opacity(0.72) }
-                            Spacer(); Image(systemName: "chevron.right").font(.title3.bold())
-                        }
-                        .foregroundStyle(.white).padding(22).background(LinearGradient(colors: value.gradient, startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 30))
-                        .shadow(color: value.gradient[0].opacity(0.32), radius: 22, y: 12)
-                    }.buttonStyle(.plain)
-                }
-            }.padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 110)
-        }
-    }
-
-    private var qualityPicker: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            ForEach(PirateBayQuality.allCases) { value in
-                Button { withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) { quality = value } } label: {
-                    VStack(spacing: 14) {
-                        Image(systemName: value.icon).font(.system(size: 38, weight: .semibold))
-                        Text(value.rawValue).font(.system(size: 34, weight: .black, design: .rounded))
-                        Text(value == .fullHD ? "Full HD" : "Ultra HD · 4K").font(.subheadline).foregroundStyle(.secondary)
+    private var categoryBar: some View {
+        HStack(spacing: 7) {
+            ForEach(PirateBaySection.allCases) { value in
+                Button {
+                    guard section != value else { return }
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) { section = value }
+                    query = ""; searchFocused = false; Task { await reload() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: value.icon).font(.system(size: 13, weight: .bold))
+                        Text(value.rawValue).font(.system(size: 13, weight: .bold, design: .rounded)).lineLimit(1)
                     }
-                    .foregroundStyle(.white).frame(maxWidth: .infinity).padding(.vertical, 32).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32))
-                    .overlay(RoundedRectangle(cornerRadius: 32).stroke(LinearGradient(colors: section?.gradient ?? [.green, .blue], startPoint: .leading, endPoint: .trailing), lineWidth: 2))
+                    .foregroundStyle(section == value ? .white : .white.opacity(0.55))
+                    .frame(maxWidth: .infinity).padding(.vertical, 11)
+                    .background {
+                        if section == value {
+                            Capsule().fill(LinearGradient(colors: [value.tint, value.tint.opacity(0.65)], startPoint: .topLeading, endPoint: .bottomTrailing)).matchedGeometryEffect(id: "category", in: categorySelection)
+                        } else { Capsule().fill(Color.white.opacity(0.065)) }
+                    }
+                    .overlay(Capsule().stroke(Color.white.opacity(section == value ? 0.18 : 0.06)))
                 }.buttonStyle(.plain)
             }
-            Spacer()
-        }.padding(.horizontal, 22).padding(.bottom, 80)
+        }
+        .padding(5).background(.ultraThinMaterial, in: Capsule())
     }
 
-    private var filteredItems: [PirateBayResult] {
-        guard let section, let quality else { return [] }
-        return model.items.filter { section.accepts(Int($0.category) ?? 0) && quality.accepts($0.name) }
+    private var qualityBar: some View {
+        HStack(spacing: 8) {
+            ForEach(PirateBayQuality.allCases) { value in
+                Button {
+                    guard quality != value else { return }
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) { quality = value }
+                    query = ""; searchFocused = false; Task { await reload() }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: value == .fullHD ? "rectangle.inset.filled" : "sparkles.tv.fill")
+                        Text(value.rawValue).font(.system(size: 14, weight: .black, design: .rounded))
+                    }
+                    .foregroundStyle(quality == value ? .black : .white.opacity(0.62))
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                    .background {
+                        if quality == value { Capsule().fill(Color.white).matchedGeometryEffect(id: "quality", in: qualitySelection) }
+                        else { Capsule().fill(Color.white.opacity(0.06)) }
+                    }
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(4).background(Color.black.opacity(0.26), in: Capsule())
     }
 
-    private var resultsView: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                if model.isLoading { ProgressView().tint(.green).padding(.top, 50) }
-                else if let error = model.error { Text(error).foregroundStyle(.secondary).padding(.top, 50) }
-                else if filteredItems.isEmpty { Text("No new \(quality?.rawValue ?? "") releases right now").foregroundStyle(.secondary).padding(.top, 50) }
-                ForEach(filteredItems) { resultCard($0) }
-            }.padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 105)
-        }.refreshable { await model.refresh() }
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search \(section.rawValue) · \(quality.rawValue)", text: $query)
+                .textInputAutocapitalization(.never).autocorrectionDisabled().focused($searchFocused).submitLabel(.search)
+                .onSubmit { searchFocused = false; Task { await reload() } }
+            if !query.isEmpty { Button { query = ""; Task { await reload() } } label: { Image(systemName: "xmark.circle.fill") }.foregroundStyle(.secondary) }
+            Button { searchFocused = false; Task { await reload() } } label: { Image(systemName: "arrow.right.circle.fill").font(.title2).foregroundStyle(section.tint) }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12).background(Color.white.opacity(0.07), in: Capsule()).overlay(Capsule().stroke(Color.white.opacity(0.07)))
+    }
+
+    @ViewBuilder private var statusArea: some View {
+        if model.isLoading { ProgressView().tint(section.tint).padding(.top, 35) }
+        else if let error = model.error { Text(error).foregroundStyle(.secondary).padding(.top, 35) }
+        else {
+            HStack { Text("LATEST \(section.rawValue.uppercased()) · \(quality.rawValue)").font(.caption.bold()).tracking(0.8).foregroundStyle(.secondary); Spacer(); Text("\(model.items.count)").font(.caption.monospacedDigit()).foregroundStyle(section.tint) }
+                .padding(.horizontal, 3).padding(.top, 3)
+        }
     }
 
     private func resultCard(_ item: PirateBayResult) -> some View {
@@ -271,11 +302,12 @@ private struct PirateBayView: View {
                     Task { let error = await vm.addMagnetToPikPak(item.magnet); addingID = nil; toast(error ?? "Added to PikPak") }
                 } label: {
                     if addingID == item.id { ProgressView().frame(maxWidth: .infinity) } else { Label("Add to PikPak", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity) }
-                }.buttonStyle(.borderedProminent).tint(.green).disabled(addingID != nil)
+                }.buttonStyle(.borderedProminent).tint(section.tint).disabled(addingID != nil)
             }
         }.padding(15).background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.07)))
     }
 
+    private func reload() async { await model.load(section: section, quality: quality, query: query) }
     private func toast(_ text: String) {
         notice = text
         Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if notice == text { notice = nil } }
