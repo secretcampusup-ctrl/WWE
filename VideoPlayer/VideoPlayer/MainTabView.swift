@@ -103,6 +103,18 @@ private struct PirateBayResult: Decodable, Identifiable {
         case id, name, leechers, seeders, size, username, added, status, category
         case infoHash = "info_hash"
     }
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        func text(_ key: CodingKeys) -> String {
+            if let value = try? box.decode(String.self, forKey: key) { return value }
+            if let value = try? box.decode(Int64.self, forKey: key) { return String(value) }
+            if let value = try? box.decode(Double.self, forKey: key) { return String(Int64(value)) }
+            return ""
+        }
+        id = text(.id); name = text(.name); infoHash = text(.infoHash)
+        leechers = text(.leechers); seeders = text(.seeders); size = text(.size)
+        username = text(.username); added = text(.added); status = text(.status); category = text(.category)
+    }
     var seedCount: Int { Int(seeders) ?? 0 }
     var leechCount: Int { Int(leechers) ?? 0 }
     var byteCount: Int64 { Int64(size) ?? 0 }
