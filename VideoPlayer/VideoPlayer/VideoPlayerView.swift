@@ -591,11 +591,24 @@ private struct VR360PlayerView: UIViewRepresentable {
         view.isPlaying = true
         view.rendersContinuously = true
 
+        // An AVPlayerLayer feeding the material — rather than handing the
+        // AVPlayer object straight to SceneKit — is the reliable path here.
+        // Direct AVPlayer-as-texture is known to silently freeze on the first
+        // frame or fail to composite on some devices/OS versions, which
+        // presents as "VR mode toggles on but the video looks flat/static" —
+        // exactly this bug. The layer needs a real pixel size to have
+        // something to rasterize; the actual video's aspect doesn't matter
+        // since it's mapped onto a sphere.
+        let playerLayer = AVPlayerLayer(player: player)
+        playerLayer.frame = CGRect(x: 0, y: 0, width: 2048, height: 1024)
+        playerLayer.videoGravity = .resizeAspectFill
+        context.coordinator.playerLayer = playerLayer
+
         let sphere = SCNSphere(radius: 10)
         sphere.segmentCount = 192
         sphere.isGeodesic = false
         let material = SCNMaterial()
-        material.diffuse.contents = player
+        material.diffuse.contents = playerLayer
         material.diffuse.wrapS = .repeat
         material.diffuse.wrapT = .clamp
         material.isDoubleSided = true
@@ -619,20 +632,21 @@ private struct VR360PlayerView: UIViewRepresentable {
 
     func updateUIView(_ view: SCNView, context: Context) {
         context.coordinator.onSingleTap = onSingleTap
-        if let sphere = view.scene?.rootNode.childNodes.first,
-           sphere.geometry?.firstMaterial?.diffuse.contents as? AVPlayer !== player {
-            sphere.geometry?.firstMaterial?.diffuse.contents = player
+        if context.coordinator.playerLayer?.player !== player {
+            context.coordinator.playerLayer?.player = player
         }
     }
 
     static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
         coordinator.stop()
+        coordinator.playerLayer?.player = nil
         view.isPlaying = false
         view.scene = nil
     }
 
     final class Coordinator: NSObject {
         var onSingleTap: () -> Void
+        var playerLayer: AVPlayerLayer?
         private let motion = CMMotionManager()
         private weak var view: SCNView?
         private weak var camera: SCNNode?
@@ -1196,6 +1210,16 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     final class Coordinator { var resetToken = 0; var fillToken = 0 }
+
+    // Without this, switching to VR mode (which swaps this view out for
+    // VR360PlayerView) could leave ZoomablePlayerSurface's AVPlayerLayer still
+    // attached to the shared AVPlayer for a brief window before ARC tears it
+    // down. Two consumers pulling video output from the same AVPlayer at once
+    // is exactly what produced "VR mode looks identical to the flat player" —
+    // detaching immediately guarantees only the sphere is ever consuming frames.
+    static func dismantleUIView(_ view: ZoomablePlayerSurface, coordinator: Coordinator) {
+        view.detachPlayer()
+    }
 }
 
 private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
@@ -1313,6 +1337,13 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
 
     func updatePlayer(_ player: AVPlayer) {
         if playerLayer.player !== player { playerLayer.player = player }
+    }
+
+    /// Called when this surface is swapped out (e.g. for VR360PlayerView).
+    /// Detaches from the AVPlayer immediately rather than waiting on ARC/dealloc
+    /// timing, so the shared player never has two active visual consumers.
+    func detachPlayer() {
+        playerLayer.player = nil
     }
 
     func updateVideoSize(_ size: CGSize) {
