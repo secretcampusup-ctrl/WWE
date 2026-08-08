@@ -25,6 +25,12 @@ struct VideoPlayerView: View {
     @State private var hideTask: Task<Void, Never>?
     @State private var isFillMode = false
     @State private var isVR360Mode = false
+    /// True once the user has manually tapped the VR toggle for *this* video —
+    /// after that we never override their choice with auto-detection.
+    @State private var userOverrideVR = false
+    /// True once auto-detection has run (either applied or determined not applicable)
+    /// for the currently loaded video, so it only ever fires once per video.
+    @State private var vrAutoDetected = false
     @State private var isOrientationLocked = false
     @State private var fillModeToken = 0
     @State private var useExtendedPlayer = false
@@ -40,14 +46,33 @@ struct VideoPlayerView: View {
         let ext = url.pathExtension.lowercased()
         return ["mkv", "webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(ext)
     }
-    private var supportsVR360: Bool {
+    /// Filename/title hint only — doesn't need the video to have loaded yet.
+    private var filenameSuggestsVR360: Bool {
         let label = (title + " " + url.lastPathComponent).lowercased()
-        if ["360", "vr", "equirect", "spherical", "sbs", "side-by-side"].contains(where: label.contains) { return true }
+        return ["360", "vr", "equirect", "spherical", "sbs", "side-by-side"].contains(where: label.contains)
+    }
+    private var supportsVR360: Bool {
+        if filenameSuggestsVR360 { return true }
         let width = usesMKVPlayer ? mkvControls.videoWidth : engine.resolutionWidth
         let height = usesMKVPlayer ? mkvControls.videoHeight : engine.resolutionHeight
         guard width >= 3000, height > 0 else { return false }
         let ratio = Double(width) / Double(height)
         return (1.85...2.15).contains(ratio)
+    }
+    /// Wires the detection above into the actual toggle. Runs at most once per
+    /// loaded video (per `vrAutoDetected`) and only when the user hasn't already
+    /// touched the VR button themselves (per `userOverrideVR`) — this was
+    /// previously computed but never applied anywhere, so 360°/VR clips never
+    /// auto-enabled and the button carried no real signal about the content.
+    private func applyAutoVRDetectionIfNeeded() {
+        guard !userOverrideVR, !vrAutoDetected else { return }
+        if supportsVR360 {
+            vrAutoDetected = true
+            isVR360Mode = true
+        } else if (usesMKVPlayer ? mkvControls.videoWidth : engine.resolutionWidth) > 0 {
+            // Resolution is known and doesn't match 360/VR heuristics — stop checking.
+            vrAutoDetected = true
+        }
     }
     var body: some View {
         ZStack {
@@ -153,6 +178,7 @@ struct VideoPlayerView: View {
                         }
                         Spacer()
                         Button {
+                            userOverrideVR = true
                             isVR360Mode.toggle()
                             scheduleAutoHide()
                         } label: {
@@ -249,14 +275,22 @@ struct VideoPlayerView: View {
         .navigationBarHidden(true)
         .onAppear {
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            // Defensive reset: guarantees a clean VR state for this video even
+            // if this view instance is ever reused across plays.
+            isVR360Mode = false
+            userOverrideVR = false
+            vrAutoDetected = false
             engine.onProgressTick = { seconds, duration, w, h in
                 onProgress?(seconds, duration, w, h)
             }
             if !usesMKVPlayer {
                 engine.load(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
             }
+            applyAutoVRDetectionIfNeeded()
             scheduleAutoHide()
         }
+        .onChange(of: engine.resolutionWidth) { _ in applyAutoVRDetectionIfNeeded() }
+        .onChange(of: mkvControls.videoWidth) { _ in applyAutoVRDetectionIfNeeded() }
         .onDisappear {
             hideTask?.cancel()
             ScreenOrientationLock.unlock()
@@ -317,6 +351,7 @@ struct VideoPlayerView: View {
             Spacer(minLength: 0)
 
             Button {
+                userOverrideVR = true
                 withAnimation(.easeInOut(duration: 0.25)) { isVR360Mode.toggle() }
                 scheduleAutoHide()
             } label: {

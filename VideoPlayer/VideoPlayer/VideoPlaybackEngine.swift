@@ -65,10 +65,21 @@ final class VideoPlaybackEngine: ObservableObject {
 
     /// YouTube-style forward buffer. AVPlayer may lower this automatically
     /// under memory, thermal, or network pressure.
+    /// Note: this buffers *compressed* network data, not decoded frames — but at
+    /// 8K bitrates (often 80-150+ Mbps) a 300s buffer means several GB of RAM
+    /// just for the queue, which is a common cause of stalls/jetsam on 8K content.
+    /// Once actual resolution is known, high-res clips are trimmed down to
+    /// `highResForwardBufferSeconds` (see the presentationSize observer below).
     private let forwardBufferSeconds: TimeInterval = 300
+    /// Cap used once we know a clip is very high resolution (8K-class).
+    private let highResForwardBufferSeconds: TimeInterval = 30
 
     /// Allow high bitrates needed for 4K (0 = no artificial cap).
     private let unlimitedPeakBitRate: Double = 0
+    /// Applied only under sustained thermal pressure so decode load can drop
+    /// instead of the player stalling outright. 4K-equivalent ceiling.
+    private let thermalThrottledMaxResolution = CGSize(width: 3840, height: 2160)
+    private let thermalThrottledPeakBitRate: Double = 40_000_000
 
     init() {
         configurePlayer()
@@ -489,6 +500,13 @@ final class VideoPlaybackEngine: ObservableObject {
                     self.resolutionTier = tier
                     let tag = tier.badgeText ?? "SD"
                     self.resolutionLabel = "\(w)×\(h) · \(tag)"
+
+                    // 8K-class content: a 300s network buffer at typical 8K
+                    // bitrates can mean several GB queued, which is what was
+                    // producing stalls/cut-outs. Trim it once we know the size.
+                    if w >= 6000 || h >= 6000 {
+                        item.preferredForwardBufferDuration = self.highResForwardBufferSeconds
+                    }
                 }
             }
         }
@@ -592,26 +610,43 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     private func handleMemoryWarning() {
-        // Shrink forward buffer temporarily to free decoded frame RAM.
+        // Shrink forward buffer temporarily to free decoded/queued RAM.
         if let item = player.currentItem {
             item.preferredForwardBufferDuration = 4
         }
-        // Restore preferred buffer after a short cool-down if still playing 4K.
+        // Restore afterwards — but only back to the size appropriate for this
+        // clip's resolution, not unconditionally back to 300s. Restoring the
+        // full 300s buffer right after a memory warning on an 8K stream is
+        // what was reproducing the same pressure a few seconds later.
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             guard let self, let item = self.player.currentItem else { return }
-            item.preferredForwardBufferDuration = self.forwardBufferSeconds
+            let isHighRes = self.resolutionWidth >= 6000 || self.resolutionHeight >= 6000
+            item.preferredForwardBufferDuration = isHighRes ? self.highResForwardBufferSeconds : self.forwardBufferSeconds
         }
     }
 
-    /// Under serious heat, slightly lower peak bitrate to protect frame rate.
-    /// Serious thermal only — normal use stays full 4K.
-    /// Keep the original stream quality even when the device is warm.
-    /// Playback can buffer rather than silently switching to a lower-resolution variant.
+    /// Lets decode load actually drop under sustained heat instead of forcing
+    /// full original quality no matter what. Previously this always reset to
+    /// "unlimited" on every thermal-state change (including the *serious*/
+    /// *critical* states), so on real hardware playing above the device's
+    /// decode ceiling — the common case for true 8K — it could only stall,
+    /// never gracefully step down.
     private func applyThermalPolicyIfNeeded() {
         guard let item = player.currentItem else { return }
-        item.preferredPeakBitRate = unlimitedPeakBitRate
-        if #available(iOS 11.0, *) {
-            item.preferredMaximumResolution = .zero
+        let state = ProcessInfo.processInfo.thermalState
+        switch state {
+        case .serious, .critical:
+            item.preferredPeakBitRate = thermalThrottledPeakBitRate
+            if #available(iOS 11.0, *) {
+                item.preferredMaximumResolution = thermalThrottledMaxResolution
+            }
+        case .nominal, .fair:
+            fallthrough
+        @unknown default:
+            item.preferredPeakBitRate = unlimitedPeakBitRate
+            if #available(iOS 11.0, *) {
+                item.preferredMaximumResolution = .zero
+            }
         }
     }
     /// AVPlayer uses the shared URL credential store for HTTP Basic challenges.
