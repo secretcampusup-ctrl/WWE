@@ -175,7 +175,7 @@ private final class PirateBayLatestModel: ObservableObject {
             if items.isEmpty { error = "No results found" }
         } catch {
             guard requestID == currentID else { return }
-            items = []; error = "Could not load this category"
+            items = []; self.error = "Could not load this category"
         }
     }
 }
