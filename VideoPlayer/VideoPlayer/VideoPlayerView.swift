@@ -616,9 +616,9 @@ struct VideoPlayerView: View {
                 } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 43, height: 43)
+                        .frame(width: 37, height: 37)
                 }
-                .popover(isPresented: $showQuickSettings, arrowEdge: .bottom) {
+                .popover(isPresented: $showQuickSettings, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
                     PlayerQuickSettingsPopover(
                         audioTracks: usesMKVPlayer ? [] : engine.audioTracks,
                         selectedAudioTrackID: engine.selectedAudioTrackID,
@@ -652,11 +652,11 @@ struct VideoPlayerView: View {
                 } label: {
                     Image(systemName: "rectangle.stack.fill")
                         .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 43, height: 43)
+                        .frame(width: 37, height: 37)
                 }
             }
             .foregroundColor(.white)
-            .padding(4)
+            .padding(3)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(
                 Capsule()
@@ -1410,12 +1410,12 @@ private struct CircularPlaybackButton: View {
                     .padding(5)
                     .shadow(color: AppPalette.blue.opacity(0.55), radius: 7)
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 34, weight: .bold))
+                    .font(.system(size: 27, weight: .bold))
                     .foregroundColor(.white)
                     .offset(x: isPlaying ? 0 : 2)
             }
-            .frame(width: 94, height: 94)
-            .shadow(color: .black.opacity(0.42), radius: 20, y: 8)
+            .frame(width: 76, height: 76)
+            .shadow(color: .black.opacity(0.38), radius: 14, y: 6)
         }
         .buttonStyle(PremiumPressButtonStyle())
         .accessibilityLabel(isPlaying ? "Pause" : "Play")
@@ -1498,13 +1498,13 @@ private struct PlayerQuickSettingsPopover: View {
         VStack(alignment: .leading, spacing: 0) {
             if page == .main { mainMenu } else { submenu }
         }
-        .frame(width: 285)
-        .padding(14)
+        .frame(width: 226)
+        .padding(9)
         .background(Color(uiColor: .secondarySystemBackground))
     }
 
     private var mainMenu: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 0) {
             row("Volume", icon: "speaker.wave.2.fill", value: "\(Int(volume * 100))%") { page = .volume }
             row("Playback Speed", icon: "speedometer", value: selectedSpeed == 1 ? "Normal" : "\(selectedSpeed)×") { page = .speed }
             row("Audio", icon: "music.note", value: selectedAudioTitle) { page = .audio }
@@ -1518,7 +1518,8 @@ private struct PlayerQuickSettingsPopover: View {
         VStack(alignment: .leading, spacing: 5) {
             Button { page = .main } label: {
                 Label("Back", systemImage: "chevron.left").font(.headline).foregroundColor(.primary)
-            }.padding(.bottom, 8)
+            }.font(.system(size: 13, weight: .semibold))
+            .padding(.bottom, 5)
             Divider()
             switch page {
             case .volume:
@@ -1543,7 +1544,7 @@ private struct PlayerQuickSettingsPopover: View {
                 choice("None", selected: subtitleFileName == nil, action: onDisableSubtitles)
                 Button(action: onChooseSubtitleFile) {
                     Label("Choose from Files", systemImage: "folder.fill")
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                        .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(7)
                 }.foregroundColor(.primary)
             case .main: EmptyView()
             }
@@ -1557,19 +1558,19 @@ private struct PlayerQuickSettingsPopover: View {
     private func row(_ title: String, icon: String, value: String?, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: icon).frame(width: 25).foregroundColor(.secondary)
-                Text(title).foregroundColor(.primary)
+                Image(systemName: icon).font(.system(size: 14, weight: .semibold)).frame(width: 21).foregroundColor(.secondary)
+                Text(title).font(.system(size: 13.5, weight: .medium)).foregroundColor(.primary)
                 Spacer()
-                if let value { Text(value).font(.caption).foregroundColor(.secondary).lineLimit(1) }
+                if let value { Text(value).font(.system(size: 10.5)).foregroundColor(.secondary).lineLimit(1) }
                 Image(systemName: "chevron.right").font(.caption.bold()).foregroundColor(.secondary)
-            }.padding(.horizontal, 8).frame(height: 48)
+            }.padding(.horizontal, 6).frame(height: 38)
         }
     }
 
     private func choice(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack { Image(systemName: selected ? "checkmark" : "").frame(width: 18); Text(title); Spacer() }
-                .foregroundColor(.primary).padding(.horizontal, 8).frame(height: 40)
+                .font(.system(size: 13)).foregroundColor(.primary).padding(.horizontal, 6).frame(height: 33)
         }
     }
 }
