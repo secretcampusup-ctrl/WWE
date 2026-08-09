@@ -8,3 +8,13 @@ enum AppPalette {
     static let gradient = LinearGradient(colors: [purple, blue], startPoint: .leading, endPoint: .trailing)
     static let diagonalGradient = LinearGradient(colors: [purple, blue], startPoint: .topLeading, endPoint: .bottomTrailing)
 }
+
+
+struct PremiumPressButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .brightness(configuration.isPressed ? 0.06 : 0)
+            .animation(.spring(response: 0.26, dampingFraction: 0.72), value: configuration.isPressed)
+    }
+}

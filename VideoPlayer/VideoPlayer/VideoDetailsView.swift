@@ -559,33 +559,50 @@ struct VideoDetailsView: View {
     }
 
     private var seriesEpisodesSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Series Episodes").font(.headline).foregroundColor(.white)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                ZStack { Circle().fill(AppPalette.accent.opacity(0.14)); Image(systemName: "rectangle.stack.fill").foregroundStyle(AppPalette.accent) }.frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Episodes").font(.headline).foregroundStyle(.white)
+                    Text("Continue watching the series").font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Text("\(item.relatedEpisodes.count) episodes").font(.caption).foregroundColor(.secondary)
+                Text("\(item.relatedEpisodes.count)").font(.caption.bold().monospacedDigit()).foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 6).background(AppPalette.accent.opacity(0.18), in: Capsule())
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                LazyHStack(spacing: 12) {
                     ForEach(item.relatedEpisodes) { episode in
+                        let current = episode.id == item.id
                         Button { onSelectEpisode?(episode.id) } label: {
-                            VStack(alignment: .leading, spacing: 7) {
+                            VStack(alignment: .leading, spacing: 11) {
                                 HStack {
-                                    Text(episode.numberLabel).font(.caption.bold()).foregroundColor(AppTheme.accent)
+                                    Text(episode.numberLabel).font(.system(size: 11, weight: .bold, design: .rounded)).tracking(0.5)
+                                        .foregroundStyle(current ? Color.white : AppPalette.accent)
                                     Spacer()
-                                    Image(systemName: episode.id == item.id ? "play.circle.fill" : "play.circle").foregroundColor(.white.opacity(0.8))
+                                    ZStack {
+                                        Circle().fill(current ? Color.white.opacity(0.2) : AppPalette.accent.opacity(0.14)).frame(width: 34, height: 34)
+                                        Image(systemName: current ? "waveform" : "play.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(current ? Color.white : AppPalette.accent)
+                                    }
                                 }
-                                Text(episode.episodeTitle).font(.subheadline.weight(.semibold)).foregroundColor(.white).lineLimit(2)
+                                Text(episode.episodeTitle).font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(.white).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                                HStack(spacing: 5) {
+                                    Circle().fill(current ? Color.white : AppPalette.accent).frame(width: 5, height: 5)
+                                    Text(current ? "NOW PLAYING" : "PLAY EPISODE").font(.system(size: 9, weight: .bold, design: .rounded)).tracking(0.7).foregroundStyle(current ? Color.white.opacity(0.85) : .secondary)
+                                }
                             }
-                            .padding(12).frame(width: 180, height: 82, alignment: .leading)
-                            .background(episode.id == item.id ? AppTheme.accent.opacity(0.18) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(episode.id == item.id ? AppTheme.accent.opacity(0.7) : Color.white.opacity(0.07)))
-                        }.buttonStyle(.plain)
+                            .padding(14).frame(width: 220, height: 124, alignment: .leading)
+                            .background(current ? AnyShapeStyle(AppPalette.diagonalGradient) : AnyShapeStyle(Color.white.opacity(0.055)), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(current ? Color.white.opacity(0.24) : AppPalette.blue.opacity(0.16), lineWidth: 1))
+                            .shadow(color: current ? AppPalette.purple.opacity(0.3) : Color.black.opacity(0.18), radius: 12, y: 7)
+                        }
+                        .buttonStyle(PremiumPressButtonStyle())
                     }
-                }
+                }.padding(.vertical, 4).padding(.horizontal, 1)
             }
         }
     }
+
     private func tmdbInformationCard(_ details: TMDBTitleDetails) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text(details.title).font(.title3.bold()); Spacer(); if details.voteAverage > 0 { Label(String(format: "%.1f", details.voteAverage), systemImage: "star.fill").foregroundColor(.yellow) } }

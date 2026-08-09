@@ -324,9 +324,9 @@ struct PikPakWebDAVView: View {
                         .padding(.top, 80)
                     } else {
                         if isSeriesLocation {
-                            LazyVStack(spacing: 10) {
-                                ForEach(seriesEpisodeFiles) { file in
-                                    PikPakEpisodeRow(file: file) { open(file, on: server) }
+                            LazyVStack(spacing: 12) {
+                                ForEach(Array(seriesEpisodeFiles.enumerated()), id: \.element.id) { index, file in
+                                    PikPakEpisodeRow(file: file, index: index) { open(file, on: server) }
                                 }
                             }
                         } else {
@@ -654,7 +654,9 @@ private struct PikPakLocation: Identifiable {
 
 private struct PikPakEpisodeRow: View {
     let file: WebDAVFile
+    let index: Int
     let action: () -> Void
+    @State private var appeared = false
 
     private var episode: (season: Int, episode: Int) {
         VideoTitleFormatter.episodeComponents(from: file.name) ?? (1, 0)
@@ -664,27 +666,47 @@ private struct PikPakEpisodeRow: View {
         Button(action: action) {
             HStack(spacing: 14) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 13).fill(AppTheme.accent.opacity(0.16))
-                    VStack(spacing: 1) {
-                        Text("\(episode.episode)").font(.title2.bold()).foregroundColor(.white)
-                        Text("EPISODE").font(.caption2).foregroundColor(AppTheme.accent)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous).fill(AppPalette.diagonalGradient)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.22), lineWidth: 1)
+                    VStack(spacing: 0) {
+                        Text(String(format: "%02d", episode.episode)).font(.system(size: 25, weight: .black, design: .rounded)).foregroundStyle(.white)
+                        Text("EPISODE").font(.system(size: 8, weight: .bold, design: .rounded)).tracking(0.8).foregroundStyle(.white.opacity(0.76))
                     }
-                }.frame(width: 66, height: 66)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Season \(episode.season) · Episode \(episode.episode)").font(.caption.weight(.semibold)).foregroundColor(AppTheme.accent)
-                    Text(VideoTitleFormatter.episodeTitle(from: file.name)).font(.headline).foregroundColor(.white).lineLimit(2)
-                    if !file.sizeFormatted.isEmpty { Text(file.sizeFormatted).font(.caption2).foregroundColor(.secondary) }
                 }
-                Spacer()
-                Image(systemName: "play.circle.fill").font(.title2).foregroundStyle(AppTheme.accent)
+                .frame(width: 72, height: 72)
+                .shadow(color: AppPalette.purple.opacity(0.28), radius: 12, y: 6)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("SEASON \(episode.season)").font(.system(size: 10, weight: .bold, design: .rounded)).tracking(0.9)
+                        .foregroundStyle(AppPalette.accent).padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(AppPalette.accent.opacity(0.13), in: Capsule())
+                    Text(VideoTitleFormatter.episodeTitle(from: file.name)).font(.system(size: 16, weight: .semibold, design: .rounded)).foregroundStyle(.white).lineLimit(2)
+                    if !file.sizeFormatted.isEmpty { Label(file.sizeFormatted, systemImage: "externaldrive.fill").font(.caption2).foregroundStyle(.secondary) }
+                }
+                Spacer(minLength: 6)
+                ZStack {
+                    Circle().fill(AppPalette.accent.opacity(0.14)).frame(width: 40, height: 40)
+                    Image(systemName: "play.fill").font(.system(size: 14, weight: .bold)).foregroundStyle(AppPalette.accent).offset(x: 1)
+                }
             }
             .padding(12)
-            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 17))
-            .overlay(RoundedRectangle(cornerRadius: 17).stroke(Color.white.opacity(0.07)))
-        }.buttonStyle(.plain)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(LinearGradient(colors: [Color.white.opacity(0.085), AppPalette.purple.opacity(0.055), Color.white.opacity(0.035)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            }
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(LinearGradient(colors: [Color.white.opacity(0.16), AppPalette.blue.opacity(0.18), Color.white.opacity(0.04)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
+            .shadow(color: Color.black.opacity(0.22), radius: 12, y: 7)
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 18)
+        .transaction { $0.disablesAnimations = false }
+        .onAppear {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.82).delay(Double(min(index, 10)) * 0.045)) { appeared = true }
+        }
     }
 }
+
 private struct PikPakFilePoster: View {
     let file: WebDAVFile
     let server: WebDAVServer
