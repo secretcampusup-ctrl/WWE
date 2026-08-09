@@ -339,6 +339,13 @@ private struct PirateBayView: View {
     }
 }
 
+private let pirateBayImageRequestModifier = AnyModifier { request in
+    var request = request
+    request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1", forHTTPHeaderField: "User-Agent")
+    request.setValue("https://trafficimage.club/", forHTTPHeaderField: "Referer")
+    return request
+}
+
 @MainActor private final class PirateBayDetailsModel: ObservableObject {
     @Published var imageURLs: [URL] = []; @Published var isLoading = false
     func load(id: String) async {
@@ -406,14 +413,18 @@ private struct PirateBayDetailsView: View {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                         ForEach(Array(model.imageURLs.enumerated()), id: \.offset) { index, url in
                             Button { selectedImage = index; showViewer = true } label: {
-                                KFImage(url)
-                                    .placeholder { ProgressView() }
-                                    .resizable().scaledToFit()
-                                    .frame(maxWidth: .infinity).frame(height: 155)
-                                    .padding(5)
-                                    .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
-                                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.18), lineWidth: 1))
-                                    .contentShape(RoundedRectangle(cornerRadius: 16))
+                                ZStack {
+                                    Color.black.opacity(0.55)
+                                    KFImage(url)
+                                        .requestModifier(pirateBayImageRequestModifier)
+                                        .placeholder { ProgressView() }
+                                        .resizable().scaledToFit()
+                                        .padding(7)
+                                }
+                                .frame(maxWidth: .infinity).frame(height: 165)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.28), lineWidth: 1.2))
+                                .contentShape(RoundedRectangle(cornerRadius: 16))
                             }.buttonStyle(.plain)
                         }
                     }
@@ -440,5 +451,5 @@ private struct PirateBayImageViewer: View {
 
 private struct PirateBayZoomImage: View {
     let url: URL; @State private var scale: CGFloat = 1; @State private var finalScale: CGFloat = 1
-    var body: some View { KFImage(url).placeholder { ProgressView().tint(.white) }.resizable().scaledToFit().scaleEffect(scale).gesture(MagnificationGesture().onChanged { scale = max(1, min(finalScale * $0, 5)) }.onEnded { _ in finalScale = scale }).onTapGesture(count: 2) { withAnimation(.spring()) { scale = scale > 1 ? 1 : 2; finalScale = scale } }.padding(.vertical, 55) }
+    var body: some View { KFImage(url).requestModifier(pirateBayImageRequestModifier).placeholder { ProgressView().tint(.white) }.resizable().scaledToFit().scaleEffect(scale).gesture(MagnificationGesture().onChanged { scale = max(1, min(finalScale * $0, 5)) }.onEnded { _ in finalScale = scale }).onTapGesture(count: 2) { withAnimation(.spring()) { scale = scale > 1 ? 1 : 2; finalScale = scale } }.padding(.vertical, 55) }
 }
