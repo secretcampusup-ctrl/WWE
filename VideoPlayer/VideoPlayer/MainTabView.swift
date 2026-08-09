@@ -138,6 +138,12 @@ private enum PirateBaySection: String, CaseIterable, Identifiable {
     var tint: Color { switch self { case .movies: return .blue; case .tv: return .cyan; case .adult: return .pink } }
 }
 
+private enum PirateBaySort: String, CaseIterable, Identifiable {
+    case newest = "Newest", seeders = "Seeders"
+    var id: String { rawValue }
+    var icon: String { self == .newest ? "clock.fill" : "arrow.up.circle.fill" }
+}
+
 private enum PirateBayQuality: String, CaseIterable, Identifiable {
     case fullHD = "1080p", ultraHD = "2160p"
     var id: String { rawValue }
@@ -198,6 +204,7 @@ private struct PirateBayView: View {
     @State private var section: PirateBaySection = .movies
     @State private var quality: PirateBayQuality = .fullHD
     @State private var query = ""
+    @State private var sort: PirateBaySort = .newest
     @State private var notice: String?
     @State private var addingID: String?
     @FocusState private var searchFocused: Bool
@@ -214,7 +221,7 @@ private struct PirateBayView: View {
                         qualityBar
                         searchBar
                         statusArea
-                        ForEach(model.items) { resultCard($0) }
+                        ForEach(sortedItems) { resultCard($0) }
                     }
                     .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 105)
                 }
@@ -290,33 +297,39 @@ private struct PirateBayView: View {
         .padding(.horizontal, 14).padding(.vertical, 12).background(Color.white.opacity(0.07), in: Capsule()).overlay(Capsule().stroke(Color.white.opacity(0.07)))
     }
 
+    private var sortedItems: [PirateBayResult] {
+        sort == .newest
+            ? model.items.sorted { $0.addedDate > $1.addedDate }
+            : model.items.sorted { $0.seedCount == $1.seedCount ? $0.addedDate > $1.addedDate : $0.seedCount > $1.seedCount }
+    }
+
     @ViewBuilder private var statusArea: some View {
         if model.isLoading { ProgressView().tint(section.tint).padding(.top, 35) }
         else if let error = model.error { Text(error).foregroundStyle(.secondary).padding(.top, 35) }
         else {
-            HStack { Text("LATEST \(section.rawValue.uppercased()) · \(quality.rawValue)").font(.caption.bold()).tracking(0.8).foregroundStyle(.secondary); Spacer(); Text("\(model.items.count)").font(.caption.monospacedDigit()).foregroundStyle(section.tint) }
+            HStack {
+                Text("LATEST \(section.rawValue.uppercased()) · \(quality.rawValue)").font(.caption.bold()).tracking(0.8).foregroundStyle(.secondary)
+                Spacer()
+                Menu { Picker("Sort", selection: $sort) { ForEach(PirateBaySort.allCases) { option in Label(option.rawValue, systemImage: option.icon).tag(option) } } }
+                label: { Label(sort.rawValue, systemImage: sort.icon).font(.caption.bold()).foregroundStyle(.white).padding(.horizontal, 11).padding(.vertical, 7).background(Color.white.opacity(0.09), in: Capsule()) }
+                Text("\(model.items.count)").font(.caption.monospacedDigit()).foregroundStyle(section.tint)
+            }
                 .padding(.horizontal, 3).padding(.top, 3)
         }
     }
 
     private func resultCard(_ item: PirateBayResult) -> some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Text(item.name).font(.headline).foregroundStyle(.white).lineLimit(3)
-            HStack(spacing: 12) {
-                Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green)
-                Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange)
-                Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary); Spacer()
-            }.font(.caption.bold())
-            HStack(spacing: 10) {
-                Button { UIPasteboard.general.string = item.magnet; toast("Magnet copied") } label: { Label("Copy", systemImage: "doc.on.doc").frame(maxWidth: .infinity) }.buttonStyle(.bordered)
-                Button {
-                    addingID = item.id
-                    Task { let error = await vm.addMagnetToPikPak(item.magnet); addingID = nil; toast(error ?? "Added to PikPak") }
-                } label: {
-                    if addingID == item.id { ProgressView().frame(maxWidth: .infinity) } else { Label("Add to PikPak", systemImage: "externaldrive.badge.plus").frame(maxWidth: .infinity) }
-                }.buttonStyle(.borderedProminent).tint(section.tint).disabled(addingID != nil)
-            }
-        }.padding(15).background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.07)))
+        NavigationLink { PirateBayDetailsView(item: item, tint: section.tint) } label: {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(alignment: .top) { Text(item.name).font(.headline).foregroundStyle(.white).lineLimit(3); Spacer(minLength: 8); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 4) }
+                HStack(spacing: 12) {
+                    Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green)
+                    Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange)
+                    Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary)
+                    Spacer(); Text(item.addedDate, style: .relative).foregroundStyle(.secondary)
+                }.font(.caption.bold())
+            }.padding(15).background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.07)))
+        }.buttonStyle(.plain)
     }
 
     private func reload() async { await model.load(section: section, quality: quality, query: query) }
@@ -324,4 +337,73 @@ private struct PirateBayView: View {
         notice = text
         Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if notice == text { notice = nil } }
     }
+}
+
+@MainActor private final class PirateBayDetailsModel: ObservableObject {
+    @Published var imageURLs: [URL] = []; @Published var isLoading = false
+    func load(id: String) async {
+        guard imageURLs.isEmpty, let url = URL(string: "https://apibay.org/t.php?id=\(id)") else { return }
+        isLoading = true; defer { isLoading = false }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            let text = root.values.compactMap { $0 as? String }.joined(separator: "\n").replacingOccurrences(of: "&amp;", with: "&")
+            let regex = try NSRegularExpression(pattern: #"https?://[^\s\]\[\"'<>]+"#, options: .caseInsensitive)
+            let range = NSRange(text.startIndex..<text.endIndex, in: text), hosts = ["imgur", "imagebam", "imgbox", "postimg", "pixhost", "ibb.co", "imagevenue", "prnt"]
+            var seen = Set<String>()
+            imageURLs = regex.matches(in: text, range: range).compactMap { match in
+                guard let r = Range(match.range, in: text) else { return nil }
+                let raw = String(text[r]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)")), lower = raw.lowercased()
+                guard ([".jpg", ".jpeg", ".png", ".webp", ".gif"].contains { lower.contains($0) } || hosts.contains { lower.contains($0) }), seen.insert(raw).inserted else { return nil }
+                return URL(string: raw)
+            }
+        } catch { imageURLs = [] }
+    }
+}
+
+private struct PirateBayDetailsView: View {
+    let item: PirateBayResult; let tint: Color
+    @StateObject private var model = PirateBayDetailsModel()
+    @State private var sending = false; @State private var message: String?; @State private var selectedImage = 0; @State private var showViewer = false
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text(item.name).font(.title2.bold()).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    actionButton("Send to Offcloud", icon: "cloud.fill", busy: sending) { sendToOffcloud() }
+                    actionButton("Copy Magnet", icon: "doc.on.doc.fill") { UIPasteboard.general.string = item.magnet; toast("Magnet copied") }
+                }
+                HStack(spacing: 14) { Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green); Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange); Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary) }.font(.caption.bold())
+                if model.isLoading { ProgressView("Loading images…").frame(maxWidth: .infinity).padding(.top, 35) }
+                else if !model.imageURLs.isEmpty {
+                    Text("IMAGES").font(.caption.bold()).tracking(1).foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                        ForEach(Array(model.imageURLs.enumerated()), id: \.offset) { index, url in
+                            Button { selectedImage = index; showViewer = true } label: { KFImage(url).placeholder { ProgressView() }.resizable().scaledToFill().frame(maxWidth: .infinity).frame(height: 155).clipped().background(Color.white.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 16)) }.buttonStyle(.plain)
+                        }
+                    }
+                }
+            }.padding(16).padding(.bottom, 90)
+        }.background(AppTheme.bg.ignoresSafeArea()).navigationTitle("Details").navigationBarTitleDisplayMode(.inline)
+        .overlay(alignment: .top) { if let message { Text(message).font(.subheadline.bold()).padding(.horizontal, 16).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
+        .task { await model.load(id: item.id) }.fullScreenCover(isPresented: $showViewer) { PirateBayImageViewer(urls: model.imageURLs, selection: $selectedImage) }
+    }
+    private func actionButton(_ title: String, icon: String, busy: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Group { if busy { ProgressView() } else { Label(title, systemImage: icon) } }.font(.subheadline.bold()).frame(maxWidth: .infinity).padding(.vertical, 13) }.buttonStyle(.plain).foregroundStyle(.white).background(tint.opacity(0.82), in: Capsule()).disabled(busy)
+    }
+    private func sendToOffcloud() {
+        let key = OffcloudKeyStore.load(); guard !key.isEmpty else { toast("Add your Offcloud API key first"); return }; sending = true
+        Task { do { _ = try await OffcloudClient(apiKey: key).create(url: item.magnet); toast("Sent to Offcloud") } catch { toast(error.localizedDescription) }; sending = false }
+    }
+    private func toast(_ value: String) { message = value; Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if message == value { message = nil } } }
+}
+
+private struct PirateBayImageViewer: View {
+    let urls: [URL]; @Binding var selection: Int; @Environment(\.dismiss) private var dismiss
+    var body: some View { ZStack(alignment: .topTrailing) { Color.black.ignoresSafeArea(); TabView(selection: $selection) { ForEach(Array(urls.enumerated()), id: \.offset) { index, url in PirateBayZoomImage(url: url).tag(index) } }.tabViewStyle(.page(indexDisplayMode: .always)); Button { dismiss() } label: { Image(systemName: "xmark").font(.headline.bold()).padding(12).background(.ultraThinMaterial, in: Circle()) }.foregroundStyle(.white).padding() } }
+}
+
+private struct PirateBayZoomImage: View {
+    let url: URL; @State private var scale: CGFloat = 1; @State private var finalScale: CGFloat = 1
+    var body: some View { KFImage(url).placeholder { ProgressView().tint(.white) }.resizable().scaledToFit().scaleEffect(scale).gesture(MagnificationGesture().onChanged { scale = max(1, min(finalScale * $0, 5)) }.onEnded { _ in finalScale = scale }).onTapGesture(count: 2) { withAnimation(.spring()) { scale = scale > 1 ? 1 : 2; finalScale = scale } }.padding(.vertical, 55) }
 }
