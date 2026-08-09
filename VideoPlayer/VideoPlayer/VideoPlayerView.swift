@@ -571,14 +571,28 @@ private final class MKVPlaybackControls: ObservableObject {
         }
     }
     func updateTime(current: Double, duration: Double) {
-        currentSeconds = max(0, current)
         durationSeconds = max(0, duration)
+        // VLC keeps reporting the pre-seek clock while it fills the new buffer.
+        // Hold the requested label steady until updateProgress confirms arrival.
+        if let requestedProgress, durationSeconds > 0 {
+            currentSeconds = requestedProgress * durationSeconds
+        } else {
+            currentSeconds = max(0, current)
+        }
     }
     func updateVideoSize(_ size: CGSize) {
         videoWidth = Int(size.width)
         videoHeight = Int(size.height)
     }
-    func skip(by seconds: Int) { surface?.skip(by: seconds) }
+    func skip(by seconds: Int) {
+        guard durationSeconds > 0 else { surface?.skip(by: seconds); return }
+        let base = requestedProgress.map { $0 * durationSeconds } ?? currentSeconds
+        let targetSeconds = min(durationSeconds, max(0, base + Double(seconds)))
+        let targetProgress = targetSeconds / durationSeconds
+        requestedProgress = targetProgress
+        currentSeconds = targetSeconds
+        surface?.seek(to: targetProgress)
+    }
     func setRate(_ rate: Float) { surface?.setRate(rate) }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -1794,18 +1808,43 @@ private final class DedicatedVRController: ObservableObject {
     @Published var videoWidth = 0
     @Published var videoHeight = 0
     weak var surface: DedicatedVRSurfaceView?
+    private var pendingSeekSeconds: Double?
 
     var resolutionLabel: String { videoWidth > 0 ? "\(videoWidth)×\(videoHeight)" : "Loading" }
     var currentLabel: String { Self.time(currentSeconds) }
     var durationLabel: String { Self.time(durationSeconds) }
     func toggle() { surface?.toggle() }
-    func skip(_ seconds: Double) { surface?.skip(seconds) }
-    func seek(_ value: Double) { surface?.seek(value) }
+    func skip(_ seconds: Double) {
+        guard durationSeconds > 0 else { surface?.skip(seconds); return }
+        let target = min(durationSeconds, max(0, (pendingSeekSeconds ?? currentSeconds) + seconds))
+        pendingSeekSeconds = target
+        currentSeconds = target
+        progress = target / durationSeconds
+        surface?.seek(toSeconds: target)
+    }
+    func seek(_ value: Double) {
+        guard durationSeconds > 0 else { surface?.seek(value); return }
+        let target = min(1, max(0, value)) * durationSeconds
+        pendingSeekSeconds = target
+        currentSeconds = target
+        progress = target / durationSeconds
+        surface?.seek(toSeconds: target)
+    }
     func stop() { surface?.stop() }
 
     func update(playing: Bool, buffering: Bool, position: Double, current: Double, duration: Double, size: CGSize) {
-        isPlaying = playing; isBuffering = buffering; progress = min(1, max(0, position))
-        currentSeconds = current; durationSeconds = duration
+        isPlaying = playing; isBuffering = buffering; durationSeconds = duration
+        if let pendingSeekSeconds {
+            if abs(current - pendingSeekSeconds) <= 0.75 {
+                self.pendingSeekSeconds = nil
+                progress = min(1, max(0, position)); currentSeconds = current
+            } else {
+                currentSeconds = pendingSeekSeconds
+                if duration > 0 { progress = min(1, max(0, pendingSeekSeconds / duration)) }
+            }
+        } else {
+            progress = min(1, max(0, position)); currentSeconds = current
+        }
         if size.width > 1 { videoWidth = Int(size.width); videoHeight = Int(size.height) }
     }
 
@@ -1912,5 +1951,6 @@ private final class DedicatedVRSurfaceView: UIView {
     func toggle() { player.isPlaying ? player.pause() : player.play() }
     func skip(_ seconds: Double) { player.time = VLCTime(int: Int32(max(0, Double(player.time.intValue) + seconds * 1000))) }
     func seek(_ value: Double) { player.position = Float(min(1, max(0, value))) }
+    func seek(toSeconds seconds: Double) { player.time = VLCTime(int: Int32(max(0, seconds * 1000))) }
     func stop() { motion.stopDeviceMotionUpdates(); timer?.invalidate(); player.stop(); player.drawable = nil }
 }

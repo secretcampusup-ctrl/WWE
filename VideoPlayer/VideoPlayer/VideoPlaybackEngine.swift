@@ -53,6 +53,8 @@ final class VideoPlaybackEngine: ObservableObject {
     private var progressSaveCounter: Int = 0
     /// Keeps the scrubber at the requested spot while AVPlayer buffers the seek.
     private var pendingSeekSeconds: Double?
+    /// Prevents a cancelled older seek completion from clearing a newer request.
+    private var seekGeneration: UInt64 = 0
     /// True for the duration of a pinch/pan gesture on the video surface.
     /// See setInteracting(_:).
     private var isInteracting = false
@@ -229,13 +231,16 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     func skipForward(seconds: Double = 15) {
-        let t = CMTimeGetSeconds(player.currentTime()) + seconds
-        seek(toSeconds: t)
+        // Repeated taps must accumulate from the last requested position, not
+        // AVPlayer's stale currentTime while the previous seek is buffering.
+        let base = pendingSeekSeconds ?? CMTimeGetSeconds(player.currentTime())
+        let limit = durationSeconds > 0 ? durationSeconds : .greatestFiniteMagnitude
+        seek(toSeconds: min(limit, max(0, base) + seconds))
     }
 
     func skipBackward(seconds: Double = 15) {
-        let t = max(0, CMTimeGetSeconds(player.currentTime()) - seconds)
-        seek(toSeconds: t)
+        let base = pendingSeekSeconds ?? CMTimeGetSeconds(player.currentTime())
+        seek(toSeconds: max(0, base - seconds))
     }
 
     func seek(to fraction: Double) {
@@ -346,6 +351,8 @@ final class VideoPlaybackEngine: ObservableObject {
     private func seek(toSeconds seconds: Double) {
         guard seconds.isFinite else { return }
         let safeSeconds = max(0, seconds)
+        seekGeneration &+= 1
+        let generation = seekGeneration
         pendingSeekSeconds = safeSeconds
         currentSeconds = safeSeconds
         if durationSeconds > 0 { progress = min(1, max(0, safeSeconds / durationSeconds)) }
@@ -357,7 +364,7 @@ final class VideoPlaybackEngine: ObservableObject {
         isBuffering = true
         player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, generation == self.seekGeneration else { return }
                 if finished, self.isPlaying {
                     self.player.play()
                 }

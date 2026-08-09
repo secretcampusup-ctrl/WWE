@@ -120,7 +120,10 @@ struct ContentView: View {
                 }
             }
             .overlay {
-                if vm.isLoading || isResolving {
+                // Main tabs remain mounted behind each other; only show Library's
+                // loading overlay while Library is the visible tab. PikPak may update
+                // the shared view model while its own folder is loading.
+                if isActive && (vm.isLoading || isResolving) {
                     ProgressView("Resolving link…")
                         .padding(20)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
