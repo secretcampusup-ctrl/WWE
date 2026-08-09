@@ -40,6 +40,7 @@ struct VideoPlayerView: View {
     @State private var mkvResetZoomToken = 0
     @StateObject private var mkvControls = MKVPlaybackControls()
     @State private var showPlaybackSettings = false
+    @State private var showQuickSettings = false
     @State private var subtitleSize: Double = 1.0
     @State private var subtitleColor: PlayerSubtitleColor = .white
     @State private var selectedAudioTrack = ""
@@ -47,7 +48,13 @@ struct VideoPlayerView: View {
     @State private var showSubtitleImporter = false
     @State private var externalSubtitleCues: [ExternalSubtitleCue] = []
     @State private var externalSubtitleFileName: String?
-    @State private var selectedQuality = "Auto"
+    @State private var screenBrightness: Double = 0.5
+    @State private var playerVolume: Double = 1.0
+    @State private var subtitleDelay: Double = 0
+    @State private var subtitleHeight: Double = 0
+    @State private var subtitleShadow = true
+    @State private var subtitleBackground = true
+    @State private var subtitleFont: PlayerSubtitleFont = .rounded
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
 
@@ -264,7 +271,7 @@ struct VideoPlayerView: View {
                         }
                     }
                     .padding(.trailing, 26)
-                    .padding(.bottom, showControls ? 118 : 32)
+                    .padding(.bottom, showControls ? 205 : 34)
                 }
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
@@ -273,15 +280,15 @@ struct VideoPlayerView: View {
                 VStack {
                     Spacer()
                     Text(cue.text)
-                        .font(.system(size: 22 * subtitleSize, weight: .semibold))
+                        .font(.system(size: 22 * subtitleSize, weight: .semibold, design: subtitleFont.design))
                         .foregroundColor(subtitleColor.color)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
-                        .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .shadow(color: .black.opacity(0.8), radius: 3)
+                        .background(subtitleBackground ? Color.black.opacity(0.58) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .shadow(color: subtitleShadow ? .black.opacity(0.9) : .clear, radius: subtitleShadow ? 4 : 0)
                         .padding(.horizontal, 34)
-                        .padding(.bottom, showControls ? 48 : 24)
+                        .padding(.bottom, (showControls ? 48 : 24) + subtitleHeight)
                 }
                 .allowsHitTesting(false)
             }
@@ -299,28 +306,39 @@ struct VideoPlayerView: View {
         .sheet(isPresented: $showPlaybackSettings, onDismiss: { scheduleAutoHide() }) {
             PlayerAdvancedSettingsSheet(
                 selectedAudioTrack: $selectedAudioTrack,
-                selectedSubtitleTrack: $selectedSubtitleTrack,
-                selectedQuality: $selectedQuality,
                 subtitleSize: $subtitleSize,
                 subtitleColor: $subtitleColor,
-                currentQuality: usesMKVPlayer ? mkvQualityLabel : (engine.resolutionTier.badgeText ?? "Auto"),
+                subtitleDelay: $subtitleDelay,
+                subtitleHeight: $subtitleHeight,
+                subtitleShadow: $subtitleShadow,
+                subtitleBackground: $subtitleBackground,
+                subtitleFont: $subtitleFont,
+                brightness: $screenBrightness,
+                volume: $playerVolume,
                 audioTracks: usesMKVPlayer ? [] : engine.audioTracks,
-                selectedAudioTrackID: usesMKVPlayer ? nil : engine.selectedAudioTrackID,
+                selectedAudioTrackID: engine.selectedAudioTrackID,
                 subtitleFileName: externalSubtitleFileName,
-                onAudioTrackChange: { id in
-                    selectedAudioTrack = id
-                    engine.selectAudioTrack(id: id)
+                isFillMode: usesMKVPlayer ? mkvFillMode : isFillMode,
+                onAspectRatioToggle: {
+                    if usesMKVPlayer { mkvFillMode.toggle() }
+                    else { isFillMode.toggle(); fillModeToken += 1 }
                 },
+                onBrightnessChange: { value in
+                    screenBrightness = value
+                    UIScreen.main.brightness = CGFloat(value)
+                },
+                onVolumeChange: { value in
+                    playerVolume = value
+                    if !usesMKVPlayer { engine.player.volume = Float(min(1, max(0, value))) }
+                },
+                onAudioTrackChange: { id in engine.selectAudioTrack(id: id) },
                 onChooseSubtitleFile: {
                     showPlaybackSettings = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        showSubtitleImporter = true
-                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showSubtitleImporter = true }
                 },
                 onDisableSubtitles: {
                     externalSubtitleCues = []
                     externalSubtitleFileName = nil
-                    selectedSubtitleTrack = "Off"
                 },
                 onRateChange: { rate in
                     if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
@@ -338,6 +356,8 @@ struct VideoPlayerView: View {
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
+            screenBrightness = Double(UIScreen.main.brightness)
+            playerVolume = Double(engine.player.volume)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Defensive reset: guarantees a clean VR state for this video even
             // if this view instance is ever reused across plays.
@@ -537,7 +557,10 @@ struct VideoPlayerView: View {
     }
 
     private var activeExternalSubtitle: ExternalSubtitleCue? {
-        externalSubtitleCues.first { currentPlaybackSeconds >= $0.start && currentPlaybackSeconds <= $0.end }
+        externalSubtitleCues.first {
+            let adjustedTime = currentPlaybackSeconds - subtitleDelay
+            return adjustedTime >= $0.start && adjustedTime <= $0.end
+        }
     }
 
     private func loadExternalSubtitle(from fileURL: URL) {
@@ -588,12 +611,41 @@ struct VideoPlayerView: View {
             Spacer(minLength: 8)
             HStack(spacing: 3) {
                 Button {
-                    showPlaybackSettings = true
+                    showQuickSettings = true
                     hideTask?.cancel()
                 } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 17, weight: .semibold))
                         .frame(width: 43, height: 43)
+                }
+                .popover(isPresented: $showQuickSettings, arrowEdge: .bottom) {
+                    PlayerQuickSettingsPopover(
+                        audioTracks: usesMKVPlayer ? [] : engine.audioTracks,
+                        selectedAudioTrackID: engine.selectedAudioTrackID,
+                        subtitleFileName: externalSubtitleFileName,
+                        volume: $playerVolume,
+                        onVolumeChange: { value in
+                            playerVolume = value
+                            if !usesMKVPlayer { engine.player.volume = Float(min(1, max(0, value))) }
+                        },
+                        onRateChange: { rate in
+                            if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
+                        },
+                        onAudioTrackChange: { id in engine.selectAudioTrack(id: id) },
+                        onChooseSubtitleFile: {
+                            showQuickSettings = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showSubtitleImporter = true }
+                        },
+                        onDisableSubtitles: {
+                            externalSubtitleCues = []
+                            externalSubtitleFileName = nil
+                        },
+                        onAdvanced: {
+                            showQuickSettings = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showPlaybackSettings = true }
+                        }
+                    )
+                    .presentationCompactAdaptation(.popover)
                 }
                 Button {
                     dismiss()
@@ -1405,110 +1457,155 @@ private enum PlayerSubtitleColor: String, CaseIterable, Identifiable {
     }
 }
 
-private struct PlayerAdvancedSettingsSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Binding var selectedAudioTrack: String
-    @Binding var selectedSubtitleTrack: String
-    @Binding var selectedQuality: String
-    @Binding var subtitleSize: Double
-    @Binding var subtitleColor: PlayerSubtitleColor
-    let currentQuality: String
+private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
+    case rounded = "Rounded"
+    case standard = "Standard"
+    case monospaced = "Monospaced"
+    var id: String { rawValue }
+    var design: Font.Design {
+        switch self { case .rounded: return .rounded; case .standard: return .default; case .monospaced: return .monospaced }
+    }
+}
+
+private enum QuickSettingsPage { case main, volume, speed, audio, subtitles }
+
+private struct PlayerQuickSettingsPopover: View {
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
     let subtitleFileName: String?
+    @Binding var volume: Double
+    let onVolumeChange: (Double) -> Void
+    let onRateChange: (Float) -> Void
+    let onAudioTrackChange: (String) -> Void
+    let onChooseSubtitleFile: () -> Void
+    let onDisableSubtitles: () -> Void
+    let onAdvanced: () -> Void
+    @State private var page: QuickSettingsPage = .main
+    @State private var selectedSpeed: Float = 1
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if page == .main { mainMenu } else { submenu }
+        }
+        .frame(width: 285)
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemBackground))
+    }
+
+    private var mainMenu: some View {
+        VStack(spacing: 2) {
+            row("Volume", icon: "speaker.wave.2.fill", value: "\(Int(volume * 100))%") { page = .volume }
+            row("Playback Speed", icon: "speedometer", value: selectedSpeed == 1 ? "Normal" : "\(selectedSpeed)×") { page = .speed }
+            row("Audio", icon: "music.note", value: selectedAudioTitle) { page = .audio }
+            row("Subtitles", icon: "captions.bubble.fill", value: subtitleFileName ?? "None") { page = .subtitles }
+            Divider().padding(.vertical, 5)
+            row("Advanced Options", icon: "gearshape.fill", value: nil, action: onAdvanced)
+        }
+    }
+
+    @ViewBuilder private var submenu: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Button { page = .main } label: {
+                Label("Back", systemImage: "chevron.left").font(.headline).foregroundColor(.primary)
+            }.padding(.bottom, 8)
+            Divider()
+            switch page {
+            case .volume:
+                ForEach([0.0, 0.5, 1.0], id: \.self) { value in
+                    choice(value == 0 ? "Muted" : "\(Int(value * 100))%", selected: abs(volume - value) < 0.01) {
+                        volume = value; onVolumeChange(value)
+                    }
+                }
+            case .speed:
+                ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { value in
+                    choice(value == 1 ? "Normal" : "\(value, specifier: "%g")×", selected: selectedSpeed == Float(value)) {
+                        selectedSpeed = Float(value); onRateChange(Float(value))
+                    }
+                }
+            case .audio:
+                if audioTracks.count > 1 {
+                    ForEach(audioTracks) { track in
+                        choice(track.title, selected: selectedAudioTrackID == track.id) { onAudioTrackChange(track.id) }
+                    }
+                } else { Text("One audio track").foregroundColor(.secondary).padding(10) }
+            case .subtitles:
+                choice("None", selected: subtitleFileName == nil, action: onDisableSubtitles)
+                Button(action: onChooseSubtitleFile) {
+                    Label("Choose from Files", systemImage: "folder.fill")
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                }.foregroundColor(.primary)
+            case .main: EmptyView()
+            }
+        }
+    }
+
+    private var selectedAudioTitle: String {
+        audioTracks.first(where: { $0.id == selectedAudioTrackID })?.title ?? "Original"
+    }
+
+    private func row(_ title: String, icon: String, value: String?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).frame(width: 25).foregroundColor(.secondary)
+                Text(title).foregroundColor(.primary)
+                Spacer()
+                if let value { Text(value).font(.caption).foregroundColor(.secondary).lineLimit(1) }
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundColor(.secondary)
+            }.padding(.horizontal, 8).frame(height: 48)
+        }
+    }
+
+    private func choice(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack { Image(systemName: selected ? "checkmark" : "").frame(width: 18); Text(title); Spacer() }
+                .foregroundColor(.primary).padding(.horizontal, 8).frame(height: 40)
+        }
+    }
+}
+
+private struct PlayerAdvancedSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selectedAudioTrack: String
+    @Binding var subtitleSize: Double
+    @Binding var subtitleColor: PlayerSubtitleColor
+    @Binding var subtitleDelay: Double
+    @Binding var subtitleHeight: Double
+    @Binding var subtitleShadow: Bool
+    @Binding var subtitleBackground: Bool
+    @Binding var subtitleFont: PlayerSubtitleFont
+    @Binding var brightness: Double
+    @Binding var volume: Double
+    let audioTracks: [PlayerAudioTrackOption]
+    let selectedAudioTrackID: String?
+    let subtitleFileName: String?
+    let isFillMode: Bool
+    let onAspectRatioToggle: () -> Void
+    let onBrightnessChange: (Double) -> Void
+    let onVolumeChange: (Double) -> Void
     let onAudioTrackChange: (String) -> Void
     let onChooseSubtitleFile: () -> Void
     let onDisableSubtitles: () -> Void
     let onRateChange: (Float) -> Void
+    @State private var section = 0
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
-                    settingsCard(title: "Audio Tracks", icon: "waveform") {
-                        if audioTracks.count > 1 {
-                            VStack(spacing: 8) {
-                                ForEach(audioTracks) { track in
-                                    Button {
-                                        selectedAudioTrack = track.id
-                                        onAudioTrackChange(track.id)
-                                    } label: {
-                                        HStack {
-                                            Text(track.title).lineLimit(1)
-                                            Spacer()
-                                            if (selectedAudioTrack.isEmpty ? selectedAudioTrackID : selectedAudioTrack) == track.id {
-                                                Image(systemName: "checkmark.circle.fill").foregroundColor(AppPalette.accent)
-                                            }
-                                        }
-                                        .foregroundColor(.primary)
-                                        .padding(.vertical, 6)
-                                    }
-                                }
-                            }
-                        } else {
-                            Text("This video has one audio track")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    settingsCard(title: "Subtitles", icon: "captions.bubble.fill") {
-                        Button(action: onChooseSubtitleFile) {
-                            HStack {
-                                Image(systemName: "folder.fill")
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Choose Subtitle File")
-                                    if let subtitleFileName {
-                                        Text(subtitleFileName).font(.caption).foregroundColor(.secondary).lineLimit(1)
-                                    }
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                            }
-                            .foregroundColor(.primary)
-                        }
-                        if subtitleFileName != nil {
-                            Button("Turn Subtitles Off", role: .destructive, action: onDisableSubtitles)
-                        }
-                        HStack {
-                            Text("Size")
-                            Slider(value: $subtitleSize, in: 0.75...1.75, step: 0.25)
-                            Text("\(Int(subtitleSize * 100))%")
-                                .foregroundColor(.secondary)
-                                .frame(width: 48)
-                        }
-                        HStack {
-                            Text("Color")
-                            Spacer()
-                            ForEach(PlayerSubtitleColor.allCases) { option in
-                                Button { subtitleColor = option } label: {
-                                    Circle().fill(option.color).frame(width: 25, height: 25)
-                                        .overlay(Circle().stroke(AppPalette.accent, lineWidth: subtitleColor == option ? 3 : 0))
-                                }
-                            }
-                        }
-                    }
-                    settingsCard(title: "Video Quality", icon: "4k.tv.fill") {
-                        Picker("Quality", selection: $selectedQuality) {
-                            Text("Auto").tag("Auto")
-                            Text(currentQuality).tag(currentQuality)
-                            Text("1080p").tag("1080p")
-                            Text("720p").tag("720p")
-                        }.pickerStyle(.segmented)
-                    }
-                    settingsCard(title: "Playback Speed", icon: "speedometer") {
-                        HStack(spacing: 8) {
-                            ForEach([0.5, 1.0, 1.5, 2.0], id: \.self) { speed in
-                                Button("\(speed, specifier: "%g")×") { onRateChange(Float(speed)) }
-                                    .buttonStyle(.bordered)
-                                    .tint(AppPalette.accent)
-                            }
-                        }
-                    }
+            VStack(spacing: 12) {
+                Picker("Section", selection: $section) {
+                    Label("Video", systemImage: "video.fill").tag(0)
+                    Label("Audio", systemImage: "speaker.wave.2.fill").tag(1)
+                    Label("Subtitles", systemImage: "captions.bubble.fill").tag(2)
+                }.pickerStyle(.segmented).padding(.horizontal, 18)
+                ScrollView {
+                    VStack(spacing: 14) {
+                        if section == 0 { videoSection }
+                        else if section == 1 { audioSection }
+                        else { subtitleSection }
+                    }.padding(18)
                 }
-                .padding(18)
             }
             .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("Playback Settings")
+            .navigationTitle("Advanced Options")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
@@ -1516,16 +1613,65 @@ private struct PlayerAdvancedSettingsSheet: View {
         .presentationDragIndicator(.visible)
     }
 
-    private func settingsCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon)
-                .font(.headline)
-                .foregroundColor(AppPalette.accent)
-            content()
+    private var videoSection: some View {
+        VStack(spacing: 14) {
+            card("Brightness", icon: "sun.max.fill") {
+                Slider(value: Binding(get: { brightness }, set: { brightness = $0; onBrightnessChange($0) }), in: 0.05...1)
+            }
+            card("Aspect Ratio", icon: "aspectratio.fill") {
+                Button(isFillMode ? "Fit to Screen" : "Fill Screen", action: onAspectRatioToggle).buttonStyle(.borderedProminent).tint(AppPalette.accent)
+            }
+            card("Playback Speed", icon: "speedometer") {
+                speedButtons
+            }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var audioSection: some View {
+        VStack(spacing: 14) {
+            card("Volume", icon: "speaker.wave.2.fill") {
+                Slider(value: Binding(get: { volume }, set: { volume = $0; onVolumeChange($0) }), in: 0...1)
+            }
+            card("Audio Track", icon: "music.note") {
+                if audioTracks.count > 1 {
+                    ForEach(audioTracks) { track in
+                        Button { selectedAudioTrack = track.id; onAudioTrackChange(track.id) } label: {
+                            HStack { Text(track.title); Spacer(); if (selectedAudioTrack.isEmpty ? selectedAudioTrackID : selectedAudioTrack) == track.id { Image(systemName: "checkmark.circle.fill") } }
+                        }.foregroundColor(.primary).padding(.vertical, 5)
+                    }
+                } else { Text("This video has one audio track").foregroundColor(.secondary) }
+            }
+        }
+    }
+
+    private var subtitleSection: some View {
+        VStack(spacing: 14) {
+            card("Subtitle File", icon: "folder.fill") {
+                Button(subtitleFileName ?? "Choose from Files", action: onChooseSubtitleFile)
+                if subtitleFileName != nil { Button("Turn Off", role: .destructive, action: onDisableSubtitles) }
+            }
+            card("Appearance", icon: "textformat") {
+                Picker("Font", selection: $subtitleFont) { ForEach(PlayerSubtitleFont.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
+                HStack { Text("Size"); Slider(value: $subtitleSize, in: 0.75...1.75, step: 0.25) }
+                HStack { Text("Color"); Spacer(); ForEach(PlayerSubtitleColor.allCases) { color in Button { subtitleColor = color } label: { Circle().fill(color.color).frame(width: 27, height: 27).overlay(Circle().stroke(AppPalette.accent, lineWidth: subtitleColor == color ? 3 : 0)) } } }
+                Toggle("Text Shadow", isOn: $subtitleShadow)
+                Toggle("Background", isOn: $subtitleBackground)
+            }
+            card("Timing & Position", icon: "slider.horizontal.3") {
+                HStack { Text("Delay"); Slider(value: $subtitleDelay, in: -10...10, step: 0.25); Text(String(format: "%+.2fs", subtitleDelay)).monospacedDigit().frame(width: 62) }
+                HStack { Text("Height"); Slider(value: $subtitleHeight, in: 0...180, step: 5); Text("\(Int(subtitleHeight))").frame(width: 34) }
+            }
+        }
+    }
+
+    private var speedButtons: some View {
+        HStack(spacing: 7) { ForEach([0.5, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in Button("\(speed, specifier: "%g")×") { onRateChange(Float(speed)) }.buttonStyle(.bordered).tint(AppPalette.accent) } }
+    }
+
+    private func card<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) { Label(title, systemImage: icon).font(.headline).foregroundColor(AppPalette.accent); content() }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
