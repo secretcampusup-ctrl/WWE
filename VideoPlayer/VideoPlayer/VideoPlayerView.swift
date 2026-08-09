@@ -645,7 +645,7 @@ struct VideoPlayerView: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showPlaybackSettings = true }
                         }
                     )
-                    .presentationCompactAdaptation(.popover)
+                    .playerPopoverAdaptation()
                 }
                 Button {
                     dismiss()
@@ -1469,6 +1469,17 @@ private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
 
 private enum QuickSettingsPage { case main, volume, speed, audio, subtitles }
 
+private extension View {
+    @ViewBuilder
+    func playerPopoverAdaptation() -> some View {
+        if #available(iOS 16.4, *) {
+            self.presentationCompactAdaptation(.popover)
+        } else {
+            self
+        }
+    }
+}
+
 private struct PlayerQuickSettingsPopover: View {
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
@@ -1518,7 +1529,7 @@ private struct PlayerQuickSettingsPopover: View {
                 }
             case .speed:
                 ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { value in
-                    choice(value == 1 ? "Normal" : "\(value, specifier: "%g")×", selected: selectedSpeed == Float(value)) {
+                    choice(value == 1 ? "Normal" : String(format: "%g×", value), selected: selectedSpeed == Float(value)) {
                         selectedSpeed = Float(value); onRateChange(Float(value))
                     }
                 }
