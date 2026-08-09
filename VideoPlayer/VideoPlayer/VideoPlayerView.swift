@@ -1726,6 +1726,7 @@ private struct DedicatedVRPlayerView: View {
 
             if controller.isBuffering {
                 ProgressView().tint(.white).padding(18).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .allowsHitTesting(false)
             }
 
             if showControls {
@@ -1879,11 +1880,19 @@ private final class DedicatedVRSurfaceView: UIView {
         super.init(frame: frame)
         backgroundColor = .black
         videoView.backgroundColor = .black; videoView.isOpaque = true
+        // VLCKit installs its rendering view inside this container. Disabling
+        // hit-testing here guarantees the parent surface receives taps/pans.
+        videoView.isUserInteractionEnabled = false
+        isUserInteractionEnabled = true
         addSubview(videoView)
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
-        tap.require(toFail: pan); addGestureRecognizer(tap); addGestureRecognizer(pan); addGestureRecognizer(pinch)
+        tap.cancelsTouchesInView = false
+        pan.cancelsTouchesInView = false
+        pinch.cancelsTouchesInView = false
+        tap.require(toFail: pan)
+        addGestureRecognizer(tap); addGestureRecognizer(pan); addGestureRecognizer(pinch)
         player.drawable = videoView
     }
     required init?(coder: NSCoder) { fatalError() }
