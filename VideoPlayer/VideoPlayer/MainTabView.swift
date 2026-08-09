@@ -349,7 +349,7 @@ private struct PirateBayView: View {
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let text = root.values.compactMap { $0 as? String }.joined(separator: "\n").replacingOccurrences(of: "&amp;", with: "&")
             let regex = try NSRegularExpression(pattern: #"https?://[^\s\]\[\"'<>]+"#, options: .caseInsensitive)
-            let range = NSRange(text.startIndex..<text.endIndex, in: text), hosts = ["imgur", "imagebam", "imgbox", "postimg", "pixhost", "ibb.co", "imagevenue", "prnt"]
+            let range = NSRange(text.startIndex..<text.endIndex, in: text), hosts = ["imgur", "imagebam", "imgbox", "postimg", "pixhost", "ibb.co", "imagevenue", "prnt", "trafficimage.club"]
             var seen = Set<String>()
             let candidates: [URL] = regex.matches(in: text, range: range).compactMap { match in
                 guard let r = Range(match.range, in: text) else { return nil }
@@ -405,7 +405,16 @@ private struct PirateBayDetailsView: View {
                     Text("IMAGES").font(.caption.bold()).tracking(1).foregroundStyle(.secondary)
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                         ForEach(Array(model.imageURLs.enumerated()), id: \.offset) { index, url in
-                            Button { selectedImage = index; showViewer = true } label: { KFImage(url).placeholder { ProgressView() }.resizable().scaledToFill().frame(maxWidth: .infinity).frame(height: 155).clipped().background(Color.white.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 16)) }.buttonStyle(.plain)
+                            Button { selectedImage = index; showViewer = true } label: {
+                                KFImage(url)
+                                    .placeholder { ProgressView() }
+                                    .resizable().scaledToFit()
+                                    .frame(maxWidth: .infinity).frame(height: 155)
+                                    .padding(5)
+                                    .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
+                                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.18), lineWidth: 1))
+                                    .contentShape(RoundedRectangle(cornerRadius: 16))
+                            }.buttonStyle(.plain)
                         }
                     }
                 }
