@@ -4,9 +4,24 @@ enum TMDBSettings {
     private static let tokenKey = "tmdb.readAccessToken"
     static var readAccessToken: String {
         get { UserDefaults.standard.string(forKey: tokenKey) ?? "" }
-        set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: tokenKey) }
+        set { UserDefaults.standard.set(normalize(newValue), forKey: tokenKey) }
     }
     static var isConfigured: Bool { !readAccessToken.isEmpty }
+
+    /// Accept pasted v4 Read Access Tokens, values prefixed with "Bearer", and
+    /// legacy 32-character v3 API keys. Also removes invisible/punctuation
+    /// characters commonly copied with the credential on iOS.
+    static func normalize(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.lowercased().hasPrefix("bearer ") { value = String(value.dropFirst(7)) }
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: " \t\r\n\"'؟?،,;"))
+        return value.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.map(String.init).joined()
+    }
+
+    static var usesV3APIKey: Bool {
+        let value = readAccessToken
+        return value.count == 32 && value.allSatisfy { $0.isHexDigit }
+    }
 }
 
 struct TMDBTitleDetails: Identifiable, Decodable {
@@ -67,6 +82,19 @@ actor TMDBService {
         return value
     }()
 
+    /// Returns nil on success, otherwise a precise user-facing TMDB error.
+    func testConnection() async -> String? {
+        guard TMDBSettings.isConfigured else { return "Enter a TMDB Read Access Token or API key." }
+        do {
+            let _: AuthenticationPayload = try await request("/3/authentication", query: [:])
+            return nil
+        } catch let error as TMDBRequestError {
+            return error.message
+        } catch {
+            return "Connection failed: \(error.localizedDescription)"
+        }
+    }
+
     func details(for rawTitle: String) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
         let query = Self.searchTitle(from: rawTitle)
@@ -125,12 +153,21 @@ actor TMDBService {
     }
     private func request<T: Decodable>(_ path: String, query: [String: String]) async throws -> T {
         var parts = URLComponents(string: "https://api.themoviedb.org\(path)")!
-        parts.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        var requestQuery = query
+        if TMDBSettings.usesV3APIKey { requestQuery["api_key"] = TMDBSettings.readAccessToken }
+        parts.queryItems = requestQuery.map { URLQueryItem(name: $0.key, value: $0.value) }
         var request = URLRequest(url: parts.url!)
-        request.setValue("Bearer \(TMDBSettings.readAccessToken)", forHTTPHeaderField: "Authorization")
+        if !TMDBSettings.usesV3APIKey {
+            request.setValue("Bearer \(TMDBSettings.readAccessToken)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 25
         let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { throw URLError(.badServerResponse) }
+        guard let http = response as? HTTPURLResponse else { throw TMDBRequestError(message: "TMDB returned no HTTP response.") }
+        guard 200..<300 ~= http.statusCode else {
+            let payload = try? decoder.decode(TMDBErrorPayload.self, from: data)
+            throw TMDBRequestError(message: payload?.statusMessage ?? "TMDB request failed (HTTP \(http.statusCode)).")
+        }
         return try decoder.decode(T.self, from: data)
     }
 }
@@ -151,3 +188,8 @@ private struct Videos: Decodable { let results: [Video] }
 private struct Video: Decodable { let key: String; let site: String; let type: String; let official: Bool? }
 
 private struct EpisodePayload: Decodable { let name: String?; let overview: String?; let stillPath: String? }
+
+
+private struct AuthenticationPayload: Decodable { let success: Bool }
+private struct TMDBErrorPayload: Decodable { let statusMessage: String? }
+private struct TMDBRequestError: Error { let message: String }

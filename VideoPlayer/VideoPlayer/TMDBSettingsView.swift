@@ -10,7 +10,7 @@ struct TMDBSettingsView: View {
         NavigationStack {
             Form {
                 Section("TMDB") {
-                    SecureField("Read Access Token", text: $token)
+                    SecureField("Read Access Token or API Key", text: $token)
                         .textContentType(.password)
                     Text("Use the Read Access Token from your TMDB account settings. It is stored only on this device.")
                         .font(.caption)
@@ -19,8 +19,8 @@ struct TMDBSettingsView: View {
                         TMDBSettings.readAccessToken = token
                         isTesting = true
                         Task {
-                            let result = await TMDBService.shared.details(for: "Fight Club 1999")
-                            connectionStatus = result == nil ? "Connection failed. Check the Read Access Token and internet connection." : "Connected to TMDB successfully."
+                            let error = await TMDBService.shared.testConnection()
+                            connectionStatus = error ?? "Connected to TMDB successfully."
                             isTesting = false
                         }
                     }.disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTesting)
