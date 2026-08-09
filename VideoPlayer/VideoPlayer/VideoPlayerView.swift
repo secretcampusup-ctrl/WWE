@@ -1413,7 +1413,7 @@ private struct PlayerEpisodePicker: View {
                     }
                 }
             }.padding(10)
-        }.frame(width: 230, maxHeight: 310)
+        }.frame(width: 230).frame(maxHeight: 310)
     }
 }
 

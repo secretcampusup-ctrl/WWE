@@ -201,16 +201,9 @@ struct PikPakWebDAVView: View {
                 }) {
                     ResolvedPlayerScreen(
                         vm: vm,
-                        episodeOptions: episodeItems(server: server).map {
-                            PlayerEpisodeOption(id: $0.id, title: $0.seasonEpisodeLabel ?? $0.displayTitle, subtitle: $0.displayTitle)
-                        },
+                        episodeOptions: playerEpisodeOptions(for: server),
                         onSelectEpisode: { episodeID in
-                            guard let next = seriesEpisodeFiles.first(where: { coverKey(for: $0, server: server) == episodeID }) else { return }
-                            detailShowingPlayer = false
-                            selectedVideoFile = next
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                play(next, on: server, fromDetails: true)
-                            }
+                            switchToEpisode(episodeID, on: server, fromDetails: true)
                         }
                     )
                 }
@@ -233,17 +226,10 @@ struct PikPakWebDAVView: View {
                     linkId: vm.nowPlayingLinkId,
                     httpHeaders: vm.nowPlayingHeaders,
                     forceVR: false,
-                    episodeOptions: server.map { activeServer in
-                        seriesEpisodeFiles.map { episode in
-                            let parsed = VideoTitleFormatter.episodeComponents(from: episode.name)
-                            let label = parsed.map { "S\($0.season) · E\($0.episode)" } ?? episode.displayName
-                            return PlayerEpisodeOption(id: coverKey(for: episode, server: activeServer), title: label, subtitle: VideoTitleFormatter.episodeTitle(from: episode.name))
-                        }
-                    } ?? [],
+                    episodeOptions: currentPlayerEpisodeOptions,
                     onSelectEpisode: { episodeID in
-                        guard let activeServer = server,
-                              let episode = seriesEpisodeFiles.first(where: { coverKey(for: $0, server: activeServer) == episodeID }) else { return }
-                        play(episode, on: activeServer, fromDetails: false)
+                        guard let activeServer = server else { return }
+                        switchToEpisode(episodeID, on: activeServer, fromDetails: false)
                     }
                 ) { seconds, duration, width, height in
                     vm.updatePlaybackProgress(
@@ -491,6 +477,39 @@ struct PikPakWebDAVView: View {
             loadCurrentLocation()
         } else if file.isVideo {
             selectedVideoFile = file
+        }
+    }
+
+    private var currentPlayerEpisodeOptions: [PlayerEpisodeOption] {
+        guard let server else { return [] }
+        return playerEpisodeOptions(for: server)
+    }
+
+    private func playerEpisodeOptions(for server: WebDAVServer) -> [PlayerEpisodeOption] {
+        seriesEpisodeFiles.map { episode in
+            let parsed = VideoTitleFormatter.episodeComponents(from: episode.name)
+            let label: String
+            if let parsed { label = "S\(parsed.season) · E\(parsed.episode)" }
+            else { label = episode.displayName }
+            return PlayerEpisodeOption(
+                id: coverKey(for: episode, server: server),
+                title: label,
+                subtitle: VideoTitleFormatter.episodeTitle(from: episode.name)
+            )
+        }
+    }
+
+    @MainActor
+    private func switchToEpisode(_ episodeID: String, on server: WebDAVServer, fromDetails: Bool) {
+        guard let episode = seriesEpisodeFiles.first(where: { coverKey(for: $0, server: server) == episodeID }) else { return }
+        if fromDetails {
+            detailShowingPlayer = false
+            selectedVideoFile = episode
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                play(episode, on: server, fromDetails: true)
+            }
+        } else {
+            play(episode, on: server, fromDetails: false)
         }
     }
 
