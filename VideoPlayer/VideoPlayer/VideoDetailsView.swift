@@ -119,6 +119,13 @@ struct VideoDetailsItem: Identifiable {
     }
 }
 
+@MainActor
+private enum VideoDetailsMemoryCache {
+    static var details: [String: TMDBTitleDetails] = [:]
+    static var episodes: [String: TMDBEpisodeDetails] = [:]
+    static var adultMetadata: [String: VideoThumbnailLoader.ThePornDBMetadata] = [:]
+}
+
 struct VideoDetailsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -280,9 +287,13 @@ struct VideoDetailsView: View {
         // lookup that's always on, independent of the poster-frame logic above — see
         // VideoThumbnailLoader.fetchThePornDBMetadata.
         .task(id: item.id) {
-            tmdbEpisode = nil
-            if let value = VideoTitleFormatter.episodeComponents(from: item.title) {
+            let metadataKey = item.posterCacheKey ?? item.id
+            if let cachedDetails = VideoDetailsMemoryCache.details[metadataKey] { tmdbDetails = cachedDetails }
+            if let cachedEpisode = VideoDetailsMemoryCache.episodes[metadataKey] { tmdbEpisode = cachedEpisode }
+            if let cachedAdult = VideoDetailsMemoryCache.adultMetadata[metadataKey] { thePornDBMetadata = cachedAdult }
+            if tmdbEpisode == nil, let value = VideoTitleFormatter.episodeComponents(from: item.title) {
                 tmdbEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
+                if let tmdbEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = tmdbEpisode }
                 if let imageURL = tmdbEpisode?.imageURL,
                    let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
@@ -290,7 +301,8 @@ struct VideoDetailsView: View {
                     if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
                 }
             }
-            tmdbDetails = await TMDBService.shared.details(for: item.title)
+            if tmdbDetails == nil { tmdbDetails = await TMDBService.shared.details(for: item.title) }
+            if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil, let imageURL = tmdbDetails?.imageURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
@@ -298,7 +310,8 @@ struct VideoDetailsView: View {
                 if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
             }
             guard tmdbDetails == nil else { return }
-            thePornDBMetadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: item.displayTitle)
+            if thePornDBMetadata == nil { thePornDBMetadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: item.displayTitle) }
+            if let thePornDBMetadata { VideoDetailsMemoryCache.adultMetadata[metadataKey] = thePornDBMetadata }
             if let cover = thePornDBMetadata?.coverImage, frame == nil {
                 frame = cover
                 if let key = item.posterCacheKey {

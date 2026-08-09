@@ -61,9 +61,16 @@ struct VideoPlayerView: View {
     // Temporary test mode: every file uses the main Apple player only.
     // The MKV player remains in the project but is not selected.
     private var usesMKVPlayer: Bool {
+        let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
+        let explicitExtension = url.pathExtension.lowercased()
+        if explicitExtension == "mp4" || decoded.range(of: #"(?i)\.mp4(?:$|[?\s])"#, options: .regularExpression) != nil {
+            return false
+        }
+        if explicitExtension == "mkv" || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil {
+            return true
+        }
         if useExtendedPlayer { return true }
-        let ext = url.pathExtension.lowercased()
-        return ["mkv", "webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(ext)
+        return ["webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(explicitExtension)
     }
     /// Filename/title hint only — doesn't need the video to have loaded yet.
     private var filenameSuggestsVR360: Bool {
@@ -146,15 +153,6 @@ struct VideoPlayerView: View {
                 .equatable()
                 .ignoresSafeArea()
             }
-            }
-
-            if !usesMKVPlayer, engine.isBuffering {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .tint(.white)
-                    .padding(18)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .allowsHitTesting(false)
             }
 
             if !usesMKVPlayer, let error = engine.errorMessage {
@@ -247,6 +245,7 @@ struct VideoPlayerView: View {
                 CircularPlaybackButton(
                     progress: usesMKVPlayer ? mkvControls.displayProgress : engine.progress,
                     isPlaying: usesMKVPlayer ? mkvControls.isPlaying : engine.isPlaying,
+                    isLoading: usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering,
                     action: {
                         if usesMKVPlayer { mkvControls.togglePlayback() } else { engine.togglePlayPause() }
                         scheduleAutoHide()
@@ -391,6 +390,8 @@ struct VideoPlayerView: View {
         }
         .onChange(of: engine.errorMessage) { error in
             guard error != nil, !usesMKVPlayer else { return }
+            let nativeExtension = url.pathExtension.lowercased()
+            guard nativeExtension != "mp4" && nativeExtension != "mov" && nativeExtension != "m4v" else { return }
             engine.cleanup()
             useExtendedPlayer = true
         }
@@ -686,7 +687,8 @@ struct VideoPlayerView: View {
     }
 
     private var shouldShowSkipIntro: Bool {
-        isEpisode && playbackDurationSeconds > 120 && currentPlaybackSeconds >= 0 && currentPlaybackSeconds < 180
+        let isLongForm = playbackDurationSeconds >= 20 * 60
+        return (isEpisode || isLongForm) && currentPlaybackSeconds >= 0 && currentPlaybackSeconds < 180
     }
 
     private var mkvQualityLabel: String {
@@ -777,6 +779,7 @@ private final class MKVPlaybackControls: ObservableObject {
     @Published var videoHeight = 0
     @Published var resolutionLabel = "MKV"
     @Published var didReachEnd = false
+    @Published var isBuffering = true
     weak var surface: MKVPlayerSurface?
 
     var displayProgress: Double { requestedProgress ?? progress }
@@ -795,6 +798,7 @@ private final class MKVPlaybackControls: ObservableObject {
     }
     func updateProgress(_ value: Double) {
         progress = value
+        if value > 0 { isBuffering = false }
         if let requestedProgress, abs(value - requestedProgress) < 0.025 {
             self.requestedProgress = nil
         }
@@ -1057,9 +1061,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         vrPinchGesture.isEnabled = false
         mediaPlayer.drawable = videoView
 
-        loadingIndicator.color = .white
         loadingIndicator.hidesWhenStopped = true
-        addSubview(loadingIndicator)
+        loadingIndicator.isHidden = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -1088,7 +1091,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         currentURL = url
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
-        loadingIndicator.startAnimating()
+        controls?.isBuffering = true
         let media = VLCMedia(url: url)
         media.addOption(":avcodec-hw=none")
         if isVR360Mode {
@@ -1388,7 +1391,9 @@ private enum ExternalSubtitleParser {
 private struct CircularPlaybackButton: View {
     let progress: Double
     let isPlaying: Bool
+    let isLoading: Bool
     let action: () -> Void
+    @State private var loadingRotation: Double = 0
 
     var body: some View {
         Button(action: action) {
@@ -1401,12 +1406,12 @@ private struct CircularPlaybackButton: View {
                     .stroke(Color.white.opacity(0.16), lineWidth: 3)
                     .padding(5)
                 Circle()
-                    .trim(from: 0, to: max(0.018, min(1, progress)))
+                    .trim(from: 0, to: isLoading ? 0.24 : max(0.018, min(1, progress)))
                     .stroke(
                         AppPalette.gradient,
                         style: StrokeStyle(lineWidth: 4, lineCap: .round)
                     )
-                    .rotationEffect(.degrees(-90))
+                    .rotationEffect(.degrees((isLoading ? loadingRotation : 0) - 90))
                     .padding(5)
                     .shadow(color: AppPalette.blue.opacity(0.55), radius: 7)
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
@@ -1418,7 +1423,18 @@ private struct CircularPlaybackButton: View {
             .shadow(color: .black.opacity(0.38), radius: 14, y: 6)
         }
         .buttonStyle(PremiumPressButtonStyle())
-        .accessibilityLabel(isPlaying ? "Pause" : "Play")
+        .accessibilityLabel(isLoading ? "Loading" : (isPlaying ? "Pause" : "Play"))
+        .onAppear { updateLoadingAnimation() }
+        .onChange(of: isLoading) { _ in updateLoadingAnimation() }
+    }
+
+    private func updateLoadingAnimation() {
+        if isLoading {
+            loadingRotation = 0
+            withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) { loadingRotation = 360 }
+        } else {
+            withAnimation(.none) { loadingRotation = 0 }
+        }
     }
 }
 

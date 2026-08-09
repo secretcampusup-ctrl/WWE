@@ -762,6 +762,8 @@ private struct PikPakFilePoster: View {
                         if let poster {
                             Image(uiImage: poster)
                                 .resizable()
+                                .interpolation(.low)
+                                .antialiased(false)
                                 .scaledToFill()
                                 .frame(width: proxy.size.width, height: proxy.size.height)
                                 .clipped()
@@ -816,7 +818,7 @@ private struct PikPakFilePoster: View {
                 }
                 .aspectRatio(2 / 3, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+                .shadow(color: .black.opacity(0.16), radius: 2, y: 1)
 
                 Text(file.displayName)
                     .font(.system(size: 10, weight: .medium))
@@ -831,6 +833,7 @@ private struct PikPakFilePoster: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .clipped()
+        .transaction { transaction in transaction.animation = nil }
         .contextMenu { menuContent }
         .task(id: "\(server.id.uuidString)|\(file.path)|\(posterRefreshVersion)") {
             if let customCover = await PikPakFolderCoverStore.imageAsync(for: stableCacheKey) {
