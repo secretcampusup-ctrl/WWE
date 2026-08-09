@@ -5,6 +5,7 @@ import AVKit
 import AVFoundation
 import UIKit
 import MobileVLCKit
+import UniformTypeIdentifiers
 
 // MARK: - Player screen
 
@@ -41,8 +42,11 @@ struct VideoPlayerView: View {
     @State private var showPlaybackSettings = false
     @State private var subtitleSize: Double = 1.0
     @State private var subtitleColor: PlayerSubtitleColor = .white
-    @State private var selectedAudioTrack = "Original"
+    @State private var selectedAudioTrack = ""
     @State private var selectedSubtitleTrack = "Off"
+    @State private var showSubtitleImporter = false
+    @State private var externalSubtitleCues: [ExternalSubtitleCue] = []
+    @State private var externalSubtitleFileName: String?
     @State private var selectedQuality = "Auto"
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
@@ -175,15 +179,7 @@ struct VideoPlayerView: View {
                                 .frame(width: 40, height: 40)
                                 .background(.ultraThinMaterial, in: Circle())
                         }
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(VideoTitleFormatter.title(from: title))
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                            HStack(spacing: 6) {
-                                PlayerQualityBadge(label: mkvQualityLabel)
-                            }
-                        }
+                        PlayerQualityBadge(label: mkvQualityLabel)
                         Spacer()
                         vrToggleButton
                         orientationLockButton
@@ -198,43 +194,13 @@ struct VideoPlayerView: View {
                                 .frame(width: 40, height: 40)
                                 .background(.ultraThinMaterial, in: Circle())
                         }
-                        Button {
-                            showPlaybackSettings = true
-                            hideTask?.cancel()
-                        } label: {
-                            Image(systemName: "ellipsis")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundColor(.white)
-                                .frame(width: 40, height: 40)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 10)
                     Spacer()
                     VStack(spacing: 12) {
-                        HStack(spacing: 34) {
-                            Button { mkvControls.skip(by: -15) } label: {
-                                Image(systemName: "gobackward.15")
-                                    .font(.system(size: 25, weight: .medium))
-                                    .foregroundColor(.white)
-                            }
-                            Button { mkvControls.togglePlayback() } label: {
-                                Image(systemName: mkvControls.isPlaying ? "pause.fill" : "play.fill")
-                                    .font(.system(size: 23, weight: .semibold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 58, height: 58)
-                                    .background(.ultraThinMaterial, in: Circle())
-                                    .overlay(Circle().fill(Color.white.opacity(0.12)))
-                                    .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
-                                    .shadow(color: .black.opacity(0.3), radius: 12, y: 5)
-                            }
-                            Button { mkvControls.skip(by: 15) } label: {
-                                Image(systemName: "goforward.15")
-                                    .font(.system(size: 25, weight: .medium))
-                                    .foregroundColor(.white)
-                            }
-                        }
+                        cinematicMetadataPanel
+                            .padding(.bottom, 12)
                         InstantSeekBar(
                             progress: isScrubbing ? scrubProgress : mkvControls.displayProgress,
                             bufferProgress: mkvControls.displayProgress,
@@ -270,6 +236,18 @@ struct VideoPlayerView: View {
 
             // Intentionally outside the auto-hidden chrome: it remains available
             // throughout the intro window even after every other control fades.
+            if showControls && !playbackDidEnd {
+                CircularPlaybackButton(
+                    progress: usesMKVPlayer ? mkvControls.displayProgress : engine.progress,
+                    isPlaying: usesMKVPlayer ? mkvControls.isPlaying : engine.isPlaying,
+                    action: {
+                        if usesMKVPlayer { mkvControls.togglePlayback() } else { engine.togglePlayPause() }
+                        scheduleAutoHide()
+                    }
+                )
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
+            }
+
             if shouldShowSkipIntro && !playbackDidEnd {
                 VStack {
                     Spacer()
@@ -291,6 +269,23 @@ struct VideoPlayerView: View {
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
 
+            if let cue = activeExternalSubtitle, !playbackDidEnd {
+                VStack {
+                    Spacer()
+                    Text(cue.text)
+                        .font(.system(size: 22 * subtitleSize, weight: .semibold))
+                        .foregroundColor(subtitleColor.color)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .shadow(color: .black.opacity(0.8), radius: 3)
+                        .padding(.horizontal, 34)
+                        .padding(.bottom, showControls ? 48 : 24)
+                }
+                .allowsHitTesting(false)
+            }
+
             if playbackDidEnd {
                 PlayerEndScreen(
                     title: VideoTitleFormatter.title(from: title),
@@ -309,10 +304,36 @@ struct VideoPlayerView: View {
                 subtitleSize: $subtitleSize,
                 subtitleColor: $subtitleColor,
                 currentQuality: usesMKVPlayer ? mkvQualityLabel : (engine.resolutionTier.badgeText ?? "Auto"),
+                audioTracks: usesMKVPlayer ? [] : engine.audioTracks,
+                selectedAudioTrackID: usesMKVPlayer ? nil : engine.selectedAudioTrackID,
+                subtitleFileName: externalSubtitleFileName,
+                onAudioTrackChange: { id in
+                    selectedAudioTrack = id
+                    engine.selectAudioTrack(id: id)
+                },
+                onChooseSubtitleFile: {
+                    showPlaybackSettings = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        showSubtitleImporter = true
+                    }
+                },
+                onDisableSubtitles: {
+                    externalSubtitleCues = []
+                    externalSubtitleFileName = nil
+                    selectedSubtitleTrack = "Off"
+                },
                 onRateChange: { rate in
                     if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
                 }
             )
+        }
+        .fileImporter(
+            isPresented: $showSubtitleImporter,
+            allowedContentTypes: subtitleDocumentTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            guard case .success(let urls) = result, let fileURL = urls.first else { return }
+            loadExternalSubtitle(from: fileURL)
         }
         .statusBar(hidden: true)
         .navigationBarHidden(true)
@@ -376,15 +397,7 @@ struct VideoPlayerView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(VideoTitleFormatter.title(from: title))
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    PlayerQualityBadge(tier: engine.resolutionTier)
-                }
-            }
+            PlayerQualityBadge(tier: engine.resolutionTier)
 
             Spacer(minLength: 0)
 
@@ -401,16 +414,6 @@ struct VideoPlayerView: View {
             } label: {
                 Image(systemName: isFillMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(.ultraThinMaterial, in: Circle())
-            }
-            Button {
-                showPlaybackSettings = true
-                hideTask?.cancel()
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 40, height: 40)
                     .background(.ultraThinMaterial, in: Circle())
@@ -434,33 +437,10 @@ struct VideoPlayerView: View {
 
     private var bottomOverlay: some View {
         VStack(spacing: 0) {
-            // Transport — above the timeline
-            HStack(spacing: 36) {
-                Button { engine.skipBackward(); scheduleAutoHide() } label: {
-                    Image(systemName: "gobackward.15")
-                        .font(.system(size: 24, weight: .medium))
-                        .foregroundColor(.white)
-                        .frame(width: 48, height: 48)
-                }
-                Button { engine.togglePlayPause(); scheduleAutoHide() } label: {
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 66, height: 66)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().fill(Color.white.opacity(0.12)))
-                        .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
-                        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
-                }
-                Button { engine.skipForward(); scheduleAutoHide() } label: {
-                    Image(systemName: "goforward.15")
-                        .font(.system(size: 24, weight: .medium))
-                        .foregroundColor(.white)
-                        .frame(width: 48, height: 48)
-                }
-            }
-            .padding(.top, 10)
-            .padding(.bottom, 12)
+            cinematicMetadataPanel
+                .padding(.horizontal, 18)
+                .padding(.top, 8)
+                .padding(.bottom, 12)
 
             // Timeline
             InstantSeekBar(
@@ -547,6 +527,94 @@ struct VideoPlayerView: View {
                 .background(.ultraThinMaterial, in: Circle())
         }
         .accessibilityLabel(isOrientationLocked ? "Unlock screen rotation" : "Lock screen rotation")
+    }
+
+    private var subtitleDocumentTypes: [UTType] {
+        var types: [UTType] = [.plainText]
+        if let srt = UTType(filenameExtension: "srt") { types.append(srt) }
+        if let vtt = UTType(filenameExtension: "vtt") { types.append(vtt) }
+        return types
+    }
+
+    private var activeExternalSubtitle: ExternalSubtitleCue? {
+        externalSubtitleCues.first { currentPlaybackSeconds >= $0.start && currentPlaybackSeconds <= $0.end }
+    }
+
+    private func loadExternalSubtitle(from fileURL: URL) {
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: fileURL),
+              let content = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else { return }
+        let cues = ExternalSubtitleParser.parse(content)
+        guard !cues.isEmpty else { return }
+        externalSubtitleCues = cues
+        externalSubtitleFileName = fileURL.lastPathComponent
+        selectedSubtitleTrack = fileURL.lastPathComponent
+    }
+
+    private var seriesDisplayName: String {
+        var value = title.removingPercentEncoding ?? title
+        if let range = value.range(of: #"(?i)[\s._-]*S\d{1,3}[\s._-]*E\d{1,3}.*$"#, options: .regularExpression) {
+            value.removeSubrange(range)
+        }
+        value = value.replacingOccurrences(of: #"[._]+"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? VideoTitleFormatter.title(from: title) : value
+    }
+
+    private var episodeDisplayLine: String? {
+        guard let component = VideoTitleFormatter.episodeComponents(from: title) else { return nil }
+        let parsed = VideoTitleFormatter.episodeTitle(from: title)
+        let episodeTitle = parsed == "Episode" ? "Episode \(component.episode)" : parsed
+        return "S\(component.season)  •  E\(component.episode)  —  \(episodeTitle)"
+    }
+
+    private var cinematicMetadataPanel: some View {
+        HStack(alignment: .bottom, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                if let episodeDisplayLine {
+                    Text(episodeDisplayLine)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.76))
+                        .lineLimit(1)
+                }
+                Text(seriesDisplayName)
+                    .font(.system(size: 23, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            Spacer(minLength: 8)
+            HStack(spacing: 3) {
+                Button {
+                    showPlaybackSettings = true
+                    hideTask?.cancel()
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 43, height: 43)
+                }
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "rectangle.stack.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 43, height: 43)
+                }
+            }
+            .foregroundColor(.white)
+            .padding(4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(
+                        LinearGradient(colors: [AppPalette.purple.opacity(0.8), AppPalette.blue.opacity(0.8)], startPoint: .leading, endPoint: .trailing),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: AppPalette.purple.opacity(0.22), radius: 12, y: 5)
+        }
     }
 
     private var currentPlaybackSeconds: Double {
@@ -1224,6 +1292,84 @@ private final class SeekBarContainerView: UIView {
 }
 
 
+private struct ExternalSubtitleCue: Identifiable {
+    let id = UUID()
+    let start: Double
+    let end: Double
+    let text: String
+}
+
+private enum ExternalSubtitleParser {
+    static func parse(_ source: String) -> [ExternalSubtitleCue] {
+        let normalized = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        return normalized.components(separatedBy: "\n\n").compactMap { block in
+            let lines = block.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            guard let timingIndex = lines.firstIndex(where: { $0.contains("-->") }) else { return nil }
+            let times = lines[timingIndex].components(separatedBy: "-->")
+            guard times.count == 2,
+                  let start = time(times[0]),
+                  let end = time(times[1]) else { return nil }
+            let text = lines.dropFirst(timingIndex + 1)
+                .joined(separator: "\n")
+                .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return ExternalSubtitleCue(start: start, end: end, text: text)
+        }
+        .sorted { $0.start < $1.start }
+    }
+
+    private static func time(_ raw: String) -> Double? {
+        let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .whitespaces).first ?? raw
+        let parts = clean.replacingOccurrences(of: ",", with: ".").split(separator: ":")
+        guard parts.count >= 2 else { return nil }
+        let seconds = Double(parts.last ?? "") ?? 0
+        let minutes = Double(parts[parts.count - 2]) ?? 0
+        let hours = parts.count > 2 ? (Double(parts[parts.count - 3]) ?? 0) : 0
+        return hours * 3600 + minutes * 60 + seconds
+    }
+}
+
+private struct CircularPlaybackButton: View {
+    let progress: Double
+    let isPlaying: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Circle().fill(Color.black.opacity(0.12)))
+                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                Circle()
+                    .stroke(Color.white.opacity(0.16), lineWidth: 3)
+                    .padding(5)
+                Circle()
+                    .trim(from: 0, to: max(0.018, min(1, progress)))
+                    .stroke(
+                        AppPalette.gradient,
+                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .padding(5)
+                    .shadow(color: AppPalette.blue.opacity(0.55), radius: 7)
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundColor(.white)
+                    .offset(x: isPlaying ? 0 : 2)
+            }
+            .frame(width: 94, height: 94)
+            .shadow(color: .black.opacity(0.42), radius: 20, y: 8)
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+        .accessibilityLabel(isPlaying ? "Pause" : "Play")
+    }
+}
+
 private struct PlaybackChapter: Identifiable {
     let id = UUID()
     let title: String
@@ -1267,6 +1413,12 @@ private struct PlayerAdvancedSettingsSheet: View {
     @Binding var subtitleSize: Double
     @Binding var subtitleColor: PlayerSubtitleColor
     let currentQuality: String
+    let audioTracks: [PlayerAudioTrackOption]
+    let selectedAudioTrackID: String?
+    let subtitleFileName: String?
+    let onAudioTrackChange: (String) -> Void
+    let onChooseSubtitleFile: () -> Void
+    let onDisableSubtitles: () -> Void
     let onRateChange: (Float) -> Void
 
     var body: some View {
@@ -1274,17 +1426,49 @@ private struct PlayerAdvancedSettingsSheet: View {
             ScrollView {
                 VStack(spacing: 14) {
                     settingsCard(title: "Audio Tracks", icon: "waveform") {
-                        Picker("Audio", selection: $selectedAudioTrack) {
-                            Text("Original").tag("Original")
-                            Text("System Default").tag("System Default")
-                        }.pickerStyle(.segmented)
+                        if audioTracks.count > 1 {
+                            VStack(spacing: 8) {
+                                ForEach(audioTracks) { track in
+                                    Button {
+                                        selectedAudioTrack = track.id
+                                        onAudioTrackChange(track.id)
+                                    } label: {
+                                        HStack {
+                                            Text(track.title).lineLimit(1)
+                                            Spacer()
+                                            if (selectedAudioTrack.isEmpty ? selectedAudioTrackID : selectedAudioTrack) == track.id {
+                                                Image(systemName: "checkmark.circle.fill").foregroundColor(AppPalette.accent)
+                                            }
+                                        }
+                                        .foregroundColor(.primary)
+                                        .padding(.vertical, 6)
+                                    }
+                                }
+                            }
+                        } else {
+                            Text("This video has one audio track")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     settingsCard(title: "Subtitles", icon: "captions.bubble.fill") {
-                        Picker("Subtitles", selection: $selectedSubtitleTrack) {
-                            Text("Off").tag("Off")
-                            Text("Auto").tag("Auto")
-                            Text("English").tag("English")
-                        }.pickerStyle(.segmented)
+                        Button(action: onChooseSubtitleFile) {
+                            HStack {
+                                Image(systemName: "folder.fill")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Choose Subtitle File")
+                                    if let subtitleFileName {
+                                        Text(subtitleFileName).font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                            }
+                            .foregroundColor(.primary)
+                        }
+                        if subtitleFileName != nil {
+                            Button("Turn Subtitles Off", role: .destructive, action: onDisableSubtitles)
+                        }
                         HStack {
                             Text("Size")
                             Slider(value: $subtitleSize, in: 0.75...1.75, step: 0.25)
@@ -1296,12 +1480,8 @@ private struct PlayerAdvancedSettingsSheet: View {
                             Text("Color")
                             Spacer()
                             ForEach(PlayerSubtitleColor.allCases) { option in
-                                Button {
-                                    subtitleColor = option
-                                } label: {
-                                    Circle()
-                                        .fill(option.color)
-                                        .frame(width: 25, height: 25)
+                                Button { subtitleColor = option } label: {
+                                    Circle().fill(option.color).frame(width: 25, height: 25)
                                         .overlay(Circle().stroke(AppPalette.accent, lineWidth: subtitleColor == option ? 3 : 0))
                                 }
                             }

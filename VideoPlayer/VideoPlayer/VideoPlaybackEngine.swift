@@ -3,6 +3,11 @@ import AVFoundation
 import UIKit
 import Combine
 
+struct PlayerAudioTrackOption: Identifiable, Equatable {
+    let id: String
+    let title: String
+}
+
 /// High-performance 4K-capable playback core.
 /// Uses AVFoundation hardware decode (VideoToolbox), async asset loading,
 /// adaptive buffering, and careful main-thread usage for smooth 60fps UI.
@@ -24,6 +29,8 @@ final class VideoPlaybackEngine: ObservableObject {
     @Published private(set) var resolutionTier: ResolutionTier = .unknown
     @Published private(set) var errorMessage: String?
     @Published private(set) var didReachEnd = false
+    @Published private(set) var audioTracks: [PlayerAudioTrackOption] = []
+    @Published private(set) var selectedAudioTrackID: String?
     @Published var resetZoomToken = 0
 
     /// Shared player — AVPlayerLayer attaches to this for GPU composition.
@@ -59,6 +66,7 @@ final class VideoPlaybackEngine: ObservableObject {
     /// True for the duration of a pinch/pan gesture on the video surface.
     /// See setInteracting(_:).
     private var isInteracting = false
+    private var audioOptionsByID: [String: AVMediaSelectionOption] = [:]
 
     /// Background queue for asset I/O and non-UI work (not main thread).
     private let assetQueue = DispatchQueue(
@@ -189,6 +197,9 @@ final class VideoPlaybackEngine: ObservableObject {
         player.currentItem?.videoComposition = nil
         player.replaceCurrentItem(with: nil)
         loadedAsset = nil
+        audioTracks = []
+        audioOptionsByID = [:]
+        selectedAudioTrackID = nil
         onProgressTick = nil
         UIApplication.shared.isIdleTimerDisabled = false
         player.automaticallyWaitsToMinimizeStalling = true
@@ -222,6 +233,37 @@ final class VideoPlaybackEngine: ObservableObject {
         } else {
             player.play()
             isPlaying = true
+        }
+    }
+
+    func selectAudioTrack(id: String) {
+        guard let item = player.currentItem,
+              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible),
+              let option = audioOptionsByID[id] else { return }
+        item.select(option, in: group)
+        selectedAudioTrackID = id
+    }
+
+    private func refreshAudioTracks(for item: AVPlayerItem) {
+        guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible) else {
+            audioTracks = []
+            audioOptionsByID = [:]
+            selectedAudioTrackID = nil
+            return
+        }
+        var map: [String: AVMediaSelectionOption] = [:]
+        let tracks = group.options.enumerated().map { index, option in
+            let id = "audio-\(index)"
+            map[id] = option
+            return PlayerAudioTrackOption(id: id, title: option.displayName)
+        }
+        audioOptionsByID = map
+        audioTracks = tracks
+        if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+           let entry = map.first(where: { $0.value === selected }) {
+            selectedAudioTrackID = entry.key
+        } else {
+            selectedAudioTrackID = tracks.first?.id
         }
     }
 
@@ -439,6 +481,7 @@ final class VideoPlaybackEngine: ObservableObject {
                 case .readyToPlay:
                     self.isBuffering = false
                     self.errorMessage = nil
+                    self.refreshAudioTracks(for: item)
                     // Apply saved resume position once
                     if !self.didApplyResume, self.pendingResumeSeconds > 1 {
                         self.didApplyResume = true
