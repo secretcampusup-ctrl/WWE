@@ -617,7 +617,7 @@ actor PikPakPersistentPosterLoader {
             defer { Task { await TMDBPosterLoadGate.shared.release() } }
             guard let details = await TMDBService.shared.details(for: query),
                   let imageURL = details.posterURL ?? details.imageURL,
-                  let (data, _) = try? await URLSession.shared.data(from: imageURL),
+                  let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                   let cover = UIImage(data: data) else { return nil }
             await PikPakFolderCoverStore.saveAutomaticCoverAsync(cover, for: key)
             return cover

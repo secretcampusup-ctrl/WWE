@@ -129,7 +129,7 @@ actor TMDBService {
         var request = URLRequest(url: parts.url!)
         request.setValue("Bearer \(TMDBSettings.readAccessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { throw URLError(.badServerResponse) }
         return try decoder.decode(T.self, from: data)
     }

@@ -64,7 +64,7 @@ enum PikPakLinkResolver {
             throw NSError(domain: "PikPak", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid PikPak share link"])
         }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(from: url)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw NSError(domain: "PikPak", code: 2, userInfo: [NSLocalizedDescriptionKey: "PikPak share page could not be loaded"])
         }

@@ -300,6 +300,7 @@ final class WebDAVClient: NSObject {
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
+        config.networkServiceType = .responsiveData // PROPFIND/metadata should remain responsive beside video transfers.
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 90
         config.waitsForConnectivity = true

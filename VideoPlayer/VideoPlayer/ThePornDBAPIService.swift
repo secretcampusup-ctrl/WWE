@@ -55,7 +55,7 @@ class ThePornDBAPIService {
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         } catch let error as URLError {
             throw ThePornDBError.networkError(error)
         } catch {
@@ -178,7 +178,7 @@ class ThePornDBAPIService {
         guard let url = URL(string: urlString) else { throw ThePornDBError.invalidURL }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw ThePornDBError.serverError((response as? HTTPURLResponse)?.statusCode ?? 500)
         }

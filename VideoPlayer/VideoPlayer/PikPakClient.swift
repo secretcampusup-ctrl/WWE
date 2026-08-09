@@ -108,6 +108,7 @@ final class PikPakClient {
 
     private init() {
         let config = URLSessionConfiguration.default
+        config.networkServiceType = .responsiveData // API/auth JSON: prioritize UI responsiveness, not bulk throughput.
         config.timeoutIntervalForRequest = 35
         config.timeoutIntervalForResource = 120
         config.waitsForConnectivity = true

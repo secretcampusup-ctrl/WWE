@@ -22,6 +22,7 @@
 		AA000012 /* LinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000013 /* LinkResolver.swift */; };
 		AA000015 /* WebDAVSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000016 /* WebDAVSettingsView.swift */; };
 		AA000016 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000017 /* MainTabView.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* HighPriorityNetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* HighPriorityNetworkManager.swift */; };
 		AA000017 /* RecentVideosView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000018 /* RecentVideosView.swift */; };
 		AA000020 /* OffcloudClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000021 /* OffcloudClient.swift */; };
 		AA000021 /* OffcloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000022 /* OffcloudView.swift */; };
@@ -70,6 +71,7 @@
 		BB000013 /* LinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkResolver.swift; sourceTree = "<group>"; };
 		BB000016 /* WebDAVSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebDAVSettingsView.swift; sourceTree = "<group>"; };
 		BB000017 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5061728394A5B6C /* HighPriorityNetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HighPriorityNetworkManager.swift; sourceTree = "<group>"; };
 		BB000018 /* RecentVideosView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentVideosView.swift; sourceTree = "<group>"; };
 		BB000021 /* OffcloudClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OffcloudClient.swift; sourceTree = "<group>"; };
 		BB000022 /* OffcloudView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OffcloudView.swift; sourceTree = "<group>"; };
@@ -137,6 +139,7 @@
 				BB000036 /* LinkResolver+CleanTitle.swift */,
 				BB000016 /* WebDAVSettingsView.swift */,
 				BB000017 /* MainTabView.swift */,
+				B1C2D3E4F5061728394A5B6C /* HighPriorityNetworkManager.swift */,
 				BB000018 /* RecentVideosView.swift */,
 				BB000021 /* OffcloudClient.swift */,
 				BB000022 /* OffcloudView.swift */,
@@ -261,6 +264,7 @@
 				AA000012 /* LinkResolver.swift in Sources */,
 				AA000015 /* WebDAVSettingsView.swift in Sources */,
 				AA000016 /* MainTabView.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* HighPriorityNetworkManager.swift in Sources */,
 				AA000017 /* RecentVideosView.swift in Sources */,
 				AA000020 /* OffcloudClient.swift in Sources */,
 				AA000021 /* OffcloudView.swift in Sources */,

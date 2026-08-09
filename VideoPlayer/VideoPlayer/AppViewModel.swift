@@ -399,12 +399,12 @@ class AppViewModel: ObservableObject {
             var head = URLRequest(url: url)
             head.httpMethod = "HEAD"
             head.timeoutInterval = 12
-            var discovered = (try? await URLSession.shared.data(for: head)).flatMap { size(from: $0.1) }
+            var discovered = (try? await HighPriorityNetworkManager.shared.videoData(for: head)).flatMap { size(from: $0.1) }
             if discovered == nil {
                 var range = URLRequest(url: url)
                 range.setValue("bytes=0-0", forHTTPHeaderField: "Range")
                 range.timeoutInterval = 12
-                discovered = (try? await URLSession.shared.data(for: range)).flatMap { size(from: $0.1) }
+                discovered = (try? await HighPriorityNetworkManager.shared.videoData(for: range)).flatMap { size(from: $0.1) }
             }
             guard let bytes = discovered, let index = savedLinks.firstIndex(where: { $0.id == link.id }) else { return }
             savedLinks[index].fileSizeBytes = bytes

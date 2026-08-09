@@ -307,7 +307,7 @@ enum HLSSegmentDownloader {
            let cookieHeader = HTTPCookie.requestHeaderFields(with: cookies)["Cookie"] {
             request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }
-        let firstResult = try await URLSession.shared.data(for: request)
+        let firstResult = try await HighPriorityNetworkManager.shared.videoData(for: request)
         if let response = firstResult.1 as? HTTPURLResponse, response.statusCode == 471 {
             // Some CDNs accept browser-style HLS requests but reject the
             // AppleCoreMedia identity (or the reverse). Retry exactly once
@@ -317,7 +317,7 @@ enum HLSSegmentDownloader {
                 forHTTPHeaderField: "User-Agent"
             )
             request.setValue("*/*", forHTTPHeaderField: "Accept")
-            return try await URLSession.shared.data(for: request)
+            return try await HighPriorityNetworkManager.shared.videoData(for: request)
         }
         return firstResult
     }

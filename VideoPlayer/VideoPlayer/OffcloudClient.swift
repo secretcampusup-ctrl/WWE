@@ -278,7 +278,7 @@ struct OffcloudClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         return try decode(data: data, response: response)
     }
 
@@ -311,7 +311,7 @@ struct OffcloudClient {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         return try decode(data: data, response: response)
     }
 

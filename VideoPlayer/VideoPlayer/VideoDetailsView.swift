@@ -284,7 +284,7 @@ struct VideoDetailsView: View {
             if let value = VideoTitleFormatter.episodeComponents(from: item.title) {
                 tmdbEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
                 if let imageURL = tmdbEpisode?.imageURL,
-                   let (data, _) = try? await URLSession.shared.data(from: imageURL),
+                   let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
                     frame = image
                     if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
@@ -292,7 +292,7 @@ struct VideoDetailsView: View {
             }
             tmdbDetails = await TMDBService.shared.details(for: item.title)
             if tmdbEpisode?.imageURL == nil, let imageURL = tmdbDetails?.imageURL,
-               let (data, _) = try? await URLSession.shared.data(from: imageURL),
+               let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 frame = image
                 if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
