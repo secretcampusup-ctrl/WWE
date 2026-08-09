@@ -348,7 +348,7 @@ private struct PikPakFileRow: View {
                     if isNowPlaying {
                         Text("Now playing")
                             .font(.system(size: 10))
-                            .foregroundColor(.green)
+                            .foregroundColor(AppPalette.accent)
                     }
                 }
             }
@@ -378,7 +378,7 @@ private struct PikPakFileRow: View {
 
     private var iconColor: Color {
         if file.isFolder    { return .blue }
-        if isNowPlaying     { return .green }
+        if isNowPlaying     { return AppPalette.accent }
         if file.isVideo     { return Color(red: 0.75, green: 0.35, blue: 0.95) }
         return .gray
     }

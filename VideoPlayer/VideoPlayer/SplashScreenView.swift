@@ -113,7 +113,7 @@ private struct SplashScreenView: View {
             AppTheme.bg.ignoresSafeArea()
 
             RadialGradient(
-                colors: [Color.green.opacity(0.22), Color.clear],
+                colors: [AppPalette.purple.opacity(0.24), AppPalette.blue.opacity(0.08), Color.clear],
                 center: .center,
                 startRadius: 10,
                 endRadius: 340
@@ -145,7 +145,7 @@ private struct SplashScreenView: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(AppTheme.accentGradient)
                 .frame(width: 92, height: 92)
-                .shadow(color: Color.green.opacity(0.45), radius: pulse ? 22 : 12, y: 6)
+                .shadow(color: AppPalette.purple.opacity(0.45), radius: pulse ? 22 : 12, y: 6)
                 .overlay(
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
                         .stroke(Color.white.opacity(0.25), lineWidth: 1)

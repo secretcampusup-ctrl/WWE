@@ -150,7 +150,7 @@ struct VideoPlayerView: View {
                         .padding(.horizontal, 24)
                     Button("Retry") { engine.load(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders) }
                         .buttonStyle(.borderedProminent)
-                        .tint(.green)
+                        .tint(AppPalette.accent)
                 }
                 .padding(20)
                 .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -176,7 +176,7 @@ struct VideoPlayerView: View {
                     ResolutionBadgeView(tier: engine.resolutionTier, compact: true)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.green.opacity(0.15), in: Capsule())
+                        .background(AppPalette.accent.opacity(0.15), in: Capsule())
                     if resumeAt > 3 {
                         Text("Resumed")
                             .font(.system(size: 10, weight: .semibold))
@@ -337,7 +337,7 @@ struct VideoPlayerView: View {
                     ResolutionBadgeView(tier: engine.resolutionTier, compact: true)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.green.opacity(0.15), in: Capsule())
+                        .background(AppPalette.accent.opacity(0.15), in: Capsule())
                     if resumeAt > 3 {
                         Text("Resumed")
                             .font(.system(size: 10, weight: .semibold))
@@ -495,7 +495,7 @@ struct VideoPlayerView: View {
         } label: {
             Image(systemName: "view.3d")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(isVR360Mode ? .green : .white)
+                .foregroundColor(isVR360Mode ? AppPalette.accent : .white)
                 .frame(width: 40, height: 40)
                 .background(.ultraThinMaterial, in: Circle())
         }
@@ -1732,10 +1732,10 @@ private struct DedicatedVRPlayerView: View {
                         }
                         VStack(alignment: .leading, spacing: 3) {
                             Text(VideoTitleFormatter.title(from: title)).font(.headline).lineLimit(1)
-                            Text("VR 360 · \(controller.resolutionLabel)").font(.caption).foregroundStyle(.green)
+                            Text("VR 360 · \(controller.resolutionLabel)").font(.caption).foregroundStyle(AppPalette.accent)
                         }
                         Spacer()
-                        Image(systemName: "view.3d").font(.system(size: 17, weight: .semibold)).foregroundStyle(.green)
+                        Image(systemName: "view.3d").font(.system(size: 17, weight: .semibold)).foregroundStyle(AppPalette.accent)
                             .frame(width: 42, height: 42).background(.ultraThinMaterial, in: Circle())
                     }
                     .foregroundStyle(.white).padding(.horizontal, 16).padding(.top, 10)
@@ -1751,7 +1751,7 @@ private struct DedicatedVRPlayerView: View {
                             }
                             Button { controller.skip(15) } label: { Image(systemName: "goforward.15").font(.title2) }
                         }
-                        Slider(value: Binding(get: { controller.progress }, set: { controller.seek($0) }), in: 0...1).tint(.green)
+                        Slider(value: Binding(get: { controller.progress }, set: { controller.seek($0) }), in: 0...1).tint(AppPalette.accent)
                         HStack {
                             Text(controller.currentLabel)
                             Spacer()

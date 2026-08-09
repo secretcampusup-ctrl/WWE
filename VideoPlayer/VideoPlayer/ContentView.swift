@@ -133,7 +133,7 @@ struct ContentView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
-                        .background(Color.green.opacity(0.92), in: Capsule())
+                        .background(AppPalette.gradient, in: Capsule())
                         .padding(.bottom, 24)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }

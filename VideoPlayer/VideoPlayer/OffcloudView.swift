@@ -10,7 +10,7 @@ private enum OffcloudPalette {
     static let bgPrimary = Color(red: 0x09 / 255, green: 0x0B / 255, blue: 0x0E / 255)
     static let bgSecondary = Color(red: 0x14 / 255, green: 0x16 / 255, blue: 0x1C / 255)
     static let bgCard = Color(red: 0x1A / 255, green: 0x1D / 255, blue: 0x25 / 255)
-    static let accentTeal = Color(red: 0x00 / 255, green: 0xCF / 255, blue: 0xA7 / 255)
+    static let accentTeal = AppPalette.accent
     static let textSecondary = Color(red: 0x88 / 255, green: 0x92 / 255, blue: 0xA8 / 255)
     static let borderSubtle = Color.white.opacity(0.08)
     static let badgeOrange = Color(red: 0xF5 / 255, green: 0xA6 / 255, blue: 0x23 / 255)
@@ -1411,7 +1411,7 @@ private struct OffcloudFolderFilesView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Close") { dismiss() }
-                        .foregroundColor(.green)
+                        .foregroundColor(AppPalette.accent)
                 }
             }
         }

@@ -34,7 +34,7 @@ struct MainTabView: View {
         }
         .animation(.easeOut(duration: 0.18), value: selectedTab)
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .tint(.green)
+        .tint(AppPalette.accent)
         .preferredColorScheme(.dark)
     }
 
@@ -64,7 +64,7 @@ enum AppTheme {
     static let bg = Color(red: 0.04, green: 0.04, blue: 0.05)
     static let card = Color(red: 0.10, green: 0.10, blue: 0.12)
     static let cardElevated = Color(red: 0.13, green: 0.13, blue: 0.15)
-    static let accent = Color.green
+    static let accent = AppPalette.accent
     static let accentDeep = Color(red: 0.0, green: 0.55, blue: 0.25)
     static let muted = Color.white.opacity(0.45)
     static let mutedDeep = Color.white.opacity(0.38)
@@ -78,14 +78,7 @@ enum AppTheme {
         endPoint: .bottomTrailing
     )
 
-    static let accentGradient = LinearGradient(
-        colors: [
-            Color.green,
-            Color(red: 0.15, green: 0.75, blue: 0.40)
-        ],
-        startPoint: .leading,
-        endPoint: .trailing
-    )
+    static let accentGradient = AppPalette.gradient
 }
 
 private struct PirateBayResult: Decodable, Identifiable {
@@ -229,7 +222,7 @@ private struct PirateBayView: View {
             }
             .navigationTitle("Discover")
             .navigationBarTitleDisplayMode(.large)
-            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { await reload() } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(.green) } } }
+            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button { Task { await reload() } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(AppPalette.accent) } } }
             .overlay(alignment: .top) { if let notice { Text(notice).font(.subheadline.bold()).padding(.horizontal, 18).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
             .task { if model.items.isEmpty { await reload() } }
         }

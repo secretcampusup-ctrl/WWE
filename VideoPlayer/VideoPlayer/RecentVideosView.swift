@@ -191,7 +191,7 @@ struct RecentVideosView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
-                        .background(Color.green.opacity(0.92), in: Capsule())
+                        .background(AppPalette.gradient, in: Capsule())
                         .padding(.bottom, 24)
                         .transition(.opacity)
                 }
@@ -222,11 +222,11 @@ struct RecentVideosView: View {
             Spacer(minLength: 8)
             Text("\(vm.recentLinks.count)")
                 .font(.system(size: 13, weight: .bold).monospacedDigit())
-                .foregroundColor(.green)
+                .foregroundColor(AppPalette.accent)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.green.opacity(0.15), in: Capsule())
-                .overlay(Capsule().stroke(Color.green.opacity(0.3), lineWidth: 1))
+                .background(AppPalette.accent.opacity(0.15), in: Capsule())
+                .overlay(Capsule().stroke(AppPalette.accent.opacity(0.34), lineWidth: 1))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
@@ -384,7 +384,7 @@ struct RecentVideoCard: View {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 24))
                     .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, Color.green.opacity(0.92))
+                    .foregroundStyle(.white, AppPalette.accent)
                     .shadow(color: .black.opacity(0.45), radius: 6, y: 2)
             }
     }

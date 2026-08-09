@@ -177,7 +177,7 @@ struct FileRow: View {
 
     private var iconColor: Color {
         if file.isDirectory { return .blue }
-        if isNowPlaying     { return .green }
+        if isNowPlaying     { return AppPalette.accent }
         if file.isVideo     { return Color(red: 0.75, green: 0.35, blue: 0.95) }
         return .gray
     }
