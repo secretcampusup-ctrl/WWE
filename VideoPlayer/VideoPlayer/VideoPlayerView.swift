@@ -858,7 +858,13 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         loadingIndicator.startAnimating()
         let media = VLCMedia(url: url)
         media.addOption(":avcodec-hw=none")
-        if isVR360Mode { media.addOption(":projection-mode=1") }
+        if isVR360Mode {
+            // MobileVLCKit 3.x uses `projection=2` for 360° sphere. Newer
+            // LibVLC builds use `projection-mode=1` for equirectangular input.
+            // Supplying both keeps the dedicated VR path working across builds.
+            media.addOption(":projection=2")
+            media.addOption(":projection-mode=1")
+        }
         media.addOption(":network-caching=10000")
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=1500")
@@ -1650,27 +1656,12 @@ struct RoutedVideoPlayerView: View {
 
     private let forceVR: Bool
 
-    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, forceVR: Bool = false, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
         self.httpHeaders = httpHeaders; self.onProgress = onProgress
-        self.forceVR = Self.consumeForcedVRPlayback()
+        self.forceVR = forceVR
     }
 
-    static func forceNextVRPlayback() {
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "force_next_vr_playback")
-    }
-
-    private static func consumeForcedVRPlayback() -> Bool {
-        let stamp = UserDefaults.standard.double(forKey: "force_next_vr_playback")
-        UserDefaults.standard.removeObject(forKey: "force_next_vr_playback")
-        // "Play in VR 360" is tapped *before* the link is resolved — for
-        // PikPak/Offcloud/WebDAV sources that resolution is a real network
-        // round trip and can easily take longer than a few seconds. A short
-        // window here silently drops the user's choice and the video opens
-        // flat with no VR anywhere in sight. 10 minutes comfortably covers
-        // slow resolves while still expiring if the flag is ever abandoned.
-        return stamp > 0 && Date().timeIntervalSince1970 - stamp < 600
-    }
     var body: some View {
         if forceVR || Self.isVRVideo(url: url, title: title) {
             DedicatedVRPlayerView(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders, onProgress: onProgress)
@@ -1902,6 +1893,9 @@ private final class DedicatedVRSurfaceView: UIView {
         guard currentURL != url else { return }
         currentURL = url
         let media = VLCMedia(url: url)
+        // Force spherical rendering even when downloaded files have lost their
+        // GSpherical metadata. VLCKit 3.x and LibVLC 4 use different option names.
+        media.addOption(":projection=2")
         media.addOption(":projection-mode=1")
         media.addOption(":avcodec-hw=none")
         media.addOption(":network-caching=10000")

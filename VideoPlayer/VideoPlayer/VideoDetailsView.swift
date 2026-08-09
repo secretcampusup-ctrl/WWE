@@ -702,15 +702,17 @@ struct VideoDetailsView: View {
 
     private var vrPlayButton: some View {
         Button {
-            RoutedVideoPlayerView.forceNextVRPlayback()
+            vm.requestNextPlaybackInVR()
             playAndClose()
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "view.3d").font(.system(size: 17, weight: .bold))
                 Text("Play in VR 360").font(.system(size: 16, weight: .bold))
             }
-            .foregroundColor(.white).frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(LinearGradient(colors: [.purple, .blue], startPoint: .leading, endPoint: .trailing), in: Capsule())
+            .foregroundColor(.black).frame(maxWidth: .infinity).padding(.vertical, 14)
+            .background(Color.white, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.24), lineWidth: 1))
+            .shadow(color: Color.white.opacity(0.16), radius: 10, y: 4)
         }
         .buttonStyle(.plain)
     }
@@ -722,15 +724,15 @@ struct VideoDetailsView: View {
                 Text(playButtonTitle)
                     .font(.system(size: 17, weight: .bold, design: .rounded))
             }
-            .foregroundColor(.black)
+            .foregroundColor(.white)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
-            .shadow(color: Color.white.opacity(0.25), radius: 14, y: 6)
+            .shadow(color: AppPalette.purple.opacity(0.34), radius: 14, y: 6)
         }
         .buttonStyle(.plain)
     }
@@ -985,7 +987,8 @@ struct ResolvedPlayerScreen: View {
                 title: file.name,
                 resumeAt: vm.nowPlayingResumeAt,
                 linkId: vm.nowPlayingLinkId,
-                httpHeaders: vm.nowPlayingHeaders
+                httpHeaders: vm.nowPlayingHeaders,
+                forceVR: vm.nowPlayingForceVR
             ) { seconds, duration, width, height in
                 vm.updatePlaybackProgress(
                     seconds: seconds,

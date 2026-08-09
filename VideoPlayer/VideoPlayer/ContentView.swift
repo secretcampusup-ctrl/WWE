@@ -70,7 +70,8 @@ struct ContentView: View {
                         title: file.name,
                         resumeAt: vm.nowPlayingResumeAt,
                         linkId: vm.nowPlayingLinkId,
-                        httpHeaders: vm.nowPlayingHeaders
+                        httpHeaders: vm.nowPlayingHeaders,
+                        forceVR: vm.nowPlayingForceVR
                     ) { seconds, duration, w, h in
                         vm.updatePlaybackProgress(
                             seconds: seconds,
@@ -926,7 +927,8 @@ struct FavoritesAllView: View {
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
-                    httpHeaders: vm.nowPlayingHeaders
+                    httpHeaders: vm.nowPlayingHeaders,
+                    forceVR: vm.nowPlayingForceVR
                 ) { seconds, duration, w, h in
                     vm.updatePlaybackProgress(
                         seconds: seconds,
@@ -1106,7 +1108,8 @@ struct PlaylistAllView: View {
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
-                    httpHeaders: vm.nowPlayingHeaders
+                    httpHeaders: vm.nowPlayingHeaders,
+                    forceVR: vm.nowPlayingForceVR
                 ) { seconds, duration, w, h in
                     vm.updatePlaybackProgress(
                         seconds: seconds,

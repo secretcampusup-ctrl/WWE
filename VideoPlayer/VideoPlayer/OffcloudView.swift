@@ -1520,7 +1520,8 @@ private struct OffcloudVideoDetailsHost: View {
                         title: file.name,
                         resumeAt: vm.nowPlayingResumeAt,
                         linkId: vm.nowPlayingLinkId,
-                        httpHeaders: vm.nowPlayingHeaders
+                        httpHeaders: vm.nowPlayingHeaders,
+                        forceVR: vm.nowPlayingForceVR
                     ) { seconds, duration, width, height in
                         vm.updatePlaybackProgress(
                             seconds: seconds,
