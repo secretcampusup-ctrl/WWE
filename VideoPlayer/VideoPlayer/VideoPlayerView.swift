@@ -38,6 +38,14 @@ struct VideoPlayerView: View {
     @State private var mkvFillMode = false
     @State private var mkvResetZoomToken = 0
     @StateObject private var mkvControls = MKVPlaybackControls()
+    @State private var showPlaybackSettings = false
+    @State private var subtitleSize: Double = 1.0
+    @State private var subtitleColor: PlayerSubtitleColor = .white
+    @State private var selectedAudioTrack = "Original"
+    @State private var selectedSubtitleTrack = "Off"
+    @State private var selectedQuality = "Auto"
+    @State private var nextEpisodeCountdown = 5
+    @State private var endCountdownTask: Task<Void, Never>?
 
     // Temporary test mode: every file uses the main Apple player only.
     // The MKV player remains in the project but is not selected.
@@ -173,16 +181,8 @@ struct VideoPlayerView: View {
                                 .foregroundColor(.white)
                                 .lineLimit(1)
                             HStack(spacing: 6) {
-                    ResolutionBadgeView(tier: engine.resolutionTier, compact: true)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(AppPalette.accent.opacity(0.15), in: Capsule())
-                    if resumeAt > 3 {
-                        Text("Resumed")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.orange)
-                    }
-                }
+                                PlayerQualityBadge(label: mkvQualityLabel)
+                            }
                         }
                         Spacer()
                         vrToggleButton
@@ -198,14 +198,9 @@ struct VideoPlayerView: View {
                                 .frame(width: 40, height: 40)
                                 .background(.ultraThinMaterial, in: Circle())
                         }
-                        Menu {
-                            Button("0.5×") { mkvControls.setRate(0.5) }
-                            Button("1×") { mkvControls.setRate(1) }
-                            Button("1.5×") { mkvControls.setRate(1.5) }
-                            Button("2×") { mkvControls.setRate(2) }
-                            Divider()
-                            Button(mkvFillMode ? "Aspect Fit" : "Fill Screen") { mkvFillMode.toggle() }
-                            Button("Reset Zoom") { mkvResetZoomToken += 1 }
+                        Button {
+                            showPlaybackSettings = true
+                            hideTask?.cancel()
                         } label: {
                             Image(systemName: "ellipsis")
                                 .font(.system(size: 15, weight: .semibold))
@@ -227,9 +222,12 @@ struct VideoPlayerView: View {
                             Button { mkvControls.togglePlayback() } label: {
                                 Image(systemName: mkvControls.isPlaying ? "pause.fill" : "play.fill")
                                     .font(.system(size: 23, weight: .semibold))
-                                    .foregroundColor(.black)
-                                    .frame(width: 52, height: 52)
-                                    .background(Color.white, in: Circle())
+                                    .foregroundColor(.white)
+                                    .frame(width: 58, height: 58)
+                                    .background(.ultraThinMaterial, in: Circle())
+                                    .overlay(Circle().fill(Color.white.opacity(0.12)))
+                                    .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                                    .shadow(color: .black.opacity(0.3), radius: 12, y: 5)
                             }
                             Button { mkvControls.skip(by: 15) } label: {
                                 Image(systemName: "goforward.15")
@@ -243,7 +241,8 @@ struct VideoPlayerView: View {
                             currentLabel: isScrubbing
                                 ? mkvControls.formattedTime(forFraction: scrubProgress)
                                 : mkvControls.currentTimeFormatted,
-                            durationLabel: mkvControls.durationFormatted,
+                            durationLabel: negativeRemaining(current: isScrubbing ? scrubProgress * mkvControls.durationSeconds : mkvControls.currentSeconds, duration: mkvControls.durationSeconds),
+                            chapters: playbackChapters,
                             onSeek: { value in
                                 mkvControls.seek(to: value)
                                 isScrubbing = false
@@ -268,6 +267,52 @@ struct VideoPlayerView: View {
                 }
 
             }
+
+            // Intentionally outside the auto-hidden chrome: it remains available
+            // throughout the intro window even after every other control fades.
+            if shouldShowSkipIntro && !playbackDidEnd {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button(action: skipIntro) {
+                            Label("Skip Intro", systemImage: "forward.end.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 18)
+                                .frame(height: 44)
+                                .background(.ultraThinMaterial, in: Capsule())
+                                .overlay(Capsule().stroke(Color.white.opacity(0.32), lineWidth: 1))
+                        }
+                    }
+                    .padding(.trailing, 26)
+                    .padding(.bottom, showControls ? 118 : 32)
+                }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+
+            if playbackDidEnd {
+                PlayerEndScreen(
+                    title: VideoTitleFormatter.title(from: title),
+                    countdown: nextEpisodeCountdown,
+                    onReplay: replayCurrentVideo,
+                    onBack: { dismiss() }
+                )
+                .transition(.opacity)
+            }
+        }
+        .sheet(isPresented: $showPlaybackSettings, onDismiss: { scheduleAutoHide() }) {
+            PlayerAdvancedSettingsSheet(
+                selectedAudioTrack: $selectedAudioTrack,
+                selectedSubtitleTrack: $selectedSubtitleTrack,
+                selectedQuality: $selectedQuality,
+                subtitleSize: $subtitleSize,
+                subtitleColor: $subtitleColor,
+                currentQuality: usesMKVPlayer ? mkvQualityLabel : (engine.resolutionTier.badgeText ?? "Auto"),
+                onRateChange: { rate in
+                    if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
+                }
+            )
         }
         .statusBar(hidden: true)
         .navigationBarHidden(true)
@@ -311,6 +356,9 @@ struct VideoPlayerView: View {
         .onChange(of: isScrubbing) { scrubbing in
             if scrubbing { hideTask?.cancel() } else { scheduleAutoHide() }
         }
+        .onChange(of: playbackDidEnd) { ended in
+            if ended { beginEndCountdown() } else { endCountdownTask?.cancel() }
+        }
     }
 
     // MARK: - Top chrome
@@ -334,15 +382,7 @@ struct VideoPlayerView: View {
                     .foregroundColor(.white)
                     .lineLimit(1)
                 HStack(spacing: 6) {
-                    ResolutionBadgeView(tier: engine.resolutionTier, compact: true)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(AppPalette.accent.opacity(0.15), in: Capsule())
-                    if resumeAt > 3 {
-                        Text("Resumed")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.orange)
-                    }
+                    PlayerQualityBadge(tier: engine.resolutionTier)
                 }
             }
 
@@ -365,17 +405,9 @@ struct VideoPlayerView: View {
                     .frame(width: 40, height: 40)
                     .background(.ultraThinMaterial, in: Circle())
             }
-            Menu {
-                Button("0.5×") { engine.setRate(0.5) }
-                Button("1×") { engine.setRate(1.0) }
-                Button("1.5×") { engine.setRate(1.5) }
-                Button("2×") { engine.setRate(2.0) }
-                Divider()
-                Button(isFillMode ? "Aspect Fit" : "Fill Screen") {
-                    isFillMode.toggle()
-                    fillModeToken += 1
-                }
-                Button("Reset Zoom") { engine.resetZoomToken += 1 }
+            Button {
+                showPlaybackSettings = true
+                hideTask?.cancel()
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 15, weight: .semibold))
@@ -413,17 +445,12 @@ struct VideoPlayerView: View {
                 Button { engine.togglePlayPause(); scheduleAutoHide() } label: {
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 28, weight: .semibold))
-                        .foregroundColor(.black)
-                        .frame(width: 64, height: 64)
-                        .background(
-                            LinearGradient(
-                                colors: [Color.white, Color.white.opacity(0.9)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                            in: Circle()
-                        )
-                        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                        .foregroundColor(.white)
+                        .frame(width: 66, height: 66)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().fill(Color.white.opacity(0.12)))
+                        .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
                 }
                 Button { engine.skipForward(); scheduleAutoHide() } label: {
                     Image(systemName: "goforward.15")
@@ -442,7 +469,8 @@ struct VideoPlayerView: View {
                 currentLabel: isScrubbing
                     ? engine.formattedTime(forFraction: scrubProgress)
                     : engine.currentTimeFormatted,
-                durationLabel: engine.durationFormatted,
+                durationLabel: negativeRemaining(current: isScrubbing ? scrubProgress * engine.durationSeconds : engine.currentSeconds, duration: engine.durationSeconds),
+                chapters: playbackChapters,
                 onSeek: { value in
                     scrubProgress = value
                     isScrubbing = false
@@ -521,11 +549,90 @@ struct VideoPlayerView: View {
         .accessibilityLabel(isOrientationLocked ? "Unlock screen rotation" : "Lock screen rotation")
     }
 
+    private var currentPlaybackSeconds: Double {
+        usesMKVPlayer ? mkvControls.currentSeconds : engine.currentSeconds
+    }
+
+    private var playbackDurationSeconds: Double {
+        usesMKVPlayer ? mkvControls.durationSeconds : engine.durationSeconds
+    }
+
+    private var playbackDidEnd: Bool {
+        usesMKVPlayer ? mkvControls.didReachEnd : engine.didReachEnd
+    }
+
+    private var isEpisode: Bool {
+        VideoTitleFormatter.episodeComponents(from: title) != nil
+    }
+
+    private var shouldShowSkipIntro: Bool {
+        isEpisode && playbackDurationSeconds > 120 && currentPlaybackSeconds >= 0 && currentPlaybackSeconds < 180
+    }
+
+    private var mkvQualityLabel: String {
+        if mkvControls.videoWidth >= 3840 || mkvControls.videoHeight >= 2160 { return "4K" }
+        if mkvControls.videoWidth >= 1920 || mkvControls.videoHeight >= 1080 { return "1080P" }
+        if mkvControls.videoWidth >= 1280 || mkvControls.videoHeight >= 720 { return "720P" }
+        return "HD"
+    }
+
+    private var playbackChapters: [PlaybackChapter] {
+        guard playbackDurationSeconds > 0 else { return [] }
+        return [
+            PlaybackChapter(title: "Intro", fraction: min(120 / playbackDurationSeconds, 0.2)),
+            PlaybackChapter(title: "Chapter 2", fraction: 0.33),
+            PlaybackChapter(title: "Chapter 3", fraction: 0.66),
+            PlaybackChapter(title: "Finale", fraction: 0.88)
+        ]
+    }
+
+    private func skipIntro() {
+        let fraction = min(1, 120 / max(playbackDurationSeconds, 1))
+        if usesMKVPlayer { mkvControls.seek(to: fraction) } else { engine.seek(to: fraction) }
+    }
+
+    private func replayCurrentVideo() {
+        nextEpisodeCountdown = 5
+        if usesMKVPlayer {
+            mkvControls.seek(to: 0)
+            mkvControls.togglePlayback()
+        } else {
+            engine.seek(to: 0)
+            engine.togglePlayPause()
+        }
+        scheduleAutoHide()
+    }
+
+    private func beginEndCountdown() {
+        endCountdownTask?.cancel()
+        nextEpisodeCountdown = 5
+        endCountdownTask = Task {
+            for value in stride(from: 4, through: 0, by: -1) {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { nextEpisodeCountdown = value }
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { replayCurrentVideo() }
+        }
+    }
+
+    private func negativeRemaining(current: Double, duration: Double) -> String {
+        let remaining = max(0, duration - current)
+        let total = Int(remaining.rounded())
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "- %02d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "- %02d:%02d", minutes, seconds)
+    }
+
     private func scheduleAutoHide() {
         hideTask?.cancel()
         guard showControls else { return }
         hideTask = Task {
-            try? await Task.sleep(nanoseconds: 4_500_000_000)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled, !isScrubbing else { return }
             await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -549,6 +656,7 @@ private final class MKVPlaybackControls: ObservableObject {
     @Published var videoWidth = 0
     @Published var videoHeight = 0
     @Published var resolutionLabel = "MKV"
+    @Published var didReachEnd = false
     weak var surface: MKVPlayerSurface?
 
     var displayProgress: Double { requestedProgress ?? progress }
@@ -561,6 +669,7 @@ private final class MKVPlaybackControls: ObservableObject {
     func togglePlayback() { surface?.togglePlaybackFromControls() }
     func seek(to fraction: Double) {
         let target = min(1, max(0, fraction))
+        didReachEnd = false
         requestedProgress = target
         surface?.seek(to: target)
     }
@@ -578,6 +687,10 @@ private final class MKVPlaybackControls: ObservableObject {
             currentSeconds = requestedProgress * durationSeconds
         } else {
             currentSeconds = max(0, current)
+        }
+        if durationSeconds > 0, currentSeconds >= durationSeconds - 0.5 {
+            didReachEnd = true
+            isPlaying = false
         }
     }
     func updateVideoSize(_ size: CGSize) {
@@ -1110,14 +1223,188 @@ private final class SeekBarContainerView: UIView {
     static let preferredHeight: CGFloat = 34
 }
 
+
+private struct PlaybackChapter: Identifiable {
+    let id = UUID()
+    let title: String
+    let fraction: Double
+}
+
+private struct PlayerQualityBadge: View {
+    var tier: ResolutionTier? = nil
+    var label: String? = nil
+
+    var body: some View {
+        Text(label ?? tier?.badgeText ?? "HD")
+            .font(.system(size: 10, weight: .black, design: .rounded))
+            .foregroundColor(Color.black.opacity(0.88))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                LinearGradient(colors: [Color(red: 1, green: 0.86, blue: 0.25), .orange], startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: Capsule()
+            )
+            .overlay(Capsule().stroke(Color.white.opacity(0.3), lineWidth: 0.5))
+            .shadow(color: .orange.opacity(0.25), radius: 6)
+    }
+}
+
+private enum PlayerSubtitleColor: String, CaseIterable, Identifiable {
+    case white = "White"
+    case yellow = "Yellow"
+    case cyan = "Cyan"
+    var id: String { rawValue }
+    var color: Color {
+        switch self { case .white: return .white; case .yellow: return .yellow; case .cyan: return .cyan }
+    }
+}
+
+private struct PlayerAdvancedSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selectedAudioTrack: String
+    @Binding var selectedSubtitleTrack: String
+    @Binding var selectedQuality: String
+    @Binding var subtitleSize: Double
+    @Binding var subtitleColor: PlayerSubtitleColor
+    let currentQuality: String
+    let onRateChange: (Float) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 14) {
+                    settingsCard(title: "Audio Tracks", icon: "waveform") {
+                        Picker("Audio", selection: $selectedAudioTrack) {
+                            Text("Original").tag("Original")
+                            Text("System Default").tag("System Default")
+                        }.pickerStyle(.segmented)
+                    }
+                    settingsCard(title: "Subtitles", icon: "captions.bubble.fill") {
+                        Picker("Subtitles", selection: $selectedSubtitleTrack) {
+                            Text("Off").tag("Off")
+                            Text("Auto").tag("Auto")
+                            Text("English").tag("English")
+                        }.pickerStyle(.segmented)
+                        HStack {
+                            Text("Size")
+                            Slider(value: $subtitleSize, in: 0.75...1.75, step: 0.25)
+                            Text("\(Int(subtitleSize * 100))%")
+                                .foregroundColor(.secondary)
+                                .frame(width: 48)
+                        }
+                        HStack {
+                            Text("Color")
+                            Spacer()
+                            ForEach(PlayerSubtitleColor.allCases) { option in
+                                Button {
+                                    subtitleColor = option
+                                } label: {
+                                    Circle()
+                                        .fill(option.color)
+                                        .frame(width: 25, height: 25)
+                                        .overlay(Circle().stroke(AppPalette.accent, lineWidth: subtitleColor == option ? 3 : 0))
+                                }
+                            }
+                        }
+                    }
+                    settingsCard(title: "Video Quality", icon: "4k.tv.fill") {
+                        Picker("Quality", selection: $selectedQuality) {
+                            Text("Auto").tag("Auto")
+                            Text(currentQuality).tag(currentQuality)
+                            Text("1080p").tag("1080p")
+                            Text("720p").tag("720p")
+                        }.pickerStyle(.segmented)
+                    }
+                    settingsCard(title: "Playback Speed", icon: "speedometer") {
+                        HStack(spacing: 8) {
+                            ForEach([0.5, 1.0, 1.5, 2.0], id: \.self) { speed in
+                                Button("\(speed, specifier: "%g")×") { onRateChange(Float(speed)) }
+                                    .buttonStyle(.bordered)
+                                    .tint(AppPalette.accent)
+                            }
+                        }
+                    }
+                }
+                .padding(18)
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("Playback Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func settingsCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+                .foregroundColor(AppPalette.accent)
+            content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+private struct PlayerEndScreen: View {
+    let title: String
+    let countdown: Int
+    let onReplay: () -> Void
+    let onBack: () -> Void
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [.black.opacity(0.96), .black.opacity(0.72)], startPoint: .bottom, endPoint: .top)
+                .ignoresSafeArea()
+            VStack(spacing: 18) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(AppPalette.diagonalGradient)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .frame(maxWidth: 360)
+                    .overlay(
+                        VStack(spacing: 8) {
+                            Image(systemName: "play.tv.fill").font(.system(size: 38))
+                            Text(title).font(.headline).lineLimit(2)
+                        }.foregroundColor(.white)
+                    )
+                Text("Up Next")
+                    .font(.title2.bold())
+                    .foregroundColor(.white)
+                Button(action: onReplay) {
+                    Label("Play Next Episode  \(countdown)", systemImage: "play.fill")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: 340)
+                        .frame(height: 52)
+                        .background(AppPalette.gradient, in: Capsule())
+                }
+                Button("Back to Series") { onBack() }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white.opacity(0.86))
+            }
+            .padding(28)
+        }
+    }
+}
+
 private struct InstantSeekBar: View {
     let progress: Double
     let bufferProgress: Double
     let currentLabel: String
     let durationLabel: String
+    var chapters: [PlaybackChapter] = []
     let onSeek: (Double) -> Void
     let onScrubbing: (Double, Bool) -> Void
     @State private var draggedValue: Double?
+
+    private func nearestChapter(to progress: Double) -> PlaybackChapter? {
+        chapters
+            .filter { abs($0.fraction - progress) <= 0.035 }
+            .min { abs($0.fraction - progress) < abs($1.fraction - progress) }
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1155,6 +1442,21 @@ private struct InstantSeekBar: View {
                         .fill(crystalSky)
                         .frame(width: thumbSize / 2 + usableWidth * value, height: 7)
                         .shadow(color: Color(red: 0.45, green: 0.80, blue: 1.0).opacity(0.28), radius: 4)
+                    ForEach(chapters) { chapter in
+                        Capsule()
+                            .fill(Color.white.opacity(0.92))
+                            .frame(width: 2, height: 14)
+                            .offset(x: thumbSize / 2 + usableWidth * chapter.fraction)
+                    }
+                    if draggedValue != nil, let chapter = nearestChapter(to: value) {
+                        Text(chapter.title)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .offset(x: max(0, min(usableWidth - 68, usableWidth * chapter.fraction - 34)), y: -25)
+                    }
                     Circle()
                         .fill(.ultraThinMaterial)
                         .frame(width: thumbSize, height: thumbSize)

@@ -23,6 +23,7 @@ final class VideoPlaybackEngine: ObservableObject {
     @Published private(set) var resolutionHeight: Int = 0
     @Published private(set) var resolutionTier: ResolutionTier = .unknown
     @Published private(set) var errorMessage: String?
+    @Published private(set) var didReachEnd = false
     @Published var resetZoomToken = 0
 
     /// Shared player — AVPlayerLayer attaches to this for GPU composition.
@@ -98,6 +99,7 @@ final class VideoPlaybackEngine: ObservableObject {
 
     func load(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
         errorMessage = nil
+        didReachEnd = false
         isBuffering = true
         pendingResumeSeconds = max(0, resumeAt)
         didApplyResume = false
@@ -210,6 +212,10 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     func togglePlayPause() {
+        if didReachEnd {
+            didReachEnd = false
+            seek(to: 0)
+        }
         if player.rate > 0 {
             player.pause()
             isPlaying = false
@@ -244,6 +250,7 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     func seek(to fraction: Double) {
+        didReachEnd = false
         guard let item = player.currentItem else { return }
         let duration = CMTimeGetSeconds(item.duration)
         guard duration.isFinite, duration > 0 else { return }
@@ -556,6 +563,7 @@ final class VideoPlaybackEngine: ObservableObject {
                 guard let self else { return }
                 self.isPlaying = false
                 self.progress = 1
+                self.didReachEnd = true
                 // Mark finished so resume clears
                 if self.durationSeconds > 0 {
                     self.onProgressTick?(self.durationSeconds, self.durationSeconds, self.resolutionWidth, self.resolutionHeight)
