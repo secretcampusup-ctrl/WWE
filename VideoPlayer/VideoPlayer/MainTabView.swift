@@ -174,8 +174,8 @@ private final class PirateBayLatestModel: ObservableObject {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let url: URL?
         if query.isEmpty {
-            var parts = URLComponents(string: "https://apibay.org/precompiled/data_top100_\(category).json")!
-            parts.queryItems = [URLQueryItem(name: "refresh", value: String(Int(Date().timeIntervalSince1970 / 60)))]
+            var parts = URLComponents(string: "https://apibay.org/q.php")!
+            parts.queryItems = [URLQueryItem(name: "q", value: "category:\(category)"), URLQueryItem(name: "_", value: String(Int(Date().timeIntervalSince1970 / 30)))]
             url = parts.url
         } else {
             var parts = URLComponents(string: "https://apibay.org/q.php")!
@@ -351,13 +351,39 @@ private struct PirateBayView: View {
             let regex = try NSRegularExpression(pattern: #"https?://[^\s\]\[\"'<>]+"#, options: .caseInsensitive)
             let range = NSRange(text.startIndex..<text.endIndex, in: text), hosts = ["imgur", "imagebam", "imgbox", "postimg", "pixhost", "ibb.co", "imagevenue", "prnt"]
             var seen = Set<String>()
-            imageURLs = regex.matches(in: text, range: range).compactMap { match in
+            let candidates: [URL] = regex.matches(in: text, range: range).compactMap { match in
                 guard let r = Range(match.range, in: text) else { return nil }
                 let raw = String(text[r]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?)")), lower = raw.lowercased()
                 guard ([".jpg", ".jpeg", ".png", ".webp", ".gif"].contains { lower.contains($0) } || hosts.contains { lower.contains($0) }), seen.insert(raw).inserted else { return nil }
                 return URL(string: raw)
             }
+            var resolved: [URL] = []
+            for candidate in candidates {
+                if let direct = await resolveImage(candidate), !resolved.contains(direct) { resolved.append(direct) }
+            }
+            imageURLs = resolved
         } catch { imageURLs = [] }
+    }
+
+    private func resolveImage(_ url: URL) async -> URL? {
+        let directExtensions = ["jpg", "jpeg", "png", "webp", "gif"]
+        if directExtensions.contains(url.pathExtension.lowercased()) { return url }
+        do {
+            var request = URLRequest(url: url); request.timeoutInterval = 15
+            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1", forHTTPHeaderField: "User-Agent")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if (response.mimeType ?? "").lowercased().hasPrefix("image/") { return url }
+            guard let html = String(data: data, encoding: .utf8) else { return nil }
+            let patterns = [#"property=["']og:image["'][^>]+content=["']([^"']+)"#, #"content=["']([^"']+)["'][^>]+property=["']og:image"#, #"<img[^>]+src=["']([^"']+)"#]
+            for pattern in patterns {
+                let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+                let full = NSRange(html.startIndex..<html.endIndex, in: html)
+                guard let match = regex.firstMatch(in: html, range: full), match.numberOfRanges > 1, let r = Range(match.range(at: 1), in: html) else { continue }
+                let raw = String(html[r]).replacingOccurrences(of: "&amp;", with: "&")
+                if let found = URL(string: raw, relativeTo: url)?.absoluteURL { return found }
+            }
+        } catch { return nil }
+        return nil
     }
 }
 
