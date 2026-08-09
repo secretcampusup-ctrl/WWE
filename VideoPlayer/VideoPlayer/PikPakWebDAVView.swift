@@ -199,7 +199,20 @@ struct PikPakWebDAVView: View {
                 .fullScreenCover(isPresented: $detailShowingPlayer, onDismiss: {
                     folderCoverVersion &+= 1
                 }) {
-                    ResolvedPlayerScreen(vm: vm)
+                    ResolvedPlayerScreen(
+                        vm: vm,
+                        episodeOptions: item.relatedEpisodes.map {
+                            PlayerEpisodeOption(id: $0.id, title: $0.seasonEpisodeLabel ?? $0.displayTitle, subtitle: $0.displayTitle)
+                        },
+                        onSelectEpisode: { episodeID in
+                            guard let next = seriesEpisodeFiles.first(where: { coverKey(for: $0, server: server) == episodeID }) else { return }
+                            detailShowingPlayer = false
+                            selectedVideoFile = next
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                play(next, on: server, fromDetails: true)
+                            }
+                        }
+                    )
                 }
             } else {
                 Text("Could not open this PikPak video.").padding()
@@ -219,7 +232,19 @@ struct PikPakWebDAVView: View {
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
                     httpHeaders: vm.nowPlayingHeaders,
-                    forceVR: vm.nowPlayingForceVR
+                    forceVR: false,
+                    episodeOptions: server.map { activeServer in
+                        seriesEpisodeFiles.map { episode in
+                            let parsed = VideoTitleFormatter.episodeComponents(from: episode.name)
+                            let label = parsed.map { "S\($0.season) · E\($0.episode)" } ?? episode.displayName
+                            return PlayerEpisodeOption(id: coverKey(for: episode, server: activeServer), title: label, subtitle: VideoTitleFormatter.episodeTitle(from: episode.name))
+                        }
+                    } ?? [],
+                    onSelectEpisode: { episodeID in
+                        guard let activeServer = server,
+                              let episode = seriesEpisodeFiles.first(where: { coverKey(for: $0, server: activeServer) == episodeID }) else { return }
+                        play(episode, on: activeServer, fromDetails: false)
+                    }
                 ) { seconds, duration, width, height in
                     vm.updatePlaybackProgress(
                         seconds: seconds,

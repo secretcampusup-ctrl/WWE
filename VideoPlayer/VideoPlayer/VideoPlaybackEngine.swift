@@ -8,6 +8,53 @@ struct PlayerAudioTrackOption: Identifiable, Equatable {
     let title: String
 }
 
+struct PlayerSubtitleTrackOption: Identifiable, Equatable {
+    let id: String
+    let title: String
+}
+
+struct PlayerChapterMarker: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let fraction: Double
+}
+
+struct IntroMarker: Codable, Equatable {
+    let start: Double
+    let end: Double
+}
+
+enum IntroMarkerStore {
+    private static let defaultsKey = "player.detectedIntroMarkers.v1"
+
+    static func marker(for title: String) -> IntroMarker? {
+        load()[seriesKey(for: title)]
+    }
+
+    static func save(_ marker: IntroMarker, for title: String) {
+        guard marker.end > marker.start, marker.end <= 600 else { return }
+        var values = load()
+        values[seriesKey(for: title)] = marker
+        if let data = try? JSONEncoder().encode(values) {
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+        }
+    }
+
+    private static func load() -> [String: IntroMarker] {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              let values = try? JSONDecoder().decode([String: IntroMarker].self, from: data) else { return [:] }
+        return values
+    }
+
+    private static func seriesKey(for raw: String) -> String {
+        var value = raw.removingPercentEncoding ?? raw
+        value = value.replacingOccurrences(of: #"(?i)[\s._-]*S\d{1,3}[\s._-]*E\d{1,3}.*$"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?i)\b(2160p|1080p|720p|4k|hdr|web[- .]?dl|bluray|x26[45]|hevc)\b.*$"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"[._-]+"#, with: " ", options: .regularExpression)
+        return value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// High-performance 4K-capable playback core.
 /// Uses AVFoundation hardware decode (VideoToolbox), async asset loading,
 /// adaptive buffering, and careful main-thread usage for smooth 60fps UI.
@@ -31,6 +78,10 @@ final class VideoPlaybackEngine: ObservableObject {
     @Published private(set) var didReachEnd = false
     @Published private(set) var audioTracks: [PlayerAudioTrackOption] = []
     @Published private(set) var selectedAudioTrackID: String?
+    @Published private(set) var introMarker: IntroMarker?
+    @Published private(set) var subtitleTracks: [PlayerSubtitleTrackOption] = []
+    @Published private(set) var selectedSubtitleTrackID: String?
+    @Published private(set) var chapters: [PlayerChapterMarker] = []
     @Published var resetZoomToken = 0
 
     /// Shared player — AVPlayerLayer attaches to this for GPU composition.
@@ -67,6 +118,7 @@ final class VideoPlaybackEngine: ObservableObject {
     /// See setInteracting(_:).
     private var isInteracting = false
     private var audioOptionsByID: [String: AVMediaSelectionOption] = [:]
+    private var subtitleOptionsByID: [String: AVMediaSelectionOption] = [:]
 
     /// Background queue for asset I/O and non-UI work (not main thread).
     private let assetQueue = DispatchQueue(
@@ -105,9 +157,13 @@ final class VideoPlaybackEngine: ObservableObject {
 
     // MARK: - Public API
 
-    func load(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
+    func load(url: URL, title: String = "", resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
         errorMessage = nil
         didReachEnd = false
+        introMarker = title.isEmpty ? nil : IntroMarkerStore.marker(for: title)
+        subtitleTracks = []
+        selectedSubtitleTrackID = nil
+        chapters = []
         isBuffering = true
         pendingResumeSeconds = max(0, resumeAt)
         didApplyResume = false
@@ -166,6 +222,7 @@ final class VideoPlaybackEngine: ObservableObject {
                         return
                     }
 
+                    self.detectIntroChapter(in: asset, title: title)
                     let item = self.makePlayerItem(asset: asset)
                     self.attach(item: item)
                     Task.detached(priority: .utility) {
@@ -200,6 +257,10 @@ final class VideoPlaybackEngine: ObservableObject {
         audioTracks = []
         audioOptionsByID = [:]
         selectedAudioTrackID = nil
+        subtitleTracks = []
+        subtitleOptionsByID = [:]
+        selectedSubtitleTrackID = nil
+        chapters = []
         onProgressTick = nil
         UIApplication.shared.isIdleTimerDisabled = false
         player.automaticallyWaitsToMinimizeStalling = true
@@ -267,6 +328,32 @@ final class VideoPlaybackEngine: ObservableObject {
         }
     }
 
+    func selectSubtitleTrack(id: String?) {
+        guard let item = player.currentItem,
+              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
+        if let id, let option = subtitleOptionsByID[id] {
+            item.select(option, in: group)
+            selectedSubtitleTrackID = id
+        } else {
+            item.select(nil, in: group)
+            selectedSubtitleTrackID = nil
+        }
+    }
+
+    private func refreshSubtitleTracks(for item: AVPlayerItem) {
+        guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
+            subtitleTracks = []; subtitleOptionsByID = [:]; selectedSubtitleTrackID = nil; return
+        }
+        var map: [String: AVMediaSelectionOption] = [:]
+        subtitleTracks = group.options.enumerated().map { index, option in
+            let id = "subtitle-\(index)"; map[id] = option
+            return PlayerSubtitleTrackOption(id: id, title: option.displayName)
+        }
+        subtitleOptionsByID = map
+        if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+           let entry = map.first(where: { $0.value === selected }) { selectedSubtitleTrackID = entry.key }
+    }
+
     func setRate(_ rate: Float) {
         // Keep hardware decode path; rate change is handled by AVPlayer.
         if rate > 0 {
@@ -322,6 +409,33 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     // MARK: - Player configuration (hardware path)
+
+    private func detectIntroChapter(in asset: AVAsset, title: String) {
+        guard !title.isEmpty else { return }
+        let groups = asset.chapterMetadataGroups(bestMatchingPreferredLanguages: Locale.preferredLanguages + ["en"])
+        let assetDuration = CMTimeGetSeconds(asset.duration)
+        if assetDuration.isFinite, assetDuration > 0 {
+            chapters = groups.enumerated().compactMap { index, group in
+                let start = CMTimeGetSeconds(group.timeRange.start)
+                guard start.isFinite, start > 0, start < assetDuration else { return nil }
+                let label = group.items.compactMap { $0.stringValue }.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return PlayerChapterMarker(id: "chapter-\(index)", title: (label?.isEmpty == false ? label! : "Chapter \(index + 1)"), fraction: start / assetDuration)
+            }
+        }
+        for group in groups {
+            let labels = group.items.compactMap { $0.stringValue }.joined(separator: " ").lowercased()
+            let isIntro = ["intro", "opening", "opening credits", "theme", "op"].contains { token in
+                labels == token || labels.contains("\(token) ") || labels.contains(" \(token)")
+            }
+            guard isIntro else { continue }
+            let start = CMTimeGetSeconds(group.timeRange.start)
+            let duration = CMTimeGetSeconds(group.timeRange.duration)
+            let end = start + duration
+            guard start.isFinite, end.isFinite, duration >= 5, end <= 600 else { continue }
+            let marker = IntroMarker(start: max(0, start), end: end)
+            introMarker = marker; IntroMarkerStore.save(marker, for: title); break
+        }
+    }
 
     private func configurePlayer() {
         // Hardware-accelerated pipeline (VideoToolbox decode + GPU layer composition).
@@ -482,6 +596,7 @@ final class VideoPlaybackEngine: ObservableObject {
                     self.isBuffering = false
                     self.errorMessage = nil
                     self.refreshAudioTracks(for: item)
+                    self.refreshSubtitleTracks(for: item)
                     // Apply saved resume position once
                     if !self.didApplyResume, self.pendingResumeSeconds > 1 {
                         self.didApplyResume = true

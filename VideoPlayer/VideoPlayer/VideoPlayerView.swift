@@ -16,6 +16,8 @@ struct VideoPlayerView: View {
     var linkId: UUID? = nil
     /// Optional HTTP headers (WebDAV Basic Auth, etc.)
     var httpHeaders: [String: String]? = nil
+    var episodeOptions: [PlayerEpisodeOption] = []
+    var onSelectEpisode: ((String) -> Void)? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
     @Environment(\.dismiss) var dismiss
@@ -25,14 +27,10 @@ struct VideoPlayerView: View {
     @State private var scrubProgress: Double = 0
     @State private var hideTask: Task<Void, Never>?
     @State private var isFillMode = false
-    @State private var isVR360Mode = false
     /// True once the user has manually tapped the VR toggle for *this* video —
     /// after that we never override their choice with auto-detection.
-    @State private var userOverrideVR = false
     /// True once auto-detection has run (either applied or determined not applicable)
     /// for the currently loaded video, so it only ever fires once per video.
-    @State private var vrAutoDetected = false
-    @State private var isOrientationLocked = false
     @State private var fillModeToken = 0
     @State private var useExtendedPlayer = false
     @State private var showExtendedPlayerPrompt = false
@@ -41,6 +39,7 @@ struct VideoPlayerView: View {
     @StateObject private var mkvControls = MKVPlaybackControls()
     @State private var showPlaybackSettings = false
     @State private var showQuickSettings = false
+    @State private var showEpisodePicker = false
     @State private var subtitleSize: Double = 1.0
     @State private var subtitleColor: PlayerSubtitleColor = .white
     @State private var selectedAudioTrack = ""
@@ -49,7 +48,6 @@ struct VideoPlayerView: View {
     @State private var externalSubtitleCues: [ExternalSubtitleCue] = []
     @State private var externalSubtitleFileName: String?
     @State private var screenBrightness: Double = 0.5
-    @State private var playerVolume: Double = 1.0
     @State private var subtitleDelay: Double = 0
     @State private var subtitleHeight: Double = 0
     @State private var subtitleShadow = true
@@ -72,42 +70,6 @@ struct VideoPlayerView: View {
         if useExtendedPlayer { return true }
         return ["webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(explicitExtension)
     }
-    /// Filename/title hint only — doesn't need the video to have loaded yet.
-    private var filenameSuggestsVR360: Bool {
-        let label = (title + " " + url.lastPathComponent).lowercased()
-        return ["360", "vr", "equirect", "spherical", "sbs", "side-by-side"].contains { label.contains($0) }
-    }
-    /// Real detection, not a stub. An equirectangular 360° source is ~2:1
-    /// (width:height) — a far more reliable signal than filenames, since a
-    /// huge share of real VR files never carry a "vr"/"360" hint in their
-    /// name at all (re-encoded, downloaded, or renamed along the way). Once
-    /// the decoder reports real dimensions we check the ratio; before that
-    /// (or for packed formats where ratio alone isn't distinctive) we still
-    /// honor the filename hint so detection can fire immediately on appear.
-    private var supportsVR360: Bool {
-        let width = usesMKVPlayer ? mkvControls.videoWidth : Int(engine.resolutionWidth)
-        let height = usesMKVPlayer ? mkvControls.videoHeight : Int(engine.resolutionHeight)
-        if width > 0, height > 0 {
-            let ratio = Double(width) / Double(height)
-            if ratio > 1.85 && ratio < 2.15 { return true }
-        }
-        return filenameSuggestsVR360
-    }
-    /// Wires the detection above into the actual toggle. Runs at most once per
-    /// loaded video (per `vrAutoDetected`) and only when the user hasn't already
-    /// touched the VR button themselves (per `userOverrideVR`) — this was
-    /// previously computed but never applied anywhere, so 360°/VR clips never
-    /// auto-enabled and the button carried no real signal about the content.
-    private func applyAutoVRDetectionIfNeeded() {
-        guard !userOverrideVR, !vrAutoDetected else { return }
-        if supportsVR360 {
-            vrAutoDetected = true
-            isVR360Mode = true
-        } else if (usesMKVPlayer ? mkvControls.videoWidth : engine.resolutionWidth) > 0 {
-            // Resolution is known and doesn't match 360/VR heuristics — stop checking.
-            vrAutoDetected = true
-        }
-    }
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -120,18 +82,11 @@ struct VideoPlayerView: View {
                     resumeAt: resumeAt,
                     isFillMode: mkvFillMode,
                     resetZoomToken: mkvResetZoomToken,
-                    isVR360Mode: isVR360Mode
+                    isVR360Mode: false
                 )
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
                     .ignoresSafeArea()
-            } else {
-            if isVR360Mode {
-                VR360PlayerView(player: engine.player) {
-                    withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
-                    scheduleAutoHide()
-                }
-                .ignoresSafeArea()
             } else {
                 ZoomableVideoView(
                     player: engine.player,
@@ -153,7 +108,6 @@ struct VideoPlayerView: View {
                 .equatable()
                 .ignoresSafeArea()
             }
-            }
 
             if !usesMKVPlayer, let error = engine.errorMessage {
                 VStack(spacing: 12) {
@@ -165,7 +119,7 @@ struct VideoPlayerView: View {
                         .foregroundColor(.white)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
-                    Button("Retry") { engine.load(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders) }
+                    Button("Retry") { engine.load(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders) }
                         .buttonStyle(.borderedProminent)
                         .tint(AppPalette.accent)
                 }
@@ -186,9 +140,6 @@ struct VideoPlayerView: View {
                         }
                         PlayerQualityBadge(label: mkvQualityLabel)
                         Spacer()
-                        vrToggleButton
-                        orientationLockButton
-
                         Button {
                             mkvFillMode.toggle()
                             scheduleAutoHide()
@@ -313,9 +264,10 @@ struct VideoPlayerView: View {
                 subtitleBackground: $subtitleBackground,
                 subtitleFont: $subtitleFont,
                 brightness: $screenBrightness,
-                volume: $playerVolume,
                 audioTracks: usesMKVPlayer ? [] : engine.audioTracks,
                 selectedAudioTrackID: engine.selectedAudioTrackID,
+                subtitleTracks: engine.subtitleTracks,
+                selectedSubtitleTrackID: engine.selectedSubtitleTrackID,
                 subtitleFileName: externalSubtitleFileName,
                 isFillMode: usesMKVPlayer ? mkvFillMode : isFillMode,
                 onAspectRatioToggle: {
@@ -326,11 +278,12 @@ struct VideoPlayerView: View {
                     screenBrightness = value
                     UIScreen.main.brightness = CGFloat(value)
                 },
-                onVolumeChange: { value in
-                    playerVolume = value
-                    if !usesMKVPlayer { engine.player.volume = Float(min(1, max(0, value))) }
-                },
                 onAudioTrackChange: { id in engine.selectAudioTrack(id: id) },
+                onSubtitleTrackChange: { id in
+                    externalSubtitleCues = []
+                    externalSubtitleFileName = nil
+                    engine.selectSubtitleTrack(id: id)
+                },
                 onChooseSubtitleFile: {
                     showPlaybackSettings = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showSubtitleImporter = true }
@@ -356,28 +309,19 @@ struct VideoPlayerView: View {
         .navigationBarHidden(true)
         .onAppear {
             screenBrightness = Double(UIScreen.main.brightness)
-            playerVolume = Double(engine.player.volume)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Defensive reset: guarantees a clean VR state for this video even
             // if this view instance is ever reused across plays.
-            isVR360Mode = false
-            userOverrideVR = false
-            vrAutoDetected = false
             engine.onProgressTick = { seconds, duration, w, h in
                 onProgress?(seconds, duration, w, h)
             }
             if !usesMKVPlayer {
-                engine.load(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
+                engine.load(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders)
             }
-            applyAutoVRDetectionIfNeeded()
             scheduleAutoHide()
         }
-        .onChange(of: engine.resolutionWidth) { _ in applyAutoVRDetectionIfNeeded() }
-        .onChange(of: mkvControls.videoWidth) { _ in applyAutoVRDetectionIfNeeded() }
         .onDisappear {
             hideTask?.cancel()
-            ScreenOrientationLock.unlock()
-            isOrientationLocked = false
             if !usesMKVPlayer {
                 if engine.durationSeconds > 0 {
                     onProgress?(engine.currentSeconds, engine.durationSeconds, engine.resolutionWidth, engine.resolutionHeight)
@@ -394,6 +338,9 @@ struct VideoPlayerView: View {
             guard nativeExtension != "mp4" && nativeExtension != "mov" && nativeExtension != "m4v" else { return }
             engine.cleanup()
             useExtendedPlayer = true
+        }
+        .onChange(of: showControls) { visible in
+            if !visible { showQuickSettings = false; showPlaybackSettings = false; showEpisodePicker = false }
         }
         .onChange(of: isScrubbing) { scrubbing in
             if scrubbing { hideTask?.cancel() } else { scheduleAutoHide() }
@@ -421,10 +368,6 @@ struct VideoPlayerView: View {
             PlayerQualityBadge(tier: engine.resolutionTier)
 
             Spacer(minLength: 0)
-
-            vrToggleButton
-
-            orientationLockButton
 
             Button {
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -506,50 +449,6 @@ struct VideoPlayerView: View {
         if showControls { scheduleAutoHide() } else { hideTask?.cancel() }
     }
 
-    /// Manual, always-present VR toggle. Auto-detection (filename hint +
-    /// aspect-ratio once dimensions load) is only ever a heuristic — it can
-    /// miss an oddly-named file, or misfire on an ordinary widescreen clip.
-    /// This button is the guaranteed fallback: whatever the detector
-    /// decided, the person can flip it themselves in one tap, on every
-    /// video, every time. Marking `userOverrideVR` freezes auto-detection
-    /// so it never fights the explicit choice for the rest of this playback.
-    private var vrToggleButton: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                isVR360Mode.toggle()
-            }
-            userOverrideVR = true
-            vrAutoDetected = true
-            scheduleAutoHide()
-        } label: {
-            Image(systemName: "view.3d")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(isVR360Mode ? AppPalette.accent : .white)
-                .frame(width: 40, height: 40)
-                .background(.ultraThinMaterial, in: Circle())
-        }
-        .accessibilityLabel(isVR360Mode ? "Switch to normal view" : "Switch to VR 360° view")
-    }
-
-    private var orientationLockButton: some View {
-        Button {
-            if isOrientationLocked {
-                ScreenOrientationLock.unlock()
-                isOrientationLocked = false
-            } else if ScreenOrientationLock.lockToCurrentOrientation() {
-                isOrientationLocked = true
-            }
-            scheduleAutoHide()
-        } label: {
-            Image(systemName: isOrientationLocked ? "lock.fill" : "lock.open.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(isOrientationLocked ? .cyan : .white)
-                .frame(width: 40, height: 40)
-                .background(.ultraThinMaterial, in: Circle())
-        }
-        .accessibilityLabel(isOrientationLocked ? "Unlock screen rotation" : "Lock screen rotation")
-    }
-
     private var subtitleDocumentTypes: [UTType] {
         var types: [UTType] = [.plainText]
         if let srt = UTType(filenameExtension: "srt") { types.append(srt) }
@@ -613,7 +512,7 @@ struct VideoPlayerView: View {
             HStack(spacing: 3) {
                 Button {
                     showQuickSettings = true
-                    hideTask?.cancel()
+                    scheduleAutoHide()
                 } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 17, weight: .semibold))
@@ -623,16 +522,18 @@ struct VideoPlayerView: View {
                     PlayerQuickSettingsPopover(
                         audioTracks: usesMKVPlayer ? [] : engine.audioTracks,
                         selectedAudioTrackID: engine.selectedAudioTrackID,
+                        subtitleTracks: engine.subtitleTracks,
+                        selectedSubtitleTrackID: engine.selectedSubtitleTrackID,
                         subtitleFileName: externalSubtitleFileName,
-                        volume: $playerVolume,
-                        onVolumeChange: { value in
-                            playerVolume = value
-                            if !usesMKVPlayer { engine.player.volume = Float(min(1, max(0, value))) }
-                        },
                         onRateChange: { rate in
                             if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
                         },
                         onAudioTrackChange: { id in engine.selectAudioTrack(id: id) },
+                        onSubtitleTrackChange: { id in
+                            externalSubtitleCues = []
+                            externalSubtitleFileName = nil
+                            engine.selectSubtitleTrack(id: id)
+                        },
                         onChooseSubtitleFile: {
                             showQuickSettings = false
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showSubtitleImporter = true }
@@ -640,6 +541,7 @@ struct VideoPlayerView: View {
                         onDisableSubtitles: {
                             externalSubtitleCues = []
                             externalSubtitleFileName = nil
+                            engine.selectSubtitleTrack(id: nil)
                         },
                         onAdvanced: {
                             showQuickSettings = false
@@ -649,11 +551,17 @@ struct VideoPlayerView: View {
                     .playerPopoverAdaptation()
                 }
                 Button {
-                    dismiss()
+                    showEpisodePicker = true
+                    scheduleAutoHide()
                 } label: {
                     Image(systemName: "rectangle.stack.fill")
                         .font(.system(size: 17, weight: .semibold))
                         .frame(width: 37, height: 37)
+                }
+                .popover(isPresented: $showEpisodePicker, arrowEdge: .bottom) {
+                    PlayerEpisodePicker(options: episodeOptions, onSelect: { id in
+                        showEpisodePicker = false; onSelectEpisode?(id)
+                    }).playerPopoverAdaptation()
                 }
             }
             .foregroundColor(.white)
@@ -686,9 +594,13 @@ struct VideoPlayerView: View {
         VideoTitleFormatter.episodeComponents(from: title) != nil
     }
 
+    private var detectedIntroMarker: IntroMarker? {
+        engine.introMarker ?? IntroMarkerStore.marker(for: title)
+    }
+
     private var shouldShowSkipIntro: Bool {
-        let isLongForm = playbackDurationSeconds >= 20 * 60
-        return (isEpisode || isLongForm) && currentPlaybackSeconds >= 0 && currentPlaybackSeconds < 180
+        guard let marker = detectedIntroMarker else { return false }
+        return currentPlaybackSeconds >= marker.start && currentPlaybackSeconds < marker.end
     }
 
     private var mkvQualityLabel: String {
@@ -698,18 +610,13 @@ struct VideoPlayerView: View {
         return "HD"
     }
 
-    private var playbackChapters: [PlaybackChapter] {
-        guard playbackDurationSeconds > 0 else { return [] }
-        return [
-            PlaybackChapter(title: "Intro", fraction: min(120 / playbackDurationSeconds, 0.2)),
-            PlaybackChapter(title: "Chapter 2", fraction: 0.33),
-            PlaybackChapter(title: "Chapter 3", fraction: 0.66),
-            PlaybackChapter(title: "Finale", fraction: 0.88)
-        ]
+    private var playbackChapters: [PlayerChapterMarker] {
+        usesMKVPlayer ? [] : engine.chapters
     }
 
     private func skipIntro() {
-        let fraction = min(1, 120 / max(playbackDurationSeconds, 1))
+        guard let marker = detectedIntroMarker, playbackDurationSeconds > 0 else { return }
+        let fraction = min(1, max(0, marker.end / playbackDurationSeconds))
         if usesMKVPlayer { mkvControls.seek(to: fraction) } else { engine.seek(to: fraction) }
     }
 
@@ -754,11 +661,14 @@ struct VideoPlayerView: View {
         hideTask?.cancel()
         guard showControls else { return }
         hideTask = Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
             guard !Task.isCancelled, !isScrubbing else { return }
             await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showControls = false
+                    showQuickSettings = false
+                    showPlaybackSettings = false
+                    showEpisodePicker = false
                 }
             }
         }
@@ -1438,12 +1348,6 @@ private struct CircularPlaybackButton: View {
     }
 }
 
-private struct PlaybackChapter: Identifiable {
-    let id = UUID()
-    let title: String
-    let fraction: Double
-}
-
 private struct PlayerQualityBadge: View {
     var tier: ResolutionTier? = nil
     var label: String? = nil
@@ -1483,7 +1387,35 @@ private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
     }
 }
 
-private enum QuickSettingsPage { case main, volume, speed, audio, subtitles }
+private enum QuickSettingsPage { case main, speed, audio, subtitles }
+
+struct PlayerEpisodeOption: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let subtitle: String
+}
+
+private struct PlayerEpisodePicker: View {
+    let options: [PlayerEpisodeOption]
+    let onSelect: (String) -> Void
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Episodes").font(.headline).padding(.bottom, 5)
+                if options.isEmpty {
+                    Text("No episodes available").font(.subheadline).foregroundColor(.secondary).padding(.vertical, 14)
+                } else {
+                    ForEach(options) { option in
+                        Button { onSelect(option.id) } label: {
+                            HStack { VStack(alignment: .leading, spacing: 2) { Text(option.title).font(.subheadline.bold()); Text(option.subtitle).font(.caption).foregroundColor(.secondary) }; Spacer(); Image(systemName: "play.fill") }
+                                .foregroundColor(.primary).padding(9)
+                        }
+                    }
+                }
+            }.padding(10)
+        }.frame(width: 230, maxHeight: 310)
+    }
+}
 
 private extension View {
     @ViewBuilder
@@ -1499,11 +1431,12 @@ private extension View {
 private struct PlayerQuickSettingsPopover: View {
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
+    let subtitleTracks: [PlayerSubtitleTrackOption]
+    let selectedSubtitleTrackID: String?
     let subtitleFileName: String?
-    @Binding var volume: Double
-    let onVolumeChange: (Double) -> Void
     let onRateChange: (Float) -> Void
     let onAudioTrackChange: (String) -> Void
+    let onSubtitleTrackChange: (String) -> Void
     let onChooseSubtitleFile: () -> Void
     let onDisableSubtitles: () -> Void
     let onAdvanced: () -> Void
@@ -1521,7 +1454,6 @@ private struct PlayerQuickSettingsPopover: View {
 
     private var mainMenu: some View {
         VStack(spacing: 0) {
-            row("Volume", icon: "speaker.wave.2.fill", value: "\(Int(volume * 100))%") { page = .volume }
             row("Playback Speed", icon: "speedometer", value: selectedSpeed == 1 ? "Normal" : "\(selectedSpeed)×") { page = .speed }
             row("Audio", icon: "music.note", value: selectedAudioTitle) { page = .audio }
             row("Subtitles", icon: "captions.bubble.fill", value: subtitleFileName ?? "None") { page = .subtitles }
@@ -1538,12 +1470,6 @@ private struct PlayerQuickSettingsPopover: View {
             .padding(.bottom, 5)
             Divider()
             switch page {
-            case .volume:
-                ForEach([0.0, 0.5, 1.0], id: \.self) { value in
-                    choice(value == 0 ? "Muted" : "\(Int(value * 100))%", selected: abs(volume - value) < 0.01) {
-                        volume = value; onVolumeChange(value)
-                    }
-                }
             case .speed:
                 ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { value in
                     choice(value == 1 ? "Normal" : String(format: "%g×", value), selected: selectedSpeed == Float(value)) {
@@ -1557,7 +1483,10 @@ private struct PlayerQuickSettingsPopover: View {
                     }
                 } else { Text("One audio track").foregroundColor(.secondary).padding(10) }
             case .subtitles:
-                choice("None", selected: subtitleFileName == nil, action: onDisableSubtitles)
+                choice("None", selected: subtitleFileName == nil && selectedSubtitleTrackID == nil, action: onDisableSubtitles)
+                ForEach(subtitleTracks) { track in
+                    choice(track.title, selected: subtitleFileName == nil && selectedSubtitleTrackID == track.id) { onSubtitleTrackChange(track.id) }
+                }
                 Button(action: onChooseSubtitleFile) {
                     Label("Choose from Files", systemImage: "folder.fill")
                         .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(7)
@@ -1602,15 +1531,16 @@ private struct PlayerAdvancedSettingsSheet: View {
     @Binding var subtitleBackground: Bool
     @Binding var subtitleFont: PlayerSubtitleFont
     @Binding var brightness: Double
-    @Binding var volume: Double
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
+    let subtitleTracks: [PlayerSubtitleTrackOption]
+    let selectedSubtitleTrackID: String?
     let subtitleFileName: String?
     let isFillMode: Bool
     let onAspectRatioToggle: () -> Void
     let onBrightnessChange: (Double) -> Void
-    let onVolumeChange: (Double) -> Void
     let onAudioTrackChange: (String) -> Void
+    let onSubtitleTrackChange: (String) -> Void
     let onChooseSubtitleFile: () -> Void
     let onDisableSubtitles: () -> Void
     let onRateChange: (Float) -> Void
@@ -1657,9 +1587,6 @@ private struct PlayerAdvancedSettingsSheet: View {
 
     private var audioSection: some View {
         VStack(spacing: 14) {
-            card("Volume", icon: "speaker.wave.2.fill") {
-                Slider(value: Binding(get: { volume }, set: { volume = $0; onVolumeChange($0) }), in: 0...1)
-            }
             card("Audio Track", icon: "music.note") {
                 if audioTracks.count > 1 {
                     ForEach(audioTracks) { track in
@@ -1674,9 +1601,14 @@ private struct PlayerAdvancedSettingsSheet: View {
 
     private var subtitleSection: some View {
         VStack(spacing: 14) {
-            card("Subtitle File", icon: "folder.fill") {
+            card("Subtitle Track", icon: "captions.bubble.fill") {
+                Button("None", action: onDisableSubtitles)
+                ForEach(subtitleTracks) { track in
+                    Button { onSubtitleTrackChange(track.id) } label: {
+                        HStack { Text(track.title); Spacer(); if selectedSubtitleTrackID == track.id && subtitleFileName == nil { Image(systemName: "checkmark.circle.fill") } }
+                    }.foregroundColor(.primary)
+                }
                 Button(subtitleFileName ?? "Choose from Files", action: onChooseSubtitleFile)
-                if subtitleFileName != nil { Button("Turn Off", role: .destructive, action: onDisableSubtitles) }
             }
             card("Appearance", icon: "textformat") {
                 Picker("Font", selection: $subtitleFont) { ForEach(PlayerSubtitleFont.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
@@ -1749,12 +1681,12 @@ private struct InstantSeekBar: View {
     let bufferProgress: Double
     let currentLabel: String
     let durationLabel: String
-    var chapters: [PlaybackChapter] = []
+    var chapters: [PlayerChapterMarker] = []
     let onSeek: (Double) -> Void
     let onScrubbing: (Double, Bool) -> Void
     @State private var draggedValue: Double?
 
-    private func nearestChapter(to progress: Double) -> PlaybackChapter? {
+    private func nearestChapter(to progress: Double) -> PlayerChapterMarker? {
         chapters
             .filter { abs($0.fraction - progress) <= 0.035 }
             .min { abs($0.fraction - progress) < abs($1.fraction - progress) }
@@ -2308,308 +2240,18 @@ struct RoutedVideoPlayerView: View {
     var resumeAt: Double = 0
     var linkId: UUID? = nil
     var httpHeaders: [String: String]? = nil
+    var episodeOptions: [PlayerEpisodeOption] = []
+    var onSelectEpisode: ((String) -> Void)? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
-    private let forceVR: Bool
-
-    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, forceVR: Bool = false, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, forceVR: Bool = false, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
         self.httpHeaders = httpHeaders; self.onProgress = onProgress
-        self.forceVR = forceVR
+        self.episodeOptions = episodeOptions; self.onSelectEpisode = onSelectEpisode
     }
 
     var body: some View {
-        if forceVR || Self.isVRVideo(url: url, title: title) {
-            DedicatedVRPlayerView(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders, onProgress: onProgress)
-        } else {
-            VideoPlayerView(url: url, title: title, resumeAt: resumeAt, linkId: linkId, httpHeaders: httpHeaders, onProgress: onProgress)
-        }
+        VideoPlayerView(url: url, title: title, resumeAt: resumeAt, linkId: linkId, httpHeaders: httpHeaders, episodeOptions: episodeOptions, onSelectEpisode: onSelectEpisode, onProgress: onProgress)
     }
 
-    private static func isVRVideo(url: URL, title: String) -> Bool {
-        let raw = (title + " " + url.lastPathComponent).lowercased()
-        let normalized = raw.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
-        let tokens = Set(normalized.split { !$0.isLetter && !$0.isNumber }.map(String.init))
-        let vrTokens: Set<String> = [
-            "vr", "360", "360vr", "vr360", "equirectangular", "equirect", "spherical",
-            "sbs", "ou", "tb", "180vr", "vr180", "3dh", "3dv", "oculus", "quest",
-            "fisheye", "monoscopic", "stereoscopic", "psvr", "gearvr", "skybox",
-            "insta360", "theta", "180", "8k180", "6k180", "5k180"
-        ]
-        if !tokens.isDisjoint(with: vrTokens) { return true }
-        if raw.contains("side-by-side") || raw.contains("top-bottom") || raw.contains("projection=360")
-            || raw.contains("360°") || raw.contains("360 degree") { return true }
-        // Resolution tags ("5760x2880", "7680x3840", ...) show up in real
-        // filenames far more often than the word "vr" or "360" ever does.
-        // Instead of matching a short fixed list, catch any WxH-looking
-        // token and flag it when its ratio lands on the ~2:1 equirectangular
-        // band — this is what makes detection work on files whose names
-        // were never hand-tagged as VR in the first place.
-        if let regex = try? NSRegularExpression(pattern: "(\\d{3,5})x(\\d{3,5})") {
-            let fullRange = NSRange(raw.startIndex..., in: raw)
-            for match in regex.matches(in: raw, range: fullRange) {
-                guard let wRange = Range(match.range(at: 1), in: raw),
-                      let hRange = Range(match.range(at: 2), in: raw),
-                      let w = Double(raw[wRange]), let h = Double(raw[hRange]), h > 0 else { continue }
-                let ratio = w / h
-                if ratio > 1.85 && ratio < 2.15 { return true }
-            }
-        }
-        return false
-    }
-}
-
-private struct DedicatedVRPlayerView: View {
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var controller = DedicatedVRController()
-    @State private var showControls = true
-    @State private var hideTask: Task<Void, Never>?
-
-    let url: URL
-    let title: String
-    let resumeAt: Double
-    let httpHeaders: [String: String]?
-    let onProgress: ((Double, Double, Int, Int) -> Void)?
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            DedicatedVRSurface(controller: controller, url: url, resumeAt: resumeAt, httpHeaders: httpHeaders) {
-                withAnimation(.easeInOut(duration: 0.18)) { showControls.toggle() }
-                scheduleHide()
-            }
-            .ignoresSafeArea()
-
-            if controller.isBuffering {
-                ProgressView().tint(.white).padding(18).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                    .allowsHitTesting(false)
-            }
-
-            if showControls {
-                VStack {
-                    HStack(spacing: 12) {
-                        Button { dismiss() } label: {
-                            Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold))
-                                .frame(width: 42, height: 42).background(.ultraThinMaterial, in: Circle())
-                        }
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(VideoTitleFormatter.title(from: title)).font(.headline).lineLimit(1)
-                            Text("VR 360 · \(controller.resolutionLabel)").font(.caption).foregroundStyle(AppPalette.accent)
-                        }
-                        Spacer()
-                        Image(systemName: "view.3d").font(.system(size: 17, weight: .semibold)).foregroundStyle(AppPalette.accent)
-                            .frame(width: 42, height: 42).background(.ultraThinMaterial, in: Circle())
-                    }
-                    .foregroundStyle(.white).padding(.horizontal, 16).padding(.top, 10)
-
-                    Spacer()
-
-                    VStack(spacing: 12) {
-                        HStack(spacing: 36) {
-                            Button { controller.skip(-15) } label: { Image(systemName: "gobackward.15").font(.title2) }
-                            Button { controller.toggle() } label: {
-                                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                                    .font(.title2).foregroundStyle(.black).frame(width: 58, height: 58).background(.white, in: Circle())
-                            }
-                            Button { controller.skip(15) } label: { Image(systemName: "goforward.15").font(.title2) }
-                        }
-                        Slider(value: Binding(get: { controller.progress }, set: { controller.seek($0) }), in: 0...1).tint(AppPalette.accent)
-                        HStack {
-                            Text(controller.currentLabel)
-                            Spacer()
-                            Text(controller.durationLabel)
-                        }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }
-                    .foregroundStyle(.white).padding(.horizontal, 24).padding(.bottom, 28)
-                }
-                .transition(.opacity)
-            }
-        }
-        .statusBar(hidden: true)
-        .preferredColorScheme(.dark)
-        .onAppear { scheduleHide() }
-        .onDisappear {
-            hideTask?.cancel()
-            onProgress?(controller.currentSeconds, controller.durationSeconds, controller.videoWidth, controller.videoHeight)
-            controller.stop()
-        }
-    }
-
-    private func scheduleHide() {
-        hideTask?.cancel()
-        guard showControls else { return }
-        hideTask = Task {
-            try? await Task.sleep(nanoseconds: 3_500_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { withAnimation(.easeOut(duration: 0.2)) { showControls = false } }
-        }
-    }
-}
-
-@MainActor
-private final class DedicatedVRController: ObservableObject {
-    @Published var isPlaying = false
-    @Published var isBuffering = true
-    @Published var progress = 0.0
-    @Published var currentSeconds = 0.0
-    @Published var durationSeconds = 0.0
-    @Published var videoWidth = 0
-    @Published var videoHeight = 0
-    weak var surface: DedicatedVRSurfaceView?
-    private var pendingSeekSeconds: Double?
-
-    var resolutionLabel: String { videoWidth > 0 ? "\(videoWidth)×\(videoHeight)" : "Loading" }
-    var currentLabel: String { Self.time(currentSeconds) }
-    var durationLabel: String { Self.time(durationSeconds) }
-    func toggle() { surface?.toggle() }
-    func skip(_ seconds: Double) {
-        guard durationSeconds > 0 else { surface?.skip(seconds); return }
-        let target = min(durationSeconds, max(0, (pendingSeekSeconds ?? currentSeconds) + seconds))
-        pendingSeekSeconds = target
-        currentSeconds = target
-        progress = target / durationSeconds
-        surface?.seek(toSeconds: target)
-    }
-    func seek(_ value: Double) {
-        guard durationSeconds > 0 else { surface?.seek(value); return }
-        let target = min(1, max(0, value)) * durationSeconds
-        pendingSeekSeconds = target
-        currentSeconds = target
-        progress = target / durationSeconds
-        surface?.seek(toSeconds: target)
-    }
-    func stop() { surface?.stop() }
-
-    func update(playing: Bool, buffering: Bool, position: Double, current: Double, duration: Double, size: CGSize) {
-        isPlaying = playing; isBuffering = buffering; durationSeconds = duration
-        if let pendingSeekSeconds {
-            if abs(current - pendingSeekSeconds) <= 0.75 {
-                self.pendingSeekSeconds = nil
-                progress = min(1, max(0, position)); currentSeconds = current
-            } else {
-                currentSeconds = pendingSeekSeconds
-                if duration > 0 { progress = min(1, max(0, pendingSeekSeconds / duration)) }
-            }
-        } else {
-            progress = min(1, max(0, position)); currentSeconds = current
-        }
-        if size.width > 1 { videoWidth = Int(size.width); videoHeight = Int(size.height) }
-    }
-
-    private static func time(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "00:00" }
-        let total = Int(seconds); return String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
-    }
-}
-
-private struct DedicatedVRSurface: UIViewRepresentable {
-    let controller: DedicatedVRController
-    let url: URL
-    let resumeAt: Double
-    let httpHeaders: [String: String]?
-    let onTap: () -> Void
-
-    func makeUIView(context: Context) -> DedicatedVRSurfaceView {
-        let view = DedicatedVRSurfaceView()
-        view.controller = controller; controller.surface = view; view.onTap = onTap
-        view.play(url: url, resumeAt: resumeAt, headers: httpHeaders)
-        return view
-    }
-    func updateUIView(_ view: DedicatedVRSurfaceView, context: Context) { view.onTap = onTap }
-    static func dismantleUIView(_ view: DedicatedVRSurfaceView, coordinator: ()) { view.stop() }
-}
-
-private final class DedicatedVRSurfaceView: UIView {
-    private let player = VLCMediaPlayer()
-    private let videoView = UIView()
-    private let motion = CMMotionManager()
-    private var timer: Timer?
-    private var yaw: Float = 0
-    private var pitch: Float = 0
-    private var fov: Float = 82
-    private var panStart = CGPoint.zero
-    private var currentURL: URL?
-    weak var controller: DedicatedVRController?
-    var onTap: (() -> Void)?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .black
-        videoView.backgroundColor = .black; videoView.isOpaque = true
-        // VLCKit installs its rendering view inside this container. Disabling
-        // hit-testing here guarantees the parent surface receives taps/pans.
-        videoView.isUserInteractionEnabled = false
-        isUserInteractionEnabled = true
-        addSubview(videoView)
-        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
-        tap.cancelsTouchesInView = false
-        pan.cancelsTouchesInView = false
-        pinch.cancelsTouchesInView = false
-        tap.require(toFail: pan)
-        addGestureRecognizer(tap); addGestureRecognizer(pan); addGestureRecognizer(pinch)
-        player.drawable = videoView
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    override func layoutSubviews() { super.layoutSubviews(); videoView.frame = bounds; player.drawable = videoView }
-
-    func play(url: URL, resumeAt: Double, headers: [String: String]?) {
-        guard currentURL != url else { return }
-        currentURL = url
-        let media = VLCMedia(url: url)
-        // Force spherical rendering even when downloaded files have lost their
-        // GSpherical metadata. VLCKit 3.x and LibVLC 4 use different option names.
-        media.addOption(":projection=2")
-        media.addOption(":projection-mode=1")
-        media.addOption(":avcodec-hw=none")
-        media.addOption(":network-caching=10000")
-        media.addOption(":http-reconnect")
-        media.addOption(":file-caching=1500")
-        if let agent = headers?["User-Agent"] { media.addOption(":http-user-agent=\(agent)") }
-        if let referer = headers?["Referer"] ?? headers?["Referrer"] { media.addOption(":http-referrer=\(referer)") }
-        if let cookie = headers?["Cookie"] { media.addOption(":http-cookie=\(cookie)") }
-        player.drawable = videoView; player.media = media
-        _ = player.updateViewpoint(0, pitch: 0, roll: 0, fov: fov, absolute: true)
-        player.play(); startMotion()
-        if resumeAt > 2 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.player.time = VLCTime(int: Int32(resumeAt * 1000)) } }
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.tick() }
-    }
-
-    private func tick() {
-        let current = Double(player.time.intValue) / 1000
-        let duration = Double(player.media?.length.intValue ?? 0) / 1000
-        let size = player.videoSize
-        _ = player.updateViewpoint(yaw, pitch: pitch, roll: 0, fov: fov, absolute: true)
-        controller?.update(playing: player.isPlaying, buffering: !player.isPlaying && current < 1, position: Double(player.position), current: current, duration: duration, size: size)
-    }
-
-    private func startMotion() {
-        guard motion.isDeviceMotionAvailable else { return }
-        motion.deviceMotionUpdateInterval = 1 / 60
-        motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] sample, _ in
-            guard let self, let attitude = sample?.attitude else { return }
-            let deviceYaw = Float(attitude.yaw * 180 / .pi)
-            let devicePitch = Float(attitude.pitch * 180 / .pi)
-            _ = self.player.updateViewpoint(self.yaw + deviceYaw, pitch: max(-89, min(89, self.pitch + devicePitch)), roll: 0, fov: self.fov, absolute: true)
-        }
-    }
-
-    @objc private func tapped() { onTap?() }
-    @objc private func panned(_ gesture: UIPanGestureRecognizer) {
-        let value = gesture.translation(in: self)
-        if gesture.state == .began { panStart = CGPoint(x: CGFloat(yaw), y: CGFloat(pitch)) }
-        yaw = Float(panStart.x - value.x * 0.18); pitch = max(-89, min(89, Float(panStart.y + value.y * 0.18)))
-        _ = player.updateViewpoint(yaw, pitch: pitch, roll: 0, fov: fov, absolute: true)
-    }
-    @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
-        fov = max(35, min(115, fov / Float(gesture.scale))); gesture.scale = 1
-        _ = player.updateViewpoint(yaw, pitch: pitch, roll: 0, fov: fov, absolute: true)
-    }
-    func toggle() { player.isPlaying ? player.pause() : player.play() }
-    func skip(_ seconds: Double) { player.time = VLCTime(int: Int32(max(0, Double(player.time.intValue) + seconds * 1000))) }
-    func seek(_ value: Double) { player.position = Float(min(1, max(0, value))) }
-    func seek(toSeconds seconds: Double) { player.time = VLCTime(int: Int32(max(0, seconds * 1000))) }
-    func stop() { motion.stopDeviceMotionUpdates(); timer?.invalidate(); player.stop(); player.drawable = nil }
 }

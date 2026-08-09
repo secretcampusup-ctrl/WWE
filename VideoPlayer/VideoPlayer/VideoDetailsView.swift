@@ -992,6 +992,8 @@ struct ImmediatePlayerLoadingView: View {
 }
 struct ResolvedPlayerScreen: View {
     @ObservedObject var vm: AppViewModel
+    var episodeOptions: [PlayerEpisodeOption] = []
+    var onSelectEpisode: ((String) -> Void)? = nil
 
     var body: some View {
         if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
@@ -1001,7 +1003,9 @@ struct ResolvedPlayerScreen: View {
                 resumeAt: vm.nowPlayingResumeAt,
                 linkId: vm.nowPlayingLinkId,
                 httpHeaders: vm.nowPlayingHeaders,
-                forceVR: vm.nowPlayingForceVR
+                forceVR: false,
+                episodeOptions: episodeOptions,
+                onSelectEpisode: onSelectEpisode
             ) { seconds, duration, width, height in
                 vm.updatePlaybackProgress(
                     seconds: seconds,
