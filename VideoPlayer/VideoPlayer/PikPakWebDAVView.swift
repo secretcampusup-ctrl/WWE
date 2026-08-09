@@ -201,7 +201,7 @@ struct PikPakWebDAVView: View {
                 }) {
                     ResolvedPlayerScreen(
                         vm: vm,
-                        episodeOptions: item.relatedEpisodes.map {
+                        episodeOptions: episodeItems(server: server).map {
                             PlayerEpisodeOption(id: $0.id, title: $0.seasonEpisodeLabel ?? $0.displayTitle, subtitle: $0.displayTitle)
                         },
                         onSelectEpisode: { episodeID in
