@@ -91,7 +91,7 @@ struct RecentVideosView: View {
                         title: file.name,
                         resumeAt: vm.nowPlayingResumeAt,
                         linkId: vm.nowPlayingLinkId,
-                        httpHeaders: vm.nowPlayingHeaders,
+                        httpHeaders: vm.nowPlayingHeaders
                     ) { seconds, duration, w, h in
                         vm.updatePlaybackProgress(
                             seconds: seconds,
