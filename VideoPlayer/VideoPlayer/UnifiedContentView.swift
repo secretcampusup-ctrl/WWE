@@ -249,11 +249,20 @@ struct UnifiedContentView: View {
     }
 
     private var emptyState: some View {
-        ContentUnavailableView(
-            section == .unknown ? "No Unknown Content" : "No \(section.rawValue)",
-            systemImage: section.icon,
-            description: Text("Pull to refresh after adding WebDAV or Offcloud in Home settings.")
-        ).padding(.top, 70)
+        VStack(spacing: 14) {
+            Image(systemName: section.icon)
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(AppPalette.gradient)
+            Text(section == .unknown ? "No Unknown Content" : "No \(section.rawValue)")
+                .font(.title3.weight(.bold))
+            Text("Pull to refresh after adding WebDAV or Offcloud in Home settings.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 30)
+        .padding(.top, 70)
     }
 
     @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry) -> some View {
