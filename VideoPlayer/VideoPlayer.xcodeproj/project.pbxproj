@@ -22,6 +22,7 @@
 		AA000012 /* LinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000013 /* LinkResolver.swift */; };
 		AA000015 /* WebDAVSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000016 /* WebDAVSettingsView.swift */; };
 		AA000016 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000017 /* MainTabView.swift */; };
+		AA00F001 /* UnifiedContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00F001 /* UnifiedContentView.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* HighPriorityNetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* HighPriorityNetworkManager.swift */; };
 		C2D3E4F5061728394A5B6C7D /* AppPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3E4F5061728394A5B6C7D8E /* AppPalette.swift */; };
 		AA000017 /* RecentVideosView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000018 /* RecentVideosView.swift */; };
@@ -72,6 +73,7 @@
 		BB000013 /* LinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkResolver.swift; sourceTree = "<group>"; };
 		BB000016 /* WebDAVSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebDAVSettingsView.swift; sourceTree = "<group>"; };
 		BB000017 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		BB00F001 /* UnifiedContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedContentView.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5061728394A5B6C /* HighPriorityNetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HighPriorityNetworkManager.swift; sourceTree = "<group>"; };
 		D3E4F5061728394A5B6C7D8E /* AppPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPalette.swift; sourceTree = "<group>"; };
 		BB000018 /* RecentVideosView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentVideosView.swift; sourceTree = "<group>"; };
@@ -141,6 +143,7 @@
 				BB000036 /* LinkResolver+CleanTitle.swift */,
 				BB000016 /* WebDAVSettingsView.swift */,
 				BB000017 /* MainTabView.swift */,
+				BB00F001 /* UnifiedContentView.swift */,
 				B1C2D3E4F5061728394A5B6C /* HighPriorityNetworkManager.swift */,
 				D3E4F5061728394A5B6C7D8E /* AppPalette.swift */,
 				BB000018 /* RecentVideosView.swift */,
@@ -267,6 +270,7 @@
 				AA000012 /* LinkResolver.swift in Sources */,
 				AA000015 /* WebDAVSettingsView.swift in Sources */,
 				AA000016 /* MainTabView.swift in Sources */,
+				AA00F001 /* UnifiedContentView.swift in Sources */,
 				A1B2C3D4E5F60718293A4B5C /* HighPriorityNetworkManager.swift in Sources */,
 				C2D3E4F5061728394A5B6C7D /* AppPalette.swift in Sources */,
 				AA000017 /* RecentVideosView.swift in Sources */,

@@ -61,7 +61,7 @@ struct RecentVideosView: View {
                 .padding(.bottom, 28)
             }
             .background(AppTheme.bg.ignoresSafeArea())
-            .navigationTitle("Recent")
+            .navigationTitle("Direct Links")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {

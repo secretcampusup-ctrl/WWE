@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var isResolving = false
     @State private var showLinkActions = false
     @State private var showDownloadManager = false
+    @State private var showUnifiedSettings = false
     @State private var detailLink: SavedVideoLink?
     @FocusState private var urlFieldFocused: Bool
 
@@ -173,6 +174,9 @@ struct ContentView: View {
         .sheet(isPresented: $showDownloadManager) {
             DownloadManagerView()
         }
+        .sheet(isPresented: $showUnifiedSettings) {
+            UnifiedSettingsView(vm: vm)
+        }
         .fullScreenCover(isPresented: $showAllFavorites) {
             FavoritesAllView(vm: vm)
         }
@@ -203,6 +207,15 @@ struct ContentView: View {
                     .foregroundStyle(AppTheme.titleGradient)
             }
             Spacer()
+            Button {
+                dismissKeyboard()
+                showUnifiedSettings = true
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(AppTheme.accent)
+            }
+            .buttonStyle(.plain)
             Button {
                 dismissKeyboard()
                 showDownloadManager = true
