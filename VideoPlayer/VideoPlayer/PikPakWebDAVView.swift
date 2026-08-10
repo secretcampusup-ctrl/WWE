@@ -225,7 +225,6 @@ struct PikPakWebDAVView: View {
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
                     httpHeaders: vm.nowPlayingHeaders,
-                    forceVR: false,
                     episodeOptions: currentPlayerEpisodeOptions,
                     onSelectEpisode: { episodeID in
                         guard let activeServer = server else { return }

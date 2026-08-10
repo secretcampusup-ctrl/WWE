@@ -219,7 +219,6 @@ struct PikPakLibraryView: View {
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
-                    forceVR: vm.nowPlayingForceVR
                 ) { seconds, duration, w, h in
                     vm.updatePlaybackProgress(
                         seconds: seconds,

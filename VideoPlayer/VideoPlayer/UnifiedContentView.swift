@@ -111,13 +111,15 @@ private final class UnifiedContentModel: ObservableObject {
             for _ in 0..<min(8, representatives.count) {
                 guard let (key, entry) = iterator.next() else { break }
                 let lookupTitle = metadataLookupTitle(for: entry)
-                group.addTask { (key, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle)) }
+                let preferredType = preferredMediaType(for: entry)
+                group.addTask { (key, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)) }
             }
             while let (key, details) = await group.next() {
                 if let details { metadataByQuery[key] = details }
                 if let (nextKey, nextEntry) = iterator.next() {
                     let lookupTitle = metadataLookupTitle(for: nextEntry)
-                    group.addTask { (nextKey, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle)) }
+                    let preferredType = preferredMediaType(for: nextEntry)
+                    group.addTask { (nextKey, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)) }
                 }
             }
         }
@@ -166,6 +168,13 @@ private final class UnifiedContentModel: ObservableObject {
         loaded = true
         lastSourceSignature = sourceSignature
         status = ""
+    }
+
+    private func preferredMediaType(for entry: UnifiedMediaEntry) -> String {
+        if VideoTitleFormatter.episodeComponents(from: entry.rawTitle) != nil { return "tv" }
+        let value = entry.rawTitle.lowercased()
+        if value.range(of: #"\bseason[ ._-]*\d{1,3}\b"#, options: .regularExpression) != nil { return "tv" }
+        return "movie"
     }
 
     private func metadataGroupKey(for entry: UnifiedMediaEntry) -> String {
@@ -418,7 +427,7 @@ private struct UnifiedMediaDetailsHost: View {
                 withAnimation(.easeOut(duration: 0.16)) { selection.id = episodeID }
             }
         )
-        .id(selection.id ?? entry.id)
+        .animation(.easeInOut(duration: 0.18), value: selection.id)
         .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
     }
 

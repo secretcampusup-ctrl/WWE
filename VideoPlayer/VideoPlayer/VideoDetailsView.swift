@@ -160,7 +160,6 @@ struct VideoDetailsView: View {
 
                         VStack(spacing: 12) {
                             primaryPlayButton
-                            vrPlayButton
 
                             HStack(spacing: 12) {
                                 actionButton(
@@ -288,12 +287,11 @@ struct VideoDetailsView: View {
         // VideoThumbnailLoader.fetchThePornDBMetadata.
         .task(id: item.id) {
             let metadataKey = item.posterCacheKey ?? item.id
-            if let cachedDetails = VideoDetailsMemoryCache.details[metadataKey] { tmdbDetails = cachedDetails }
-            if let cachedEpisode = VideoDetailsMemoryCache.episodes[metadataKey] { tmdbEpisode = cachedEpisode }
-            if ThePornDBSettings.isEnabled,
-               let cachedAdult = VideoDetailsMemoryCache.adultMetadata[metadataKey] {
-                thePornDBMetadata = cachedAdult
-            }
+            tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
+            tmdbEpisode = VideoDetailsMemoryCache.episodes[metadataKey]
+            thePornDBMetadata = ThePornDBSettings.isEnabled
+                ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
+                : nil
             if tmdbEpisode == nil, let value = VideoTitleFormatter.episodeComponents(from: item.title) {
                 tmdbEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
                 if let tmdbEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = tmdbEpisode }
@@ -596,31 +594,25 @@ struct VideoDetailsView: View {
                         ForEach(item.relatedEpisodes) { episode in
                             let current = episode.id == item.id
                             Button { onSelectEpisode?(episode.id) } label: {
-                                VStack(alignment: .leading, spacing: 11) {
-                                    HStack {
-                                        Text(episode.numberLabel).font(.system(size: 11, weight: .bold, design: .rounded)).tracking(0.5)
-                                            .foregroundStyle(current ? Color.white : AppPalette.accent)
-                                        Spacer()
-                                        ZStack {
-                                            Circle().fill(current ? Color.white.opacity(0.2) : AppPalette.accent.opacity(0.14)).frame(width: 34, height: 34)
-                                            Image(systemName: current ? "waveform" : "play.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(current ? Color.white : AppPalette.accent)
-                                        }
-                                    }
-                                    Text(episode.episodeTitle).font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(.white).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                                    HStack(spacing: 5) {
-                                        Circle().fill(current ? Color.white : AppPalette.accent).frame(width: 5, height: 5)
-                                        Text(current ? "SELECTED" : "VIEW DETAILS").font(.system(size: 9, weight: .bold, design: .rounded)).tracking(0.7).foregroundStyle(current ? Color.white.opacity(0.85) : .secondary)
-                                    }
-                                }
-                                .padding(14).frame(width: 220, height: 124, alignment: .leading)
-                                .background(current ? AnyShapeStyle(AppPalette.diagonalGradient) : AnyShapeStyle(Color.white.opacity(0.055)), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(current ? Color.white.opacity(0.24) : AppPalette.blue.opacity(0.16), lineWidth: 1))
-                                .shadow(color: current ? AppPalette.purple.opacity(0.3) : Color.black.opacity(0.18), radius: 12, y: 7)
+                                Text(episode.numberLabel)
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .tracking(0.35)
+                                    .foregroundStyle(current ? Color.white : AppPalette.accent)
+                                    .frame(width: 104, height: 46)
+                                    .background(
+                                        current ? AnyShapeStyle(AppPalette.diagonalGradient) : AnyShapeStyle(Color.white.opacity(0.055)),
+                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .stroke(current ? Color.white.opacity(0.24) : AppPalette.blue.opacity(0.16), lineWidth: 1)
+                                    )
+                                    .shadow(color: current ? AppPalette.purple.opacity(0.24) : .clear, radius: 8, y: 4)
                             }
                             .id(episode.id)
                             .buttonStyle(PremiumPressButtonStyle())
                         }
-                    }.padding(.vertical, 4).padding(.horizontal, 1)
+                    }.padding(.vertical, 3).padding(.horizontal, 1)
                 }
                 .onAppear { scrollToSelectedEpisode(using: proxy) }
                 .onChange(of: item.id) { _ in scrollToSelectedEpisode(using: proxy) }
@@ -631,7 +623,9 @@ struct VideoDetailsView: View {
     private func scrollToSelectedEpisode(using proxy: ScrollViewProxy) {
         guard item.relatedEpisodes.contains(where: { $0.id == item.id }) else { return }
         DispatchQueue.main.async {
-            proxy.scrollTo(item.id, anchor: .center)
+            withAnimation(.easeInOut(duration: 0.22)) {
+                proxy.scrollTo(item.id, anchor: .center)
+            }
         }
     }
 
@@ -732,22 +726,6 @@ struct VideoDetailsView: View {
         return String(format: "Play E%02d", value.episode)
     }
 
-    private var vrPlayButton: some View {
-        Button {
-            vm.requestNextPlaybackInVR()
-            playAndClose()
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "view.3d").font(.system(size: 17, weight: .bold))
-                Text("Play in VR 360").font(.system(size: 16, weight: .bold))
-            }
-            .foregroundColor(.black).frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(Color.white, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.24), lineWidth: 1))
-            .shadow(color: Color.white.opacity(0.16), radius: 10, y: 4)
-        }
-        .buttonStyle(.plain)
-    }
     private var primaryPlayButton: some View {
         Button(action: playAndClose) {
             HStack(spacing: 10) {
@@ -1022,7 +1000,6 @@ struct ResolvedPlayerScreen: View {
                 resumeAt: vm.nowPlayingResumeAt,
                 linkId: vm.nowPlayingLinkId,
                 httpHeaders: vm.nowPlayingHeaders,
-                forceVR: false,
                 episodeOptions: episodeOptions,
                 onSelectEpisode: onSelectEpisode
             ) { seconds, duration, width, height in

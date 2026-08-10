@@ -92,7 +92,6 @@ struct RecentVideosView: View {
                         resumeAt: vm.nowPlayingResumeAt,
                         linkId: vm.nowPlayingLinkId,
                         httpHeaders: vm.nowPlayingHeaders,
-                        forceVR: vm.nowPlayingForceVR
                     ) { seconds, duration, w, h in
                         vm.updatePlaybackProgress(
                             seconds: seconds,

@@ -33,14 +33,6 @@ class AppViewModel: ObservableObject {
     /// Library entry currently playing (for resume + badges).
     @Published var nowPlayingLinkId: UUID?
     @Published var nowPlayingResumeAt: Double = 0
-    /// Captured for the current playback so hidden tab views cannot steal a one-shot VR flag.
-    @Published private(set) var nowPlayingForceVR = false
-    private var nextPlaybackForceVR = false
-
-    func requestNextPlaybackInVR() {
-        nextPlaybackForceVR = true
-    }
-
     /// Library of auto-saved links (newest first).
     @Published var savedLinks: [SavedVideoLink] = []
 
@@ -571,8 +563,6 @@ class AppViewModel: ObservableObject {
             headers: headers ?? [:]
         )
 
-        nowPlayingForceVR = nextPlaybackForceVR
-        nextPlaybackForceVR = false
         nowPlayingLinkId = matchedId
         nowPlayingResumeAt = resume
         nowPlayingHeaders = playbackURL.isFileURL ? nil : headers

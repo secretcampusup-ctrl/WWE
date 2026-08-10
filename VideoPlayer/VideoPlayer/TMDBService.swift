@@ -96,10 +96,11 @@ actor TMDBService {
     }
 
     func details(for rawTitle: String) async -> TMDBTitleDetails? {
-        await detailsForQuery(Self.searchTitle(from: rawTitle))
+        let preferred = VideoTitleFormatter.episodeComponents(from: rawTitle) == nil ? nil : "tv"
+        return await detailsForQuery(Self.searchTitle(from: rawTitle), preferredMediaType: preferred)
     }
 
-    func detailsOriginalFirst(for rawTitle: String) async -> TMDBTitleDetails? {
+    func detailsOriginalFirst(for rawTitle: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
         let original = Self.originalSearchTitle(from: rawTitle)
         let filtered = Self.searchTitle(from: rawTitle)
@@ -107,19 +108,19 @@ actor TMDBService {
         for query in [original, filtered] where !query.isEmpty {
             let key = query.lowercased()
             guard attempted.insert(key).inserted else { continue }
-            if let result = await detailsForQuery(query) { return result }
+            if let result = await detailsForQuery(query, preferredMediaType: preferredMediaType) { return result }
         }
         return nil
     }
 
-    private func detailsForQuery(_ query: String) async -> TMDBTitleDetails? {
+    private func detailsForQuery(_ query: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else { return nil }
-        let cacheKey = normalizedQuery.lowercased()
+        let cacheKey = normalizedQuery.lowercased() + "|" + (preferredMediaType ?? "any")
         if let cached = detailsCache[cacheKey] { return cached }
         let candidates = await searchCandidates(for: normalizedQuery)
-        guard let match = Self.bestMatch(in: candidates, query: normalizedQuery) else { return nil }
+        guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else { return nil }
         do {
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
             let payload: DetailPayload = try await request(endpoint, query: ["append_to_response": "credits,videos"])
@@ -200,11 +201,18 @@ actor TMDBService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func bestMatch(in results: [SearchResult], query: String) -> SearchResult? {
+    private static func bestMatch(in results: [SearchResult], query: String, preferredMediaType: String?) -> SearchResult? {
         guard !results.isEmpty else { return nil }
+        let preferredResults: [SearchResult]
+        if let preferredMediaType {
+            let matches = results.filter { $0.mediaType == preferredMediaType }
+            preferredResults = matches.isEmpty ? results : matches
+        } else {
+            preferredResults = results
+        }
         let queryTokens = titleTokens(searchTitle(from: query))
         guard !queryTokens.isEmpty else { return nil }
-        let ranked = results.map { result -> (SearchResult, Double) in
+        let ranked = preferredResults.map { result -> (SearchResult, Double) in
             let title = result.title ?? result.name ?? ""
             let resultTokens = titleTokens(title)
             let overlap = queryTokens.intersection(resultTokens).count

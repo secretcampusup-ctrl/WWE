@@ -1,6 +1,4 @@
 import SwiftUI
-import SceneKit
-import CoreMotion
 import AVKit
 import AVFoundation
 import UIKit
@@ -82,7 +80,6 @@ struct VideoPlayerView: View {
                     resumeAt: resumeAt,
                     isFillMode: mkvFillMode,
                     resetZoomToken: mkvResetZoomToken,
-                    isVR360Mode: false,
                     httpHeaders: httpHeaders
                 )
                     .contentShape(Rectangle())
@@ -752,144 +749,12 @@ private final class MKVPlaybackControls: ObservableObject {
     }
 }
 
-private struct VR360PlayerView: UIViewRepresentable {
-    let player: AVPlayer
-    let onSingleTap: () -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(onSingleTap: onSingleTap) }
-
-    func makeUIView(context: Context) -> SCNView {
-        let view = SCNView(frame: .zero)
-        view.backgroundColor = .black
-        view.scene = SCNScene()
-        view.preferredFramesPerSecond = 60
-        view.isPlaying = true
-        view.rendersContinuously = true
-
-        // An AVPlayerLayer feeding the material — rather than handing the
-        // AVPlayer object straight to SceneKit — is the reliable path here.
-        // Direct AVPlayer-as-texture is known to silently freeze on the first
-        // frame or fail to composite on some devices/OS versions, which
-        // presents as "VR mode toggles on but the video looks flat/static" —
-        // exactly this bug. The layer needs a real pixel size to have
-        // something to rasterize; the actual video's aspect doesn't matter
-        // since it's mapped onto a sphere.
-        let playerLayer = AVPlayerLayer(player: player)
-        playerLayer.frame = CGRect(x: 0, y: 0, width: 2048, height: 1024)
-        playerLayer.videoGravity = .resizeAspectFill
-        context.coordinator.playerLayer = playerLayer
-
-        let sphere = SCNSphere(radius: 10)
-        sphere.segmentCount = 192
-        sphere.isGeodesic = false
-        let material = SCNMaterial()
-        material.diffuse.contents = playerLayer
-        material.diffuse.wrapS = .repeat
-        material.diffuse.wrapT = .clamp
-        material.isDoubleSided = true
-        material.lightingModel = .constant
-        sphere.firstMaterial = material
-        let sphereNode = SCNNode(geometry: sphere)
-        sphereNode.scale = SCNVector3(-1, 1, 1)
-        view.scene?.rootNode.addChildNode(sphereNode)
-
-        let camera = SCNCamera()
-        camera.fieldOfView = 78
-        camera.zNear = 0.01
-        camera.zFar = 30
-        let cameraNode = SCNNode()
-        cameraNode.camera = camera
-        view.scene?.rootNode.addChildNode(cameraNode)
-        view.pointOfView = cameraNode
-        context.coordinator.attach(view: view, camera: cameraNode)
-        return view
-    }
-
-    func updateUIView(_ view: SCNView, context: Context) {
-        context.coordinator.onSingleTap = onSingleTap
-        if context.coordinator.playerLayer?.player !== player {
-            context.coordinator.playerLayer?.player = player
-        }
-    }
-
-    static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
-        coordinator.stop()
-        coordinator.playerLayer?.player = nil
-        view.isPlaying = false
-        view.scene = nil
-    }
-
-    final class Coordinator: NSObject {
-        var onSingleTap: () -> Void
-        var playerLayer: AVPlayerLayer?
-        private let motion = CMMotionManager()
-        private weak var view: SCNView?
-        private weak var camera: SCNNode?
-        private var dragYaw: Float = 0
-        private var dragPitch: Float = 0
-        private var gestureStartYaw: Float = 0
-        private var gestureStartPitch: Float = 0
-
-        init(onSingleTap: @escaping () -> Void) { self.onSingleTap = onSingleTap }
-
-        func attach(view: SCNView, camera: SCNNode) {
-            self.view = view
-            self.camera = camera
-            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
-            let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
-            tap.require(toFail: pan)
-            view.addGestureRecognizer(tap)
-            view.addGestureRecognizer(pan)
-            view.addGestureRecognizer(pinch)
-            startMotion()
-        }
-
-        private func startMotion() {
-            guard motion.isDeviceMotionAvailable else { return }
-            motion.deviceMotionUpdateInterval = 1.0 / 60.0
-            motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] sample, _ in
-                guard let self, let attitude = sample?.attitude else { return }
-                self.apply(yaw: Float(attitude.yaw) + self.dragYaw, pitch: Float(attitude.pitch) + self.dragPitch)
-            }
-        }
-
-        private func apply(yaw: Float, pitch: Float) {
-            camera?.eulerAngles = SCNVector3(max(-1.45, min(1.45, pitch)), -yaw, 0)
-        }
-
-        @objc private func tapped() { onSingleTap() }
-
-        @objc private func panned(_ gesture: UIPanGestureRecognizer) {
-            let point = gesture.translation(in: view)
-            if gesture.state == .began {
-                gestureStartYaw = dragYaw
-                gestureStartPitch = dragPitch
-            }
-            dragYaw = gestureStartYaw + Float(point.x) * 0.004
-            dragPitch = max(-1.45, min(1.45, gestureStartPitch + Float(point.y) * 0.004))
-            if !motion.isDeviceMotionActive { apply(yaw: dragYaw, pitch: dragPitch) }
-        }
-
-        @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
-            guard let camera = camera?.camera else { return }
-            camera.fieldOfView = max(42, min(105, camera.fieldOfView / gesture.scale))
-            gesture.scale = 1
-        }
-
-        func stop() {
-            motion.stopDeviceMotionUpdates()
-            view?.gestureRecognizers?.forEach { view?.removeGestureRecognizer($0) }
-        }
-    }
-}
 private struct MKVVideoPlayerView: UIViewRepresentable {
     let url: URL
     let controls: MKVPlaybackControls
     var resumeAt: Double = 0
     var isFillMode = false
     var resetZoomToken = 0
-    var isVR360Mode = false
     var httpHeaders: [String: String]? = nil
     var onSingleTap: (() -> Void)? = nil
 
@@ -898,7 +763,6 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         view.controls = controls
         view.onSingleTap = onSingleTap
         view.setFillMode(isFillMode)
-        view.setVR360Mode(isVR360Mode)
         view.play(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
         return view
     }
@@ -907,7 +771,6 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         uiView.controls = controls
         uiView.onSingleTap = onSingleTap
         uiView.setFillMode(isFillMode)
-        uiView.setVR360Mode(isVR360Mode)
         uiView.resetZoomIfNeeded(token: resetZoomToken)
         uiView.playIfNeeded(url: url, httpHeaders: httpHeaders)
     }
@@ -919,7 +782,6 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
 
 private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private let mediaPlayer = VLCMediaPlayer()
-    private let motionManager = CMMotionManager()
     private let scrollView = UIScrollView()
     private let videoView = UIView()
     private let loadingIndicator = UIActivityIndicatorView(style: .large)
@@ -929,19 +791,12 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var sourceFormat = "Video"
     private var isFillMode = false
     private var resetZoomToken = 0
-    private var isVR360Mode = false
-    private var vrYaw: Float = 0
-    private var vrPitch: Float = 0
-    private var vrFOV: Float = 80
-    private var vrPanStart = CGPoint.zero
     var onSingleTap: (() -> Void)?
     weak var controls: MKVPlaybackControls? {
         didSet { controls?.surface = self }
     }
     private lazy var tapGesture = UITapGestureRecognizer(target: self, action: #selector(togglePlayback))
     private lazy var doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
-    private lazy var vrPanGesture = UIPanGestureRecognizer(target: self, action: #selector(handleVRPan(_:)))
-    private lazy var vrPinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handleVRPinch(_:)))
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -967,10 +822,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         tapGesture.require(toFail: doubleTapGesture)
         scrollView.addGestureRecognizer(doubleTapGesture)
         scrollView.addGestureRecognizer(tapGesture)
-        addGestureRecognizer(vrPanGesture)
-        addGestureRecognizer(vrPinchGesture)
-        vrPanGesture.isEnabled = false
-        vrPinchGesture.isEnabled = false
         mediaPlayer.drawable = videoView
 
         loadingIndicator.hidesWhenStopped = true
@@ -1016,13 +867,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         }
         if let userAgent = httpHeaders?["User-Agent"] { media.addOption(":http-user-agent=\(userAgent)") }
         if let referer = httpHeaders?["Referer"] ?? httpHeaders?["Referrer"] { media.addOption(":http-referrer=\(referer)") }
-        if isVR360Mode {
-            // MobileVLCKit 3.x uses `projection=2` for 360° sphere. Newer
-            // LibVLC builds use `projection-mode=1` for equirectangular input.
-            // Supplying both keeps the dedicated VR path working across builds.
-            media.addOption(":projection=2")
-            media.addOption(":projection-mode=1")
-        }
         media.addOption(":network-caching=3000")
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=1500")
@@ -1056,9 +900,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
                     self.setNeedsLayout()
                 }
             }
-            if self.isVR360Mode {
-                _ = self.mediaPlayer.updateViewpoint(self.vrYaw, pitch: self.vrPitch, roll: 0, fov: self.vrFOV, absolute: true)
-            }
             if self.mediaPlayer.isPlaying || currentTime > 0 || (size.width > 1 && size.height > 1) {
                 self.controls?.isBuffering = false
                 self.loadingIndicator.stopAnimating()
@@ -1072,7 +913,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func stop() {
-        motionManager.stopDeviceMotionUpdates()
         mediaPlayer.stop()
         mediaPlayer.drawable = nil
         loadingTimer?.invalidate()
@@ -1133,53 +973,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         setNeedsLayout()
     }
 
-    func setVR360Mode(_ enabled: Bool) {
-        guard isVR360Mode != enabled else { return }
-        isVR360Mode = enabled
-        scrollView.isScrollEnabled = !enabled
-        vrPanGesture.isEnabled = enabled
-        vrPinchGesture.isEnabled = enabled
-        if enabled {
-            scrollView.setZoomScale(1, animated: false)
-            startVRMotion()
-            _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
-        } else {
-            motionManager.stopDeviceMotionUpdates()
-        }
-        if let restartURL = currentURL, mediaPlayer.media != nil {
-            let resume = max(0, Double(mediaPlayer.time.intValue) / 1000)
-            mediaPlayer.stop()
-            currentURL = nil
-            play(url: restartURL, resumeAt: resume)
-        }
-    }
-
-    private func startVRMotion() {
-        guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
-        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, _ in
-            guard let self, self.isVR360Mode, let attitude = motion?.attitude else { return }
-            let yaw = self.vrYaw + Float(attitude.yaw * 180 / .pi)
-            let pitch = self.vrPitch + Float(attitude.pitch * 180 / .pi)
-            _ = self.mediaPlayer.updateViewpoint(yaw, pitch: max(-89, min(89, pitch)), roll: 0, fov: self.vrFOV, absolute: true)
-        }
-    }
-
-    @objc private func handleVRPan(_ gesture: UIPanGestureRecognizer) {
-        guard isVR360Mode else { return }
-        let translation = gesture.translation(in: self)
-        if gesture.state == .began { vrPanStart = CGPoint(x: CGFloat(vrYaw), y: CGFloat(vrPitch)) }
-        vrYaw = Float(vrPanStart.x - translation.x * 0.18)
-        vrPitch = max(-89, min(89, Float(vrPanStart.y + translation.y * 0.18)))
-        _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
-    }
-
-    @objc private func handleVRPinch(_ gesture: UIPinchGestureRecognizer) {
-        guard isVR360Mode else { return }
-        vrFOV = max(35, min(115, vrFOV / Float(gesture.scale)))
-        gesture.scale = 1
-        _ = mediaPlayer.updateViewpoint(vrYaw, pitch: vrPitch, roll: 0, fov: vrFOV, absolute: true)
-    }
     func resetZoomIfNeeded(token: Int) {
         guard token != resetZoomToken else { return }
         resetZoomToken = token
@@ -1851,7 +1644,6 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
     final class Coordinator { var resetToken = 0; var fillToken = 0 }
 
     // Without this, switching to VR mode (which swaps this view out for
-    // VR360PlayerView) could leave ZoomablePlayerSurface's AVPlayerLayer still
     // attached to the shared AVPlayer for a brief window before ARC tears it
     // down. Two consumers pulling video output from the same AVPlayer at once
     // is exactly what produced "VR mode looks identical to the flat player" —
@@ -1978,7 +1770,7 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
         if playerLayer.player !== player { playerLayer.player = player }
     }
 
-    /// Called when this surface is swapped out (e.g. for VR360PlayerView).
+    /// Called when this surface is removed from the view hierarchy.
     /// Detaches from the AVPlayer immediately rather than waiting on ARC/dealloc
     /// timing, so the shared player never has two active visual consumers.
     func detachPlayer() {
@@ -2261,7 +2053,7 @@ struct RoutedVideoPlayerView: View {
     var onSelectEpisode: ((String) -> Void)? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
-    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, forceVR: Bool = false, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
         self.httpHeaders = httpHeaders; self.onProgress = onProgress
         self.episodeOptions = episodeOptions; self.onSelectEpisode = onSelectEpisode
