@@ -774,6 +774,22 @@ class AppViewModel: ObservableObject {
         }
         return videos
     }
+    func contentLibraryFiles(server: WebDAVServer) async -> [WebDAVFile] {
+        let roots = WebDAVContentSelectionStore.selectedPaths(for: server.id)
+        // nil means a legacy account that has never configured folder filtering.
+        guard let roots else { return await searchPikPakVideos(server: server, query: "") }
+        guard !roots.isEmpty else { return [] }
+        let client = WebDAVClient(server: server)
+        var collected: [WebDAVFile] = []
+        for root in WebDAVContentSelectionStore.minimalRoots(roots) {
+            if let files = try? await collectPikPakVideos(client: client, startingAt: root, maximumFiles: 5_000, forceRefresh: false) {
+                collected.append(contentsOf: files)
+            }
+        }
+        var seen = Set<String>()
+        return collected.filter { seen.insert($0.path).inserted }
+    }
+
     func searchPikPakVideos(server: WebDAVServer, query: String) async -> [WebDAVFile] {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         do {

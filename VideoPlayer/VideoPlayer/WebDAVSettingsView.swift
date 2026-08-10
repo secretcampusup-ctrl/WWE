@@ -7,6 +7,7 @@ struct WebDAVSettingsView: View {
     @State private var testingId: UUID?
     @State private var testMessage: String?
     @State private var testOK = false
+    @State private var folderSelectionServer: WebDAVServer?
 
     var body: some View {
         NavigationView {
@@ -39,7 +40,7 @@ struct WebDAVSettingsView: View {
                     } else {
                         ForEach(vm.servers) { server in
                             NavigationLink {
-                                FileBrowserView(server: server, vm: vm)
+                                WebDAVFolderSelectionView(server: server)
                             } label: {
                                 WebDAVAccountRow(server: server)
                             }
@@ -87,7 +88,7 @@ struct WebDAVSettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 } footer: {
-                    Text("Swipe left to delete · Swipe right to test · Tap to browse files.")
+                    Text("Swipe left to delete · Swipe right to test · Tap to choose Content folders.")
                 }
 
                 if let testMessage {
@@ -132,7 +133,14 @@ struct WebDAVSettingsView: View {
                 }
             }
             .sheet(isPresented: $showAddServer) {
-                AddServerView(vm: vm)
+                AddServerView(vm: vm) { server in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        folderSelectionServer = server
+                    }
+                }
+            }
+            .sheet(item: $folderSelectionServer) { server in
+                NavigationStack { WebDAVFolderSelectionView(server: server, closesWhenSaved: true) }
             }
             .overlay {
                 if vm.isLoading {

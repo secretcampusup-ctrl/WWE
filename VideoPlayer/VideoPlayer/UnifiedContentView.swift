@@ -61,7 +61,7 @@ private final class UnifiedContentModel: ObservableObject {
 
         var raw: [UnifiedMediaEntry] = []
         for server in vm.servers {
-            let files = await vm.searchPikPakVideos(server: server, query: "")
+            let files = await vm.contentLibraryFiles(server: server)
             let client = WebDAVClient(server: server)
             for file in files where file.isVideo && !file.isDirectory {
                 guard let url = client.streamURL(for: file) else { continue }
@@ -222,7 +222,9 @@ struct UnifiedContentView: View {
     }
 
     private var contentRefreshID: String {
-        "\(isActive)|" + vm.servers.map { $0.id.uuidString + $0.displayAddress }.joined(separator: "|")
+        "\(isActive)|" + vm.servers.map {
+            $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
+        }.joined(separator: "|")
     }
 
     private var currentEntries: [UnifiedMediaEntry] {

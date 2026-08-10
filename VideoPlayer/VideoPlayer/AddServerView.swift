@@ -3,6 +3,7 @@ import SwiftUI
 struct AddServerView: View {
     @Environment(\.dismiss) var dismiss
     @ObservedObject var vm: AppViewModel
+    var onSaved: ((WebDAVServer) -> Void)? = nil
 
     @State private var name      = "PikPak WebDAV"
     @State private var host      = "dav.mypikpak.com"
@@ -200,6 +201,8 @@ struct AddServerView: View {
         var server = buildServer()
         server.isConnected = statusOK
         vm.addServer(server)
+        WebDAVContentSelectionStore.save([], for: server.id)
+        onSaved?(server)
         dismiss()
     }
 
