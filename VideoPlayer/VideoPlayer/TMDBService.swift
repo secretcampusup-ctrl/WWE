@@ -169,7 +169,14 @@ actor TMDBService {
         let words = value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
         return Set(words.filter { $0.count > 1 && !stop.contains($0) && Int($0) == nil })
     }
+    // Temporarily disabled for metadata matching tests. Keep the full filter
+    // implementation below so it can be restored by flipping this flag only.
+    private static let releaseKeywordFilteringEnabled = false
+
     static func searchTitle(from rawTitle: String) -> String {
+        if !releaseKeywordFilteringEnabled {
+            return originalSearchTitle(from: rawTitle)
+        }
         var value = (rawTitle.removingPercentEncoding ?? rawTitle)
             .replacingOccurrences(of: ".", with: " ")
             .replacingOccurrences(of: "_", with: " ")

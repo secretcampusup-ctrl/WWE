@@ -583,36 +583,48 @@ struct VideoDetailsView: View {
                 Text("\(item.relatedEpisodes.count)").font(.caption.bold().monospacedDigit()).foregroundStyle(.white)
                     .padding(.horizontal, 10).padding(.vertical, 6).background(AppPalette.accent.opacity(0.18), in: Capsule())
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 12) {
-                    ForEach(item.relatedEpisodes) { episode in
-                        let current = episode.id == item.id
-                        Button { onSelectEpisode?(episode.id) } label: {
-                            VStack(alignment: .leading, spacing: 11) {
-                                HStack {
-                                    Text(episode.numberLabel).font(.system(size: 11, weight: .bold, design: .rounded)).tracking(0.5)
-                                        .foregroundStyle(current ? Color.white : AppPalette.accent)
-                                    Spacer()
-                                    ZStack {
-                                        Circle().fill(current ? Color.white.opacity(0.2) : AppPalette.accent.opacity(0.14)).frame(width: 34, height: 34)
-                                        Image(systemName: current ? "waveform" : "play.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(current ? Color.white : AppPalette.accent)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 12) {
+                        ForEach(item.relatedEpisodes) { episode in
+                            let current = episode.id == item.id
+                            Button { onSelectEpisode?(episode.id) } label: {
+                                VStack(alignment: .leading, spacing: 11) {
+                                    HStack {
+                                        Text(episode.numberLabel).font(.system(size: 11, weight: .bold, design: .rounded)).tracking(0.5)
+                                            .foregroundStyle(current ? Color.white : AppPalette.accent)
+                                        Spacer()
+                                        ZStack {
+                                            Circle().fill(current ? Color.white.opacity(0.2) : AppPalette.accent.opacity(0.14)).frame(width: 34, height: 34)
+                                            Image(systemName: current ? "waveform" : "play.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(current ? Color.white : AppPalette.accent)
+                                        }
+                                    }
+                                    Text(episode.episodeTitle).font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(.white).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                                    HStack(spacing: 5) {
+                                        Circle().fill(current ? Color.white : AppPalette.accent).frame(width: 5, height: 5)
+                                        Text(current ? "SELECTED" : "VIEW DETAILS").font(.system(size: 9, weight: .bold, design: .rounded)).tracking(0.7).foregroundStyle(current ? Color.white.opacity(0.85) : .secondary)
                                     }
                                 }
-                                Text(episode.episodeTitle).font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(.white).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                                HStack(spacing: 5) {
-                                    Circle().fill(current ? Color.white : AppPalette.accent).frame(width: 5, height: 5)
-                                    Text(current ? "NOW PLAYING" : "PLAY EPISODE").font(.system(size: 9, weight: .bold, design: .rounded)).tracking(0.7).foregroundStyle(current ? Color.white.opacity(0.85) : .secondary)
-                                }
+                                .padding(14).frame(width: 220, height: 124, alignment: .leading)
+                                .background(current ? AnyShapeStyle(AppPalette.diagonalGradient) : AnyShapeStyle(Color.white.opacity(0.055)), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(current ? Color.white.opacity(0.24) : AppPalette.blue.opacity(0.16), lineWidth: 1))
+                                .shadow(color: current ? AppPalette.purple.opacity(0.3) : Color.black.opacity(0.18), radius: 12, y: 7)
                             }
-                            .padding(14).frame(width: 220, height: 124, alignment: .leading)
-                            .background(current ? AnyShapeStyle(AppPalette.diagonalGradient) : AnyShapeStyle(Color.white.opacity(0.055)), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(current ? Color.white.opacity(0.24) : AppPalette.blue.opacity(0.16), lineWidth: 1))
-                            .shadow(color: current ? AppPalette.purple.opacity(0.3) : Color.black.opacity(0.18), radius: 12, y: 7)
+                            .id(episode.id)
+                            .buttonStyle(PremiumPressButtonStyle())
                         }
-                        .buttonStyle(PremiumPressButtonStyle())
-                    }
-                }.padding(.vertical, 4).padding(.horizontal, 1)
+                    }.padding(.vertical, 4).padding(.horizontal, 1)
+                }
+                .onAppear { scrollToSelectedEpisode(using: proxy) }
+                .onChange(of: item.id) { _ in scrollToSelectedEpisode(using: proxy) }
             }
+        }
+    }
+
+    private func scrollToSelectedEpisode(using proxy: ScrollViewProxy) {
+        guard item.relatedEpisodes.contains(where: { $0.id == item.id }) else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(item.id, anchor: .center)
         }
     }
 
