@@ -744,16 +744,31 @@ class AppViewModel: ObservableObject {
         var pendingPaths = [path]
         var visited = Set<String>()
         var videos: [WebDAVFile] = []
-        while let nextPath = pendingPaths.popLast(), videos.count < maximumFiles {
-            let normalizedPath = nextPath.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard visited.insert(normalizedPath).inserted else { continue }
-            let contents = try await client.listFiles(at: nextPath, forceRefresh: forceRefresh)
-            for item in contents {
-                if Task.isCancelled { return videos }
-                if item.isDirectory {
-                    pendingPaths.append(item.path)
-                } else if item.isVideo {
-                    videos.append(item)
+        while !pendingPaths.isEmpty && videos.count < maximumFiles {
+            var batch: [String] = []
+            while batch.count < 6, let nextPath = pendingPaths.popLast() {
+                let normalizedPath = nextPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if visited.insert(normalizedPath).inserted { batch.append(nextPath) }
+            }
+            guard !batch.isEmpty else { continue }
+            let listings = await withTaskGroup(of: [WebDAVFile].self) { group in
+                for folderPath in batch {
+                    group.addTask {
+                        (try? await client.listFiles(at: folderPath, forceRefresh: forceRefresh)) ?? []
+                    }
+                }
+                var result: [[WebDAVFile]] = []
+                for await files in group { result.append(files) }
+                return result
+            }
+            for contents in listings {
+                for item in contents {
+                    if Task.isCancelled { return videos }
+                    if item.isDirectory {
+                        pendingPaths.append(item.path)
+                    } else if item.isVideo, videos.count < maximumFiles {
+                        videos.append(item)
+                    }
                 }
             }
         }

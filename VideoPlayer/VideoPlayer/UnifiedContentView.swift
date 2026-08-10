@@ -87,14 +87,35 @@ private final class UnifiedContentModel: ObservableObject {
             }
         }
 
+        // Publish discovered files immediately so the grid never waits for metadata APIs.
+        unknown = raw.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         status = "Matching metadata with TMDB…"
+
+        // Match each cleaned title once. Episode packs can contain hundreds of files
+        // that all resolve to the same show, so querying each file serially made the
+        // Content screen appear to load forever.
+        let uniqueQueries = Array(Set(raw.map { TMDBService.searchTitle(from: $0.rawTitle).lowercased() }))
+        var metadataByQuery: [String: TMDBTitleDetails] = [:]
+        await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
+            var iterator = uniqueQueries.makeIterator()
+            for _ in 0..<min(8, uniqueQueries.count) {
+                guard let query = iterator.next() else { break }
+                group.addTask { (query, await TMDBService.shared.details(for: query)) }
+            }
+            while let (query, details) = await group.next() {
+                if let details { metadataByQuery[query] = details }
+                if let next = iterator.next() {
+                    group.addTask { (next, await TMDBService.shared.details(for: next)) }
+                }
+            }
+        }
+
         var movieItems: [UnifiedMediaEntry] = []
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
-
-        for index in raw.indices {
-            var entry = raw[index]
-            entry.details = await TMDBService.shared.details(for: entry.rawTitle)
+        for var entry in raw {
+            let query = TMDBService.searchTitle(from: entry.rawTitle).lowercased()
+            entry.details = metadataByQuery[query]
             if let details = entry.details, details.isSeries {
                 let parts = VideoTitleFormatter.episodeComponents(from: entry.rawTitle)
                 let season = parts?.season ?? 1
@@ -110,7 +131,7 @@ private final class UnifiedContentModel: ObservableObject {
         }
 
         var showItems: [UnifiedMediaEntry] = []
-        for (_, values) in showEpisodes {
+        for values in showEpisodes.values {
             guard var first = values.first?.0 else { continue }
             first.title = first.details?.title ?? first.title
             first.episodes = values.map(\.1).sorted { lhs, rhs in
@@ -119,23 +140,31 @@ private final class UnifiedContentModel: ObservableObject {
             showItems.append(first)
         }
 
-        if ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
-            status = "Finding metadata for unknown content…"
-            for index in unknownItems.indices {
-                let query = TMDBService.searchTitle(from: unknownItems[index].rawTitle)
-                if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 8),
-                   let scene = response.list.first {
-                    unknownItems[index].adultScene = scene
-                    unknownItems[index].title = scene.title ?? unknownItems[index].title
-                }
-            }
-        }
-
         movies = deduplicatedMovies(movieItems).sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         shows = showItems.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         unknown = unknownItems.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+
+        // Adult fallback runs after the usable Content screen has finished loading.
+        if ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
+            Task { await self.enrichUnknownWithAdultMetadata() }
+        }
         loaded = true
         status = ""
+    }
+
+    private func enrichUnknownWithAdultMetadata() async {
+        var items = unknown
+        let limit = min(items.count, 200)
+        for index in 0..<limit {
+            guard items[index].adultScene == nil else { continue }
+            let query = TMDBService.searchTitle(from: items[index].rawTitle)
+            if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5),
+               let scene = response.list.first {
+                items[index].adultScene = scene
+                items[index].title = scene.title ?? items[index].title
+                unknown = items
+            }
+        }
     }
 
     private func deduplicatedMovies(_ entries: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
