@@ -746,7 +746,7 @@ class AppViewModel: ObservableObject {
         var videos: [WebDAVFile] = []
         while !pendingPaths.isEmpty && videos.count < maximumFiles {
             var batch: [String] = []
-            while batch.count < 6, let nextPath = pendingPaths.popLast() {
+            while batch.count < 12, let nextPath = pendingPaths.popLast() {
                 let normalizedPath = nextPath.trimmingCharacters(in: .whitespacesAndNewlines)
                 if visited.insert(normalizedPath).inserted { batch.append(nextPath) }
             }
@@ -774,20 +774,28 @@ class AppViewModel: ObservableObject {
         }
         return videos
     }
-    func contentLibraryFiles(server: WebDAVServer) async -> [WebDAVFile] {
-        let roots = WebDAVContentSelectionStore.selectedPaths(for: server.id)
-        // nil means a legacy account that has never configured folder filtering.
-        guard let roots else { return await searchPikPakVideos(server: server, query: "") }
+    func contentLibraryFiles(server: WebDAVServer, forceRefresh: Bool = false) async -> [WebDAVFile] {
+        let configuredRoots = WebDAVContentSelectionStore.selectedPaths(for: server.id)
+        let roots = configuredRoots.map(WebDAVContentSelectionStore.minimalRoots) ?? [""]
         guard !roots.isEmpty else { return [] }
+        let revision = WebDAVContentSelectionStore.revision(for: server.id)
+        if !forceRefresh, let cached = WebDAVContentIndexStore.load(serverID: server.id, revision: revision) {
+            return cached
+        }
         let client = WebDAVClient(server: server)
         var collected: [WebDAVFile] = []
-        for root in WebDAVContentSelectionStore.minimalRoots(roots) {
-            if let files = try? await collectPikPakVideos(client: client, startingAt: root, maximumFiles: 5_000, forceRefresh: false) {
-                collected.append(contentsOf: files)
+        await withTaskGroup(of: [WebDAVFile].self) { group in
+            for root in roots {
+                group.addTask {
+                    (try? await self.collectPikPakVideos(client: client, startingAt: root, maximumFiles: 5_000, forceRefresh: forceRefresh)) ?? []
+                }
             }
+            for await files in group { collected.append(contentsOf: files) }
         }
         var seen = Set<String>()
-        return collected.filter { seen.insert($0.path).inserted }
+        let result = collected.filter { seen.insert($0.path).inserted }
+        WebDAVContentIndexStore.save(result, serverID: server.id, revision: revision)
+        return result
     }
 
     func searchPikPakVideos(server: WebDAVServer, query: String) async -> [WebDAVFile] {

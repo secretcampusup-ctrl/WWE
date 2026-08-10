@@ -53,7 +53,6 @@ private final class UnifiedContentModel: ObservableObject {
     private let cloud = OffcloudViewModel()
 
     func load(vm: AppViewModel, force: Bool = false) async {
-        if loaded && !force { return }
         guard !isLoading else { return }
         isLoading = true
         status = "Scanning connected libraries…"
@@ -61,7 +60,7 @@ private final class UnifiedContentModel: ObservableObject {
 
         var raw: [UnifiedMediaEntry] = []
         for server in vm.servers {
-            let files = await vm.contentLibraryFiles(server: server)
+            let files = await vm.contentLibraryFiles(server: server, forceRefresh: force)
             let client = WebDAVClient(server: server)
             for file in files where file.isVideo && !file.isDirectory {
                 guard let url = client.streamURL(for: file) else { continue }
@@ -87,14 +86,16 @@ private final class UnifiedContentModel: ObservableObject {
             }
         }
 
-        // Publish discovered files immediately so the grid never waits for metadata APIs.
-        unknown = raw.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        status = "Matching metadata with TMDB…"
+        guard !raw.isEmpty else {
+            movies = []; shows = []; unknown = []; loaded = true; status = ""
+            return
+        }
+        status = "Scanning files with TMDB…"
 
         // Match each cleaned title once. Episode packs can contain hundreds of files
         // that all resolve to the same show, so querying each file serially made the
         // Content screen appear to load forever.
-        let uniqueQueries = Array(Set(raw.map { TMDBService.searchTitle(from: $0.rawTitle).lowercased() }))
+        let uniqueQueries = Array(Set(raw.map { metadataQuery(for: $0) }))
         var metadataByQuery: [String: TMDBTitleDetails] = [:]
         await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
             var iterator = uniqueQueries.makeIterator()
@@ -114,7 +115,7 @@ private final class UnifiedContentModel: ObservableObject {
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
         for var entry in raw {
-            let query = TMDBService.searchTitle(from: entry.rawTitle).lowercased()
+            let query = metadataQuery(for: entry)
             entry.details = metadataByQuery[query]
             if let details = entry.details, details.isSeries {
                 let parts = VideoTitleFormatter.episodeComponents(from: entry.rawTitle)
@@ -152,12 +153,42 @@ private final class UnifiedContentModel: ObservableObject {
         status = ""
     }
 
+    private func metadataQuery(for entry: UnifiedMediaEntry) -> String {
+        let sourcePath: String
+        switch entry.source {
+        case let .webDAV(_, file): sourcePath = file.path
+        case let .offcloud(_, file): sourcePath = file.path ?? file.name
+        }
+        let components = sourcePath
+            .replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .map(String.init)
+        let genericFolders: Set<String> = [
+            "movie", "movies", "film", "films", "tv", "tv show", "tv shows",
+            "series", "show", "shows", "video", "videos", "media", "downloads",
+            "my pack", "pikpak", "offcloud", "korean drama", "asian drama",
+            "drama", "anime", "cartoons", "documentaries"
+        ]
+        if components.count > 1 {
+            for folder in components.dropLast().reversed() {
+                let cleaned = TMDBService.searchTitle(from: folder)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = cleaned.lowercased()
+                let isSeasonOnly = lower.range(of: #"^(?:season\s*)?\d{1,3}$"#, options: .regularExpression) != nil
+                if cleaned.count >= 2, !genericFolders.contains(lower), !isSeasonOnly {
+                    return lower
+                }
+            }
+        }
+        return TMDBService.searchTitle(from: entry.rawTitle).lowercased()
+    }
+
     private func enrichUnknownWithAdultMetadata() async {
         var items = unknown
         let limit = min(items.count, 200)
         for index in 0..<limit {
             guard items[index].adultScene == nil else { continue }
-            let query = TMDBService.searchTitle(from: items[index].rawTitle)
+            let query = metadataQuery(for: items[index])
             if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5),
                let scene = response.list.first {
                 items[index].adultScene = scene
@@ -215,7 +246,7 @@ struct UnifiedContentView: View {
                     Button { Task { await model.load(vm: vm, force: true) } } label: { Image(systemName: "arrow.clockwise") }
                 }
             }
-            .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: true) } }
+            .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
         }

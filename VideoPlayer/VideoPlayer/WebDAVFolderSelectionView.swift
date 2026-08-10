@@ -49,6 +49,25 @@ enum WebDAVContentSelectionStore {
     private static func revisionKey(_ id: UUID) -> String { "webdav.content.revision.\(id.uuidString)" }
 }
 
+enum WebDAVContentIndexStore {
+    private static let cacheKey = "webdav.content.fileIndex.v1"
+    private struct Payload: Codable { let revision: String; let files: [WebDAVFile] }
+
+    static func load(serverID: UUID, revision: String) -> [WebDAVFile]? {
+        guard let data = UserDefaults.standard.data(forKey: key(serverID)),
+              let payload = try? JSONDecoder().decode(Payload.self, from: data),
+              payload.revision == revision else { return nil }
+        return payload.files
+    }
+
+    static func save(_ files: [WebDAVFile], serverID: UUID, revision: String) {
+        guard let data = try? JSONEncoder().encode(Payload(revision: revision, files: files)) else { return }
+        UserDefaults.standard.set(data, forKey: key(serverID))
+    }
+
+    private static func key(_ id: UUID) -> String { cacheKey + "." + id.uuidString }
+}
+
 struct WebDAVFolderSelectionView: View {
     @Environment(\.dismiss) private var dismiss
     let server: WebDAVServer
