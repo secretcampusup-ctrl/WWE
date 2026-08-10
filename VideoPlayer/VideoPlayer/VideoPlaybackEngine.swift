@@ -452,7 +452,12 @@ final class VideoPlaybackEngine: ObservableObject {
 
         rateObserver = player.observe(\.rate, options: [.new]) { [weak self] player, _ in
             Task { @MainActor [weak self] in
-                self?.isPlaying = player.rate > 0
+                guard let self else { return }
+                self.isPlaying = player.rate > 0
+                // A positive playback rate is definitive proof that frames are flowing.
+                // Clear stale buffer-empty notifications immediately instead of leaving
+                // the branded loading ring spinning until the controls auto-hide.
+                if player.rate > 0 { self.isBuffering = false }
             }
         }
     }

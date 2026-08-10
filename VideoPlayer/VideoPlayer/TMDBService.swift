@@ -96,40 +96,79 @@ actor TMDBService {
     }
 
     func details(for rawTitle: String) async -> TMDBTitleDetails? {
+        await detailsForQuery(Self.searchTitle(from: rawTitle))
+    }
+
+    func detailsOriginalFirst(for rawTitle: String) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
-        let query = Self.searchTitle(from: rawTitle)
-        guard !query.isEmpty else { return nil }
-        let cacheKey = query.lowercased()
+        let original = Self.originalSearchTitle(from: rawTitle)
+        let filtered = Self.searchTitle(from: rawTitle)
+        var attempted = Set<String>()
+        for query in [original, filtered] where !query.isEmpty {
+            let key = query.lowercased()
+            guard attempted.insert(key).inserted else { continue }
+            if let result = await detailsForQuery(query) { return result }
+        }
+        return nil
+    }
+
+    private func detailsForQuery(_ query: String) async -> TMDBTitleDetails? {
+        guard TMDBSettings.isConfigured else { return nil }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else { return nil }
+        let cacheKey = normalizedQuery.lowercased()
         if let cached = detailsCache[cacheKey] { return cached }
         do {
-            let search: SearchResponse = try await request("/3/search/multi", query: ["query": query, "include_adult": "false"])
-            guard let match = search.results.first(where: { $0.mediaType == "movie" || $0.mediaType == "tv" }) else { return nil }
+            let search: SearchResponse = try await request("/3/search/multi", query: ["query": normalizedQuery, "include_adult": "false"])
+            let candidates = search.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
+            guard let match = Self.bestMatch(in: candidates, query: normalizedQuery) else { return nil }
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
             let payload: DetailPayload = try await request(endpoint, query: ["append_to_response": "credits,videos"])
             let trailers = payload.videos?.results ?? []
             let trailer = trailers.first { $0.site == "YouTube" && $0.type == "Trailer" && $0.official == true }
                 ?? trailers.first { $0.site == "YouTube" && $0.type == "Trailer" }
             let details = TMDBTitleDetails(
-                id: match.id,
-                mediaType: match.mediaType,
-                title: payload.title ?? payload.name ?? match.title ?? match.name ?? query,
-                overview: payload.overview ?? "",
-                posterPath: payload.posterPath,
-                backdropPath: payload.backdropPath,
-                releaseDate: payload.releaseDate ?? payload.firstAirDate,
-                voteAverage: payload.voteAverage ?? 0,
-                genres: payload.genres ?? [],
+                id: match.id, mediaType: match.mediaType,
+                title: payload.title ?? payload.name ?? match.title ?? match.name ?? normalizedQuery,
+                overview: payload.overview ?? "", posterPath: payload.posterPath,
+                backdropPath: payload.backdropPath, releaseDate: payload.releaseDate ?? payload.firstAirDate,
+                voteAverage: payload.voteAverage ?? 0, genres: payload.genres ?? [],
                 cast: Array((payload.credits?.cast ?? []).prefix(20)),
-                seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 },
-                trailerKey: trailer?.key
+                seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 }, trailerKey: trailer?.key
             )
             detailsCache[cacheKey] = details
             return details
-        } catch {
-            return nil
-        }
+        } catch { return nil }
     }
 
+    private static func originalSearchTitle(from rawTitle: String) -> String {
+        var value = rawTitle.removingPercentEncoding ?? rawTitle
+        value = (value as NSString).deletingPathExtension
+        value = value.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ")
+        return value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func bestMatch(in results: [SearchResult], query: String) -> SearchResult? {
+        guard !results.isEmpty else { return nil }
+        let queryTokens = titleTokens(searchTitle(from: query))
+        guard !queryTokens.isEmpty else { return nil }
+        let ranked = results.map { result -> (SearchResult, Double) in
+            let title = result.title ?? result.name ?? ""
+            let resultTokens = titleTokens(title)
+            let overlap = queryTokens.intersection(resultTokens).count
+            let denominator = max(1, min(queryTokens.count, resultTokens.count))
+            return (result, Double(overlap) / Double(denominator))
+        }.sorted { $0.1 > $1.1 }
+        guard let best = ranked.first, best.1 >= 0.45 else { return nil }
+        return best.0
+    }
+
+    private static func titleTokens(_ value: String) -> Set<String> {
+        let stop: Set<String> = ["the", "a", "an", "and", "of", "in", "to", "movie", "season", "complete"]
+        let words = value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+        return Set(words.filter { $0.count > 1 && !stop.contains($0) && Int($0) == nil })
+    }
     static func searchTitle(from rawTitle: String) -> String {
         var value = (rawTitle.removingPercentEncoding ?? rawTitle)
             .replacingOccurrences(of: ".", with: " ")

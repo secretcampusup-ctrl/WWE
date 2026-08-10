@@ -82,7 +82,8 @@ struct VideoPlayerView: View {
                     resumeAt: resumeAt,
                     isFillMode: mkvFillMode,
                     resetZoomToken: mkvResetZoomToken,
-                    isVR360Mode: false
+                    isVR360Mode: false,
+                    httpHeaders: httpHeaders
                 )
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
@@ -889,6 +890,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
     var isFillMode = false
     var resetZoomToken = 0
     var isVR360Mode = false
+    var httpHeaders: [String: String]? = nil
     var onSingleTap: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> MKVPlayerSurface {
@@ -897,7 +899,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         view.onSingleTap = onSingleTap
         view.setFillMode(isFillMode)
         view.setVR360Mode(isVR360Mode)
-        view.play(url: url, resumeAt: resumeAt)
+        view.play(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
         return view
     }
 
@@ -907,7 +909,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         uiView.setFillMode(isFillMode)
         uiView.setVR360Mode(isVR360Mode)
         uiView.resetZoomIfNeeded(token: resetZoomToken)
-        uiView.playIfNeeded(url: url)
+        uiView.playIfNeeded(url: url, httpHeaders: httpHeaders)
     }
 
     static func dismantleUIView(_ uiView: MKVPlayerSurface, coordinator: ()) {
@@ -997,13 +999,23 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         updateVideoRenderScale()
     }
 
-    func play(url: URL, resumeAt: Double = 0) {
+    func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
         currentURL = url
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
         controls?.isBuffering = true
         let media = VLCMedia(url: url)
-        media.addOption(":avcodec-hw=none")
+        if let authorization = httpHeaders?["Authorization"], authorization.lowercased().hasPrefix("basic ") {
+            let encoded = String(authorization.dropFirst(6))
+            if let data = Data(base64Encoded: encoded),
+               let credentials = String(data: data, encoding: .utf8),
+               let separator = credentials.firstIndex(of: ":") {
+                media.addOption(":http-user=\(credentials[..<separator])")
+                media.addOption(":http-pwd=\(credentials[credentials.index(after: separator)...])")
+            }
+        }
+        if let userAgent = httpHeaders?["User-Agent"] { media.addOption(":http-user-agent=\(userAgent)") }
+        if let referer = httpHeaders?["Referer"] ?? httpHeaders?["Referrer"] { media.addOption(":http-referrer=\(referer)") }
         if isVR360Mode {
             // MobileVLCKit 3.x uses `projection=2` for 360° sphere. Newer
             // LibVLC builds use `projection-mode=1` for equirectangular input.
@@ -1011,7 +1023,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             media.addOption(":projection=2")
             media.addOption(":projection-mode=1")
         }
-        media.addOption(":network-caching=10000")
+        media.addOption(":network-caching=3000")
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=1500")
         media.addOption(":drop-late-frames")
@@ -1047,15 +1059,16 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             if self.isVR360Mode {
                 _ = self.mediaPlayer.updateViewpoint(self.vrYaw, pitch: self.vrPitch, roll: 0, fov: self.vrFOV, absolute: true)
             }
-            if self.mediaPlayer.isPlaying {
+            if self.mediaPlayer.isPlaying || currentTime > 0 || (size.width > 1 && size.height > 1) {
+                self.controls?.isBuffering = false
                 self.loadingIndicator.stopAnimating()
             }
         }
     }
 
-    func playIfNeeded(url: URL) {
+    func playIfNeeded(url: URL, httpHeaders: [String: String]? = nil) {
         guard currentURL != url else { return }
-        play(url: url)
+        play(url: url, httpHeaders: httpHeaders)
     }
 
     func stop() {
@@ -1303,8 +1316,6 @@ private struct CircularPlaybackButton: View {
     let isPlaying: Bool
     let isLoading: Bool
     let action: () -> Void
-    @State private var loadingRotation: Double = 0
-
     var body: some View {
         Button(action: action) {
             ZStack {
@@ -1315,15 +1326,18 @@ private struct CircularPlaybackButton: View {
                 Circle()
                     .stroke(Color.white.opacity(0.16), lineWidth: 3)
                     .padding(5)
-                Circle()
-                    .trim(from: 0, to: isLoading ? 0.24 : max(0.018, min(1, progress)))
-                    .stroke(
-                        AppPalette.gradient,
-                        style: StrokeStyle(lineWidth: 4, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees((isLoading ? loadingRotation : 0) - 90))
-                    .padding(5)
-                    .shadow(color: AppPalette.blue.opacity(0.55), radius: 7)
+                if isLoading {
+                    PlayerLoadingArc()
+                        .padding(5)
+                        .shadow(color: AppPalette.blue.opacity(0.55), radius: 7)
+                } else {
+                    Circle()
+                        .trim(from: 0, to: max(0.018, min(1, progress)))
+                        .stroke(AppPalette.gradient, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .padding(5)
+                        .shadow(color: AppPalette.blue.opacity(0.55), radius: 7)
+                }
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 27, weight: .bold))
                     .foregroundColor(.white)
@@ -1334,17 +1348,20 @@ private struct CircularPlaybackButton: View {
         }
         .buttonStyle(PremiumPressButtonStyle())
         .accessibilityLabel(isLoading ? "Loading" : (isPlaying ? "Pause" : "Play"))
-        .onAppear { updateLoadingAnimation() }
-        .onChange(of: isLoading) { _ in updateLoadingAnimation() }
     }
+}
 
-    private func updateLoadingAnimation() {
-        if isLoading {
-            loadingRotation = 0
-            withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) { loadingRotation = 360 }
-        } else {
-            withAnimation(.none) { loadingRotation = 0 }
-        }
+private struct PlayerLoadingArc: View {
+    @State private var rotation: Double = 0
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.24)
+            .stroke(AppPalette.gradient, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+            .rotationEffect(.degrees(rotation - 90))
+            .onAppear {
+                rotation = 0
+                withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) { rotation = 360 }
+            }
     }
 }
 

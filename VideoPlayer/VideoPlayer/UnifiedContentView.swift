@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Kingfisher
 
 enum UnifiedMediaSection: String, CaseIterable, Identifiable {
     case movies = "Movies"
@@ -50,9 +51,14 @@ private final class UnifiedContentModel: ObservableObject {
     @Published var isLoading = false
     @Published var status = ""
     private var loaded = false
+    private var lastSourceSignature = ""
     private let cloud = OffcloudViewModel()
 
     func load(vm: AppViewModel, force: Bool = false) async {
+        let sourceSignature = vm.servers.map {
+            $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
+        }.joined(separator: "|") + "|tmdb:" + String(TMDBSettings.readAccessToken.hashValue)
+        if loaded && !force && sourceSignature == lastSourceSignature { return }
         guard !isLoading else { return }
         isLoading = true
         status = "Scanning connected libraries…"
@@ -87,7 +93,8 @@ private final class UnifiedContentModel: ObservableObject {
         }
 
         guard !raw.isEmpty else {
-            movies = []; shows = []; unknown = []; loaded = true; status = ""
+            movies = []; shows = []; unknown = []; loaded = true
+            lastSourceSignature = sourceSignature; status = ""
             return
         }
         status = "Scanning files with TMDB…"
@@ -95,18 +102,22 @@ private final class UnifiedContentModel: ObservableObject {
         // Match each cleaned title once. Episode packs can contain hundreds of files
         // that all resolve to the same show, so querying each file serially made the
         // Content screen appear to load forever.
-        let uniqueQueries = Array(Set(raw.map { metadataQuery(for: $0) }))
+        var representativeByKey: [String: UnifiedMediaEntry] = [:]
+        for entry in raw { representativeByKey[metadataGroupKey(for: entry)] = entry }
+        let representatives = Array(representativeByKey)
         var metadataByQuery: [String: TMDBTitleDetails] = [:]
         await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
-            var iterator = uniqueQueries.makeIterator()
-            for _ in 0..<min(8, uniqueQueries.count) {
-                guard let query = iterator.next() else { break }
-                group.addTask { (query, await TMDBService.shared.details(for: query)) }
+            var iterator = representatives.makeIterator()
+            for _ in 0..<min(8, representatives.count) {
+                guard let (key, entry) = iterator.next() else { break }
+                let lookupTitle = metadataLookupTitle(for: entry)
+                group.addTask { (key, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle)) }
             }
-            while let (query, details) = await group.next() {
-                if let details { metadataByQuery[query] = details }
-                if let next = iterator.next() {
-                    group.addTask { (next, await TMDBService.shared.details(for: next)) }
+            while let (key, details) = await group.next() {
+                if let details { metadataByQuery[key] = details }
+                if let (nextKey, nextEntry) = iterator.next() {
+                    let lookupTitle = metadataLookupTitle(for: nextEntry)
+                    group.addTask { (nextKey, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle)) }
                 }
             }
         }
@@ -115,8 +126,11 @@ private final class UnifiedContentModel: ObservableObject {
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
         for var entry in raw {
-            let query = metadataQuery(for: entry)
+            let query = metadataGroupKey(for: entry)
             entry.details = metadataByQuery[query]
+            if let canonicalTitle = entry.details?.title, !canonicalTitle.isEmpty {
+                entry.title = canonicalTitle
+            }
             if let details = entry.details, details.isSeries {
                 let parts = VideoTitleFormatter.episodeComponents(from: entry.rawTitle)
                 let season = parts?.season ?? 1
@@ -150,37 +164,44 @@ private final class UnifiedContentModel: ObservableObject {
             Task { await self.enrichUnknownWithAdultMetadata() }
         }
         loaded = true
+        lastSourceSignature = sourceSignature
         status = ""
     }
 
-    private func metadataQuery(for entry: UnifiedMediaEntry) -> String {
+    private func metadataGroupKey(for entry: UnifiedMediaEntry) -> String {
+        let cleaned = TMDBService.searchTitle(from: metadataLookupTitle(for: entry)).lowercased()
+        if VideoTitleFormatter.episodeComponents(from: entry.rawTitle) != nil { return "episode|" + cleaned }
+        return "file|" + entry.rawTitle.lowercased()
+    }
+
+    private func metadataLookupTitle(for entry: UnifiedMediaEntry) -> String {
+        let cleanedFile = TMDBService.searchTitle(from: entry.rawTitle)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let genericEpisode = cleanedFile.isEmpty || cleanedFile.range(
+            of: #"^(?:s\d{1,3}(?:e\d{1,3})?|e(?:pisode)?\s*\d{1,4}|\d{1,4})$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        guard genericEpisode else { return entry.rawTitle }
+
         let sourcePath: String
         switch entry.source {
         case let .webDAV(_, file): sourcePath = file.path
         case let .offcloud(_, file): sourcePath = file.path ?? file.name
         }
-        let components = sourcePath
-            .replacingOccurrences(of: "\\", with: "/")
-            .split(separator: "/")
-            .map(String.init)
         let genericFolders: Set<String> = [
-            "movie", "movies", "film", "films", "tv", "tv show", "tv shows",
-            "series", "show", "shows", "video", "videos", "media", "downloads",
-            "my pack", "pikpak", "offcloud", "korean drama", "asian drama",
-            "drama", "anime", "cartoons", "documentaries"
+            "movie", "movies", "film", "films", "tv", "tv show", "tv shows", "series",
+            "show", "shows", "video", "videos", "media", "downloads", "my pack", "pikpak",
+            "offcloud", "english movies", "korean drama", "asian drama", "drama", "anime"
         ]
-        if components.count > 1 {
-            for folder in components.dropLast().reversed() {
-                let cleaned = TMDBService.searchTitle(from: folder)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let lower = cleaned.lowercased()
-                let isSeasonOnly = lower.range(of: #"^(?:season\s*)?\d{1,3}$"#, options: .regularExpression) != nil
-                if cleaned.count >= 2, !genericFolders.contains(lower), !isSeasonOnly {
-                    return lower
-                }
-            }
+        let parents = sourcePath.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/").dropLast().reversed().map(String.init)
+        for folder in parents {
+            let cleaned = TMDBService.searchTitle(from: folder).trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = cleaned.lowercased()
+            let seasonOnly = lower.range(of: #"^(?:season\s*)?\d{1,3}$"#, options: .regularExpression) != nil
+            if cleaned.count > 1, !genericFolders.contains(lower), !seasonOnly { return folder }
         }
-        return TMDBService.searchTitle(from: entry.rawTitle).lowercased()
+        return entry.rawTitle
     }
 
     private func enrichUnknownWithAdultMetadata() async {
@@ -188,14 +209,29 @@ private final class UnifiedContentModel: ObservableObject {
         let limit = min(items.count, 200)
         for index in 0..<limit {
             guard items[index].adultScene == nil else { continue }
-            let query = metadataQuery(for: items[index])
+            let query = TMDBService.searchTitle(from: items[index].rawTitle)
             if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5),
-               let scene = response.list.first {
+               let scene = bestAdultMatch(response.list, query: query) {
                 items[index].adultScene = scene
                 items[index].title = scene.title ?? items[index].title
                 unknown = items
             }
         }
+    }
+
+    private func bestAdultMatch(_ scenes: [ThePornDBScene], query: String) -> ThePornDBScene? {
+        let queryTokens = metadataTokens(query)
+        guard !queryTokens.isEmpty else { return nil }
+        return scenes.map { scene -> (ThePornDBScene, Double) in
+            let tokens = metadataTokens(scene.title ?? "")
+            let overlap = queryTokens.intersection(tokens).count
+            return (scene, Double(overlap) / Double(max(1, min(queryTokens.count, tokens.count))))
+        }.filter { $0.1 >= 0.5 }.max { $0.1 < $1.1 }?.0
+    }
+
+    private func metadataTokens(_ value: String) -> Set<String> {
+        Set(value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 && Int($0) == nil })
     }
 
     private func deduplicatedMovies(_ entries: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
@@ -288,7 +324,12 @@ struct UnifiedContentView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
                     if let url = entry.posterURL {
-                        AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { ProgressView().tint(AppPalette.accent) }
+                        KFImage(url)
+                            .placeholder { ProgressView().tint(AppPalette.accent) }
+                            .cacheOriginalImage()
+                            .fade(duration: 0.12)
+                            .resizable()
+                            .scaledToFill()
                     } else { Image(systemName: section == .shows ? "tv.fill" : "film.fill").font(.title).foregroundStyle(AppPalette.gradient) }
                 }.aspectRatio(2/3, contentMode: .fit).clipShape(RoundedRectangle(cornerRadius: 14))
                 Text(entry.title).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.leading)
@@ -302,7 +343,9 @@ struct UnifiedContentView: View {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.07))
-                    if let url = entry.posterURL { AsyncImage(url: url) { $0.resizable().scaledToFill() } placeholder: { ProgressView() } }
+                    if let url = entry.posterURL {
+                        KFImage(url).placeholder { ProgressView() }.cacheOriginalImage().fade(duration: 0.12).resizable().scaledToFill()
+                    }
                     else { Image(systemName: "play.rectangle.fill").foregroundStyle(.secondary) }
                 }.frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 5) {
@@ -332,29 +375,7 @@ struct UnifiedContentView: View {
     }
 
     @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry) -> some View {
-        VideoDetailsView(
-            vm: vm,
-            item: detailsItem(entry),
-            onPlay: { play(entry.source) },
-            dismissOnPlay: false,
-            onSelectEpisode: { id in
-                if let episode = entry.episodes.first(where: { $0.id == id }) { play(episode.source) }
-            }
-        ).fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
-    }
-
-    private func detailsItem(_ entry: UnifiedMediaEntry) -> VideoDetailsItem {
-        let related = entry.episodes.map { episode in
-            VideoEpisodeItem(
-                id: episode.id, title: episode.title,
-                season: episode.season, episode: episode.episode
-            )
-        }
-        return VideoDetailsItem(
-            id: entry.id, title: entry.title, url: entry.streamURL,
-            posterCacheKey: "unified|\(entry.id)", fileExtension: (entry.rawTitle as NSString).pathExtension.uppercased(),
-            source: entry.sourceLabel, relatedEpisodes: related
-        )
+        UnifiedMediaDetailsHost(vm: vm, entry: entry)
     }
 
     private func play(_ source: UnifiedSource) {
@@ -367,6 +388,68 @@ struct UnifiedContentView: View {
             } else {
                 _ = vm.playOnlineURL(url.absoluteString)
             }
+        }
+        showPlayer = true
+    }
+}
+
+private struct UnifiedMediaDetailsHost: View {
+    @ObservedObject var vm: AppViewModel
+    let entry: UnifiedMediaEntry
+    @State private var selectedEpisodeID: String?
+    @State private var showPlayer = false
+
+    private var selectedEpisode: UnifiedEpisode? {
+        guard let selectedEpisodeID else { return nil }
+        return entry.episodes.first { $0.id == selectedEpisodeID }
+    }
+
+    var body: some View {
+        VideoDetailsView(
+            vm: vm,
+            item: currentDetailsItem,
+            onPlay: playCurrent,
+            dismissOnPlay: false,
+            onSelectEpisode: { episodeID in
+                withAnimation(.easeOut(duration: 0.16)) { selectedEpisodeID = episodeID }
+            }
+        )
+        .id(selectedEpisodeID ?? entry.id)
+        .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
+    }
+
+    private var relatedEpisodes: [VideoEpisodeItem] {
+        entry.episodes.map {
+            VideoEpisodeItem(id: $0.id, title: $0.title, season: $0.season, episode: $0.episode)
+        }
+    }
+
+    private var currentDetailsItem: VideoDetailsItem {
+        if let episode = selectedEpisode {
+            return VideoDetailsItem(
+                id: episode.id, title: episode.title, url: episode.url,
+                posterCacheKey: "episode|\(episode.id)",
+                fileExtension: (episode.title as NSString).pathExtension.uppercased(),
+                source: entry.sourceLabel, relatedEpisodes: relatedEpisodes
+            )
+        }
+        return VideoDetailsItem(
+            id: entry.id, title: entry.title, url: entry.streamURL,
+            posterCacheKey: "unified|\(entry.id)",
+            fileExtension: (entry.rawTitle as NSString).pathExtension.uppercased(),
+            source: entry.sourceLabel, relatedEpisodes: relatedEpisodes
+        )
+    }
+
+    private func playCurrent() {
+        let source = selectedEpisode?.source ?? entry.source
+        switch source {
+        case let .webDAV(server, file): vm.play(file: file, server: server)
+        case let .offcloud(_, file):
+            guard let url = file.streamURL else { return }
+            if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
+                vm.playSavedLink(saved)
+            } else { _ = vm.playOnlineURL(url.absoluteString) }
         }
         showPlayer = true
     }
