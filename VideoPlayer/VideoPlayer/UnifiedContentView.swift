@@ -186,10 +186,14 @@ struct UnifiedContentView: View {
                     Button { Task { await model.load(vm: vm, force: true) } } label: { Image(systemName: "arrow.clockwise") }
                 }
             }
-            .task(id: isActive) { if isActive { await model.load(vm: vm) } }
+            .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: true) } }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
         }
+    }
+
+    private var contentRefreshID: String {
+        "\(isActive)|" + vm.servers.map { $0.id.uuidString + $0.displayAddress }.joined(separator: "|")
     }
 
     private var currentEntries: [UnifiedMediaEntry] {

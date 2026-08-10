@@ -761,7 +761,6 @@ class AppViewModel: ObservableObject {
     }
     func searchPikPakVideos(server: WebDAVServer, query: String) async -> [WebDAVFile] {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return [] }
         do {
             let client = WebDAVClient(server: server)
             let videos = try await collectPikPakVideos(
@@ -771,11 +770,12 @@ class AppViewModel: ObservableObject {
                 forceRefresh: false
             )
             guard !Task.isCancelled else { return [] }
-            return videos.filter {
+            let matches = normalized.isEmpty ? videos : videos.filter {
                 $0.name.lowercased().contains(normalized)
                     || $0.displayName.lowercased().contains(normalized)
                     || $0.path.lowercased().contains(normalized)
-            }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            }
+            return matches.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         } catch {
             if !Task.isCancelled { errorMessage = error.localizedDescription }
             return []
