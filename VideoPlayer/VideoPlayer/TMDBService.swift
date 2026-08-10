@@ -118,10 +118,9 @@ actor TMDBService {
         guard !normalizedQuery.isEmpty else { return nil }
         let cacheKey = normalizedQuery.lowercased()
         if let cached = detailsCache[cacheKey] { return cached }
+        let candidates = await searchCandidates(for: normalizedQuery)
+        guard let match = Self.bestMatch(in: candidates, query: normalizedQuery) else { return nil }
         do {
-            let search: SearchResponse = try await request("/3/search/multi", query: ["query": normalizedQuery, "include_adult": "false"])
-            let candidates = search.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
-            guard let match = Self.bestMatch(in: candidates, query: normalizedQuery) else { return nil }
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
             let payload: DetailPayload = try await request(endpoint, query: ["append_to_response": "credits,videos"])
             let trailers = payload.videos?.results ?? []
@@ -139,6 +138,58 @@ actor TMDBService {
             detailsCache[cacheKey] = details
             return details
         } catch { return nil }
+    }
+
+    private func searchCandidates(for rawQuery: String) async -> [SearchResult] {
+        var values: [SearchResult] = []
+
+        // Multi-search is fastest when TMDB accepts the release-style query.
+        if let response: SearchResponse = try? await request(
+            "/3/search/multi",
+            query: ["query": rawQuery, "include_adult": "false"]
+        ) {
+            values.append(contentsOf: response.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" })
+        }
+
+        // Dedicated movie/TV searches are the reliable fallback. They receive a
+        // clean title and the year separately, which resolves filenames such as
+        // `Gran Torino - 2008.mkv` and `Sinners (2025) (2160p...).mkv`.
+        let parsed = Self.canonicalTitleAndYear(from: rawQuery)
+        guard !parsed.title.isEmpty else { return values }
+        var movieQuery = ["query": parsed.title, "include_adult": "false"]
+        var tvQuery = ["query": parsed.title, "include_adult": "false"]
+        if let year = parsed.year {
+            movieQuery["year"] = year
+            tvQuery["first_air_date_year"] = year
+        }
+        if let response: TypedTitleSearchResponse = try? await request("/3/search/movie", query: movieQuery) {
+            values.append(contentsOf: response.results.map {
+                SearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: $0.name)
+            })
+        }
+        if let response: TypedTitleSearchResponse = try? await request("/3/search/tv", query: tvQuery) {
+            values.append(contentsOf: response.results.map {
+                SearchResult(id: $0.id, mediaType: "tv", title: $0.title, name: $0.name)
+            })
+        }
+        var seen = Set<String>()
+        return values.filter { seen.insert("\($0.mediaType)|\($0.id)").inserted }
+    }
+
+    private static func canonicalTitleAndYear(from raw: String) -> (title: String, year: String?) {
+        var value = searchTitle(from: raw)
+        let yearPattern = #"(?<!\d)((?:19|20)\d{2})(?!\d)"#
+        var year: String?
+        if let regex = try? NSRegularExpression(pattern: yearPattern),
+           let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+           let range = Range(match.range(at: 1), in: value) {
+            year = String(value[range])
+            value.removeSubrange(range)
+        }
+        value = value.replacingOccurrences(of: #"[\[\](){}._-]+"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (value, year)
     }
 
     private static func originalSearchTitle(from rawTitle: String) -> String {
@@ -160,7 +211,7 @@ actor TMDBService {
             let denominator = max(1, min(queryTokens.count, resultTokens.count))
             return (result, Double(overlap) / Double(denominator))
         }.sorted { $0.1 > $1.1 }
-        guard let best = ranked.first, best.1 >= 0.45 else { return nil }
+        guard let best = ranked.first, best.1 >= 0.34 else { return nil }
         return best.0
     }
 
@@ -219,6 +270,13 @@ actor TMDBService {
 }
 
 private struct SearchResponse: Decodable { let results: [SearchResult] }
+private struct TypedTitleSearchResponse: Decodable { let results: [TypedTitleSearchResult] }
+private struct TypedTitleSearchResult: Decodable {
+    let id: Int
+    let title: String?
+    let name: String?
+}
+
 private struct SearchResult: Decodable {
     let id: Int; let mediaType: String; let title: String?; let name: String?
 }
