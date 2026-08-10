@@ -171,7 +171,7 @@ actor TMDBService {
     }
     // Temporarily disabled for metadata matching tests. Keep the full filter
     // implementation below so it can be restored by flipping this flag only.
-    private static let releaseKeywordFilteringEnabled = false
+    private static let releaseKeywordFilteringEnabled = true
 
     static func searchTitle(from rawTitle: String) -> String {
         if !releaseKeywordFilteringEnabled {
