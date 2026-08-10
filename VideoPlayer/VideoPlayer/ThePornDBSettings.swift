@@ -4,6 +4,10 @@ import Foundation
 /// مسؤولة عن تخزين مفتاح API والإعدادات
 struct ThePornDBSettings {
 
+    // Temporarily paused, not removed. Flip this to true when adult metadata
+    // should be enabled again. TMDB is the only active metadata provider now.
+    static let isEnabled = false
+
     /// الحصول على مفتاح API من UserDefaults
     static var apiKey: String {
         get {
@@ -18,7 +22,7 @@ struct ThePornDBSettings {
     }
 
     static var hasValidAPIKey: Bool {
-        !apiKey.isEmpty
+        isEnabled && !apiKey.isEmpty
     }
 
     static let baseURL = "https://api.theporndb.net"

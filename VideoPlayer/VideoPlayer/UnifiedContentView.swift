@@ -72,7 +72,7 @@ private final class UnifiedContentModel: ObservableObject {
                 guard let url = client.streamURL(for: file) else { continue }
                 raw.append(UnifiedMediaEntry(
                     id: "webdav|\(server.id.uuidString)|\(file.path)", rawTitle: file.name,
-                    title: VideoTitleFormatter.title(from: file.name), sourceLabel: server.name,
+                    title: file.name, sourceLabel: server.name,
                     source: .webDAV(server: server, file: file), streamURL: url
                 ))
             }
@@ -85,7 +85,7 @@ private final class UnifiedContentModel: ObservableObject {
                     guard let url = file.streamURL else { continue }
                     raw.append(UnifiedMediaEntry(
                         id: "offcloud|\(transfer.requestId)|\(file.id)", rawTitle: file.name,
-                        title: VideoTitleFormatter.title(from: file.name), sourceLabel: "Offcloud",
+                        title: file.name, sourceLabel: "Offcloud",
                         source: .offcloud(transfer: transfer, file: file), streamURL: url
                     ))
                 }
@@ -480,10 +480,10 @@ struct UnifiedSettingsView: View {
                 }
                 Section("Metadata") {
                     settingsRow("TMDB", "Movies and TV metadata — first priority", "film.stack.fill", .tmdb)
-                    settingsRow("ThePornDB", "Metadata fallback for unknown content", "sparkles.rectangle.stack.fill", .adult)
+                    settingsRow("ThePornDB", "Temporarily paused — TMDB only mode", "pause.circle.fill", .adult)
                 }
                 Section {
-                    Text("TMDB is always checked first. Unmatched files remain in Unknown and can then receive ThePornDB metadata.")
+                    Text("TMDB is currently the only active metadata provider. Original file names are sent without release-keyword filtering. Unmatched files remain in Unknown.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }

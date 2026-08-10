@@ -207,7 +207,7 @@ struct VideoDetailsView: View {
                         videoInformationCard
                         if let tmdbDetails {
                             tmdbInformationCard(tmdbDetails)
-                        } else if let thePornDBMetadata {
+                        } else if ThePornDBSettings.isEnabled, let thePornDBMetadata {
                             thePornDBInfoCard(thePornDBMetadata)
                         }
                     }
@@ -290,7 +290,10 @@ struct VideoDetailsView: View {
             let metadataKey = item.posterCacheKey ?? item.id
             if let cachedDetails = VideoDetailsMemoryCache.details[metadataKey] { tmdbDetails = cachedDetails }
             if let cachedEpisode = VideoDetailsMemoryCache.episodes[metadataKey] { tmdbEpisode = cachedEpisode }
-            if let cachedAdult = VideoDetailsMemoryCache.adultMetadata[metadataKey] { thePornDBMetadata = cachedAdult }
+            if ThePornDBSettings.isEnabled,
+               let cachedAdult = VideoDetailsMemoryCache.adultMetadata[metadataKey] {
+                thePornDBMetadata = cachedAdult
+            }
             if tmdbEpisode == nil, let value = VideoTitleFormatter.episodeComponents(from: item.title) {
                 tmdbEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
                 if let tmdbEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = tmdbEpisode }
@@ -310,9 +313,13 @@ struct VideoDetailsView: View {
                 if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
             }
             guard tmdbDetails == nil else { return }
-            if thePornDBMetadata == nil { thePornDBMetadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: item.displayTitle) }
-            if let thePornDBMetadata { VideoDetailsMemoryCache.adultMetadata[metadataKey] = thePornDBMetadata }
-            if let cover = thePornDBMetadata?.coverImage, frame == nil {
+            if ThePornDBSettings.isEnabled, thePornDBMetadata == nil {
+                thePornDBMetadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: item.displayTitle)
+            }
+            if ThePornDBSettings.isEnabled, let thePornDBMetadata {
+                VideoDetailsMemoryCache.adultMetadata[metadataKey] = thePornDBMetadata
+            }
+            if ThePornDBSettings.isEnabled, let cover = thePornDBMetadata?.coverImage, frame == nil {
                 frame = cover
                 if let key = item.posterCacheKey {
                     VideoThumbnailLoader.cacheImage(cover, forStableKey: key)
