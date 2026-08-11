@@ -122,7 +122,8 @@ final class WebDAVClient: NSObject {
         // or rejected stream.
         let delegate = WebDAVRedirectResolverDelegate(
             username: authUsername,
-            password: authPassword
+            password: authPassword,
+            originalHost: originalURL.host
         )
         let configuration = URLSessionConfiguration.ephemeral
         configuration.networkServiceType = .video
@@ -482,6 +483,7 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
 private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDelegate {
     private let username: String
     private let password: String
+    private let originalHost: String?
     private let lock = NSLock()
     private var capturedRedirectURL: URL?
 
@@ -491,9 +493,10 @@ private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDele
         return capturedRedirectURL
     }
 
-    init(username: String, password: String) {
+    init(username: String, password: String, originalHost: String?) {
         self.username = username
         self.password = password
+        self.originalHost = originalHost
     }
 
     func urlSession(
@@ -503,11 +506,28 @@ private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDele
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        let destinationHost = request.url?.host
+        let remainsOnDAVHost = destinationHost?.caseInsensitiveCompare(originalHost ?? "") == .orderedSame
+
+        if remainsOnDAVHost {
+            // Follow URL normalization/auth redirects inside the DAV server. iOS
+            // may remove Authorization while rebuilding the redirect request, so
+            // explicitly restore it for the next DAV hop.
+            var authenticatedRequest = request
+            if !username.isEmpty {
+                let credentials = Data("\(username):\(password)".utf8).base64EncodedString()
+                authenticatedRequest.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
+            }
+            authenticatedRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            completionHandler(authenticatedRequest)
+            return
+        }
+
         lock.lock()
         capturedRedirectURL = request.url
         lock.unlock()
-        // Do not let the resolver download the video. The actual player opens the
-        // signed URL immediately with its own optimized streaming request.
+        // Stop only at the cross-host CDN hop. The player opens that final signed
+        // URL itself, without leaking the WebDAV Authorization header.
         completionHandler(nil)
     }
 

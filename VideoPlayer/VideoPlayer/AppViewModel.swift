@@ -567,7 +567,11 @@ class AppViewModel: ObservableObject {
         nowPlayingResumeAt = resume
         nowPlayingHeaders = playbackURL.isFileURL ? nil : headers
         nowPlaying = WebDAVFile(
-            name: VideoTitleFormatter.title(from: title),
+            // Preserve the original extension for player routing. PikPak signed
+            // CDN URLs usually have no path extension, so removing `.mkv` here
+            // incorrectly routed Matroska files into AVPlayer instead of VLC.
+            // VideoPlayerView formats this raw name only when displaying the title.
+            name: title,
             path: playbackURL.absoluteString,
             isDirectory: false,
             contentType: "video"
