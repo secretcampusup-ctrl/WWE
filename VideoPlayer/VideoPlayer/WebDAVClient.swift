@@ -480,7 +480,7 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
 
 // MARK: - Signed stream redirect resolver
 
-private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDelegate {
+private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate {
     private let username: String
     private let password: String
     private let originalHost: String?
@@ -529,6 +529,18 @@ private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDele
         // Stop only at the cross-host CDN hop. The player opens that final signed
         // URL itself, without leaking the WebDAV Authorization header.
         completionHandler(nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        // The resolver needs headers/redirects only. Never allow data(for:) to
+        // buffer the media body when a DAV server responds with 200/206 directly
+        // instead of redirecting to a CDN URL.
+        completionHandler(.cancel)
     }
 
     func urlSession(
