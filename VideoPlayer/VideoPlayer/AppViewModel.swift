@@ -20,6 +20,10 @@ struct VideoPlaylist: Identifiable, Codable, Equatable {
 
 @MainActor
 class AppViewModel: ObservableObject {
+    private let persistQueue = DispatchQueue(label: "com.mortaza.minoz.VideoPlayer.persist", qos: .utility)
+    private var lastProgressPersistDate: Date?
+    private var progressPersistWorkItem: DispatchWorkItem?
+    private let progressPersistInterval: TimeInterval = 4
     @Published var servers: [WebDAVServer] = []
     @Published var currentFiles: [WebDAVFile] = []
     @Published var isLoading = false
@@ -124,10 +128,41 @@ class AppViewModel: ObservableObject {
     }
 
     func persistSavedLinksImmediately() {
-        if let data = try? JSONEncoder().encode(savedLinks) {
-            UserDefaults.standard.set(data, forKey: linksKey)
-            UserDefaults.standard.synchronize()
+        persistSavedLinksAsync()
+    }
+
+    /// Encodes and writes `savedLinks` off the main thread. `synchronize()` is
+    /// deliberately not called — it forces a synchronous disk flush and is
+    /// unnecessary; `UserDefaults.set` already persists in the background.
+    private func persistSavedLinksAsync() {
+        let snapshot = savedLinks
+        persistQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            UserDefaults.standard.set(data, forKey: self.linksKey)
         }
+    }
+
+    /// Used for high-frequency updates (playback progress ticks ~4×/s). Encoding
+    /// and writing the whole `savedLinks` array on every tick was blocking the
+    /// main thread continuously for as long as any video played — which is why
+    /// the rest of the app (including unrelated screens like Discover) appeared
+    /// to lose its network connection the moment playback started. This coalesces
+    /// those writes to at most one every few seconds, off the main thread, with
+    /// a trailing write so the final position is never lost for long.
+    private func persistSavedLinksThrottled() {
+        progressPersistWorkItem?.cancel()
+        let now = Date()
+        if let last = lastProgressPersistDate, now.timeIntervalSince(last) < progressPersistInterval {
+            let work = DispatchWorkItem { [weak self] in
+                self?.lastProgressPersistDate = Date()
+                self?.persistSavedLinksAsync()
+            }
+            progressPersistWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + progressPersistInterval, execute: work)
+            return
+        }
+        lastProgressPersistDate = now
+        persistSavedLinksAsync()
     }
 
     func isFavorite(_ item: VideoDetailsItem) -> Bool {
@@ -240,9 +275,10 @@ class AppViewModel: ObservableObject {
     }
 
     func persistPlaylistsImmediately() {
-        if let data = try? JSONEncoder().encode(playlists) {
-            UserDefaults.standard.set(data, forKey: playlistsKey)
-            UserDefaults.standard.synchronize()
+        let snapshot = playlists
+        persistQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            UserDefaults.standard.set(data, forKey: self.playlistsKey)
         }
     }
 
@@ -658,7 +694,7 @@ class AppViewModel: ObservableObject {
         } else if seconds > 3 {
             savedLinks[idx].resumePositionSeconds = seconds
         }
-        persistSavedLinksImmediately()
+        persistSavedLinksThrottled()
     }
 
     func resumeSeconds(for link: SavedVideoLink) -> Double {
