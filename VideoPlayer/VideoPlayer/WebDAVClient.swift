@@ -116,8 +116,27 @@ final class WebDAVClient: NSObject {
     func resolvedStreamURL(for file: WebDAVFile) async -> URL? {
         guard let originalURL = streamURL(for: file) else { return nil }
 
-        // PikPak WebDAV commonly delays or rejects HEAD for large media. Resolve
-        // the signed CDN redirect immediately with a one-byte GET instead.
+        // Capture PikPak's signed Location header without following it. Following
+        // the redirect here can make URLSession start the media transfer itself,
+        // while the player then opens a second request and may receive an expired
+        // or rejected stream.
+        let delegate = WebDAVRedirectResolverDelegate(
+            username: authUsername,
+            password: authPassword
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.networkServiceType = .video
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 8
+        configuration.waitsForConnectivity = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        let resolverSession = URLSession(
+            configuration: configuration,
+            delegate: delegate,
+            delegateQueue: nil
+        )
+        defer { resolverSession.finishTasksAndInvalidate() }
+
         var request = URLRequest(url: originalURL)
         request.httpMethod = "GET"
         request.timeoutInterval = 8
@@ -127,16 +146,15 @@ final class WebDAVClient: NSObject {
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
 
         do {
-            // Returns as soon as response headers arrive; the media body is not
-            // consumed. The final response URL is PikPak's signed CDN stream URL.
-            let (_, response) = try await session.bytes(for: request)
+            let (_, response) = try await resolverSession.data(for: request)
+            if let signedURL = delegate.redirectURL { return signedURL }
             guard let http = response as? HTTPURLResponse,
                   (200...399).contains(http.statusCode) else { return originalURL }
             return response.url ?? originalURL
         } catch {
-            // Let the player try the authenticated WebDAV URL without adding a
-            // second blocking probe when redirect resolution is unavailable.
-            return originalURL
+            // The redirect delegate deliberately stops URLSession before the CDN
+            // body is downloaded; the captured signed URL is still valid.
+            return delegate.redirectURL ?? originalURL
         }
     }
 
@@ -456,6 +474,62 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
             contentType: currentType.isEmpty ? nil : currentType
         )
         files.append(file)
+    }
+}
+
+// MARK: - Signed stream redirect resolver
+
+private final class WebDAVRedirectResolverDelegate: NSObject, URLSessionTaskDelegate {
+    private let username: String
+    private let password: String
+    private let lock = NSLock()
+    private var capturedRedirectURL: URL?
+
+    var redirectURL: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedRedirectURL
+    }
+
+    init(username: String, password: String) {
+        self.username = username
+        self.password = password
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        lock.lock()
+        capturedRedirectURL = request.url
+        lock.unlock()
+        // Do not let the resolver download the video. The actual player opens the
+        // signed URL immediately with its own optimized streaming request.
+        completionHandler(nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let method = challenge.protectionSpace.authenticationMethod
+        if method == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else if method == NSURLAuthenticationMethodHTTPBasic
+                    || method == NSURLAuthenticationMethodDefault {
+            completionHandler(
+                .useCredential,
+                URLCredential(user: username, password: password, persistence: .forSession)
+            )
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
     }
 }
 
