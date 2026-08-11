@@ -448,7 +448,9 @@ private struct UnifiedMediaDetailsHost: View {
         if let episode = selectedEpisode {
             return VideoDetailsItem(
                 id: episode.id, title: episode.title, url: episode.url,
-                posterCacheKey: "episode|\(episode.id)",
+                // Every episode shares the series artwork/metadata identity. The
+                // selected file and S/E label change, but story/rating/cast do not.
+                posterCacheKey: "unified|\(entry.id)",
                 fileExtension: (episode.title as NSString).pathExtension.uppercased(),
                 source: entry.sourceLabel, relatedEpisodes: relatedEpisodes
             )

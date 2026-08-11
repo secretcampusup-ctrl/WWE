@@ -37,6 +37,7 @@ struct TMDBTitleDetails: Identifiable, Codable {
     let cast: [TMDBCastMember]
     let seasons: [TMDBSeason]
     let trailerKey: String?
+    let runtimeMinutes: Int?
 
     var isSeries: Bool { mediaType == "tv" }
     var posterURL: URL? {
@@ -88,7 +89,7 @@ actor TMDBService {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TMDBMetadata", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        cacheURL = directory.appendingPathComponent("metadata-v1.json")
+        cacheURL = directory.appendingPathComponent("metadata-v2.json")
         if let data = try? Data(contentsOf: cacheURL),
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
@@ -157,7 +158,8 @@ actor TMDBService {
                 backdropPath: payload.backdropPath, releaseDate: payload.releaseDate ?? payload.firstAirDate,
                 voteAverage: payload.voteAverage ?? 0, genres: payload.genres ?? [],
                 cast: Array((payload.credits?.cast ?? []).prefix(20)),
-                seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 }, trailerKey: trailer?.key
+                seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 }, trailerKey: trailer?.key,
+                runtimeMinutes: payload.runtime
             )
             detailsCache[cacheKey] = details
             persistCache()
@@ -325,7 +327,7 @@ private struct SearchResult: Decodable {
 private struct DetailPayload: Decodable {
     let title: String?; let name: String?; let overview: String?
     let posterPath: String?; let backdropPath: String?
-    let releaseDate: String?; let firstAirDate: String?; let voteAverage: Double?
+    let releaseDate: String?; let firstAirDate: String?; let voteAverage: Double?; let runtime: Int?
     let genres: [TMDBGenre]?; let seasons: [TMDBSeason]?
     let credits: Credits?; let videos: Videos?
 }

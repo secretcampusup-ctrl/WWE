@@ -149,11 +149,14 @@ struct VideoDetailsView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    preview
+            ZStack(alignment: .top) {
+                preview
 
-                    VStack(alignment: .leading, spacing: 14) {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Color.clear.frame(height: heroHeight - 24)
+
+                        VStack(alignment: .leading, spacing: 14) {
                         if item.is4K || item.isFullHD || qualityStyle != nil {
                             qualityFeatureStrip
                         }
@@ -210,9 +213,12 @@ struct VideoDetailsView: View {
                             thePornDBInfoCard(thePornDBMetadata)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 2)
-                    .padding(.bottom, 28)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 18)
+                        .padding(.bottom, 28)
+                        .background(AppTheme.bg)
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    }
                 }
             }
             .background(AppTheme.bg.ignoresSafeArea())
@@ -220,7 +226,7 @@ struct VideoDetailsView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
-        .task(id: item.id + "|" + item.url.absoluteString + "|" + (item.posterCacheKey ?? "")) {
+        .task(id: detailsLoadingIdentity) {
             let requestedURL = item.url
 
             if let fileName = item.customPosterFileName,
@@ -249,9 +255,8 @@ struct VideoDetailsView: View {
                 }
             }
 
-            let detailKey = item.posterCacheKey.map { "\($0)|detail" }
-            if let detailKey,
-               let highResolution = VideoThumbnailLoader.cachedImage(forStableKey: detailKey) {
+            let detailKey = "details-artwork|\(stableMetadataCacheKey)"
+            if let highResolution = VideoThumbnailLoader.cachedImage(forStableKey: detailKey) {
                 frame = highResolution
                 return
             }
@@ -288,11 +293,13 @@ struct VideoDetailsView: View {
         // ThePornDB metadata (cover + title/performers/tags/date) is the one automatic
         // lookup that's always on, independent of the poster-frame logic above — see
         // VideoThumbnailLoader.fetchThePornDBMetadata.
-        .task(id: item.id) {
+        .task(id: metadataLoadingIdentity) {
             let requestedItemID = item.id
-            let metadataKey = item.posterCacheKey ?? item.id
+            let metadataKey = stableMetadataCacheKey
             tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
-            tmdbEpisode = VideoDetailsMemoryCache.episodes[metadataKey]
+            tmdbEpisode = item.relatedEpisodes.isEmpty
+                ? VideoDetailsMemoryCache.episodes[metadataKey]
+                : nil
             thePornDBMetadata = ThePornDBSettings.isEnabled
                 ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
                 : nil
@@ -304,7 +311,9 @@ struct VideoDetailsView: View {
             } else if let cachedTitle = VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) {
                 frame = cachedTitle
             }
-            if tmdbEpisode == nil, let value = VideoTitleFormatter.episodeComponents(from: item.title) {
+            if item.relatedEpisodes.isEmpty,
+               tmdbEpisode == nil,
+               let value = VideoTitleFormatter.episodeComponents(from: item.title) {
                 let loadedEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 tmdbEpisode = loadedEpisode
@@ -378,8 +387,8 @@ struct VideoDetailsView: View {
                     ZStack {
                         Color.white.opacity(0.06)
 
-                        if let frame {
-                            Image(uiImage: frame)
+                        if let displayedFrame {
+                            Image(uiImage: displayedFrame)
                                 .resizable()
                                 .scaledToFill()
                                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
@@ -390,7 +399,7 @@ struct VideoDetailsView: View {
                                 .tint(.white)
                         }
 
-                        Color.black.opacity(frame == nil ? 0.10 : 0.16)
+                        Color.black.opacity(displayedFrame == nil ? 0.10 : 0.16)
 
                         LinearGradient(
                             stops: [
@@ -440,6 +449,15 @@ struct VideoDetailsView: View {
 
     private var heroHeight: CGFloat {
         max(360, UIScreen.main.bounds.height * 0.44)
+    }
+
+    private var displayedFrame: UIImage? {
+        frame
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-episode|\(stableMetadataCacheKey)")
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-title|\(stableMetadataCacheKey)")
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "details-artwork|\(stableMetadataCacheKey)")
+            ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
+            ?? VideoThumbnailLoader.cachedImage(for: item.url)
     }
 
     private var topSafeAreaInset: CGFloat {
@@ -588,9 +606,13 @@ struct VideoDetailsView: View {
             HStack(spacing: 0) {
                 informationMetric(value: item.fileSizeLabel, label: "File size")
                 metricDivider
-                informationMetric(value: item.metadataValue, label: item.metadataLabel, subtitle: tmdbEpisode?.name ?? (item.seasonEpisodeLabel == nil ? nil : VideoTitleFormatter.episodeTitle(from: item.title)))
+                if item.seasonEpisodeLabel == nil {
+                    informationMetric(value: movieYearLabel, label: "Year")
+                } else {
+                    informationMetric(value: item.metadataValue, label: item.metadataLabel, subtitle: tmdbEpisode?.name ?? VideoTitleFormatter.episodeTitle(from: item.title))
+                }
                 metricDivider
-                informationMetric(value: item.fileExtension.uppercased(), label: "Format")
+                informationMetric(value: item.seasonEpisodeLabel == nil ? movieRuntimeLabel : item.fileExtension.uppercased(), label: item.seasonEpisodeLabel == nil ? "Runtime" : "Format")
             }
             .frame(minHeight: 72)
         }
@@ -601,13 +623,57 @@ struct VideoDetailsView: View {
         )
     }
 
+    private var metadataLoadingIdentity: String {
+        "metadata|\(stableMetadataCacheKey)"
+    }
+
+    private var stableMetadataCacheKey: String {
+        let normalizedTitle = item.displayTitle
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let episode = VideoTitleFormatter.episodeComponents(from: item.title) {
+            return "episode|\(normalizedTitle)|s\(episode.season)e\(episode.episode)"
+        }
+        return (item.relatedEpisodes.isEmpty ? "movie|" : "series|") + normalizedTitle
+    }
+
+    private var movieYearLabel: String {
+        if let date = tmdbDetails?.releaseDate, date.count >= 4 {
+            return String(date.prefix(4))
+        }
+        let pattern = #"(?<!\d)((?:19|20)\d{2})(?!\d)"#
+        if let range = item.title.range(of: pattern, options: .regularExpression) {
+            return String(item.title[range])
+        }
+        return "Unknown"
+    }
+
+    private var movieRuntimeLabel: String {
+        if let minutes = tmdbDetails?.runtimeMinutes, minutes > 0 {
+            let hours = minutes / 60
+            let remainder = minutes % 60
+            return hours > 0 ? "\(hours)h \(remainder)m" : "\(minutes)m"
+        }
+        guard let seconds = item.durationSeconds, seconds > 0 else { return "Unknown" }
+        let minutes = Int(seconds / 60)
+        return minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
+    }
+
+    private var detailsLoadingIdentity: String {
+        "details|\(stableMetadataCacheKey)"
+    }
+
     private func prepareForCurrentItem() {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            let metadataKey = item.posterCacheKey ?? item.id
+            let metadataKey = stableMetadataCacheKey
             tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
-            tmdbEpisode = VideoDetailsMemoryCache.episodes[metadataKey]
+            tmdbEpisode = item.relatedEpisodes.isEmpty
+                ? VideoDetailsMemoryCache.episodes[metadataKey]
+                : nil
             thePornDBMetadata = ThePornDBSettings.isEnabled
                 ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
                 : nil
@@ -658,6 +724,7 @@ struct VideoDetailsView: View {
                         }
                     }.padding(.vertical, 3).padding(.horizontal, 1)
                 }
+                .environment(\.layoutDirection, .leftToRight)
                 .onAppear { scrollToSelectedEpisode(using: proxy) }
                 .onChange(of: item.id) { _ in scrollToSelectedEpisode(using: proxy) }
             }

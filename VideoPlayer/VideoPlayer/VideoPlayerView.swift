@@ -4,6 +4,7 @@ import AVFoundation
 import UIKit
 import MobileVLCKit
 import UniformTypeIdentifiers
+import CoreFoundation
 
 // MARK: - Player screen
 
@@ -38,7 +39,7 @@ struct VideoPlayerView: View {
     @State private var showPlaybackSettings = false
     @State private var showQuickSettings = false
     @State private var showEpisodePicker = false
-    @State private var subtitleSize: Double = 1.0
+    @State private var subtitleSize: Double = 24
     @State private var subtitleColor: PlayerSubtitleColor = .white
     @State private var selectedAudioTrack = ""
     @State private var selectedSubtitleTrack = "Off"
@@ -228,7 +229,7 @@ struct VideoPlayerView: View {
                 VStack {
                     Spacer()
                     Text(cue.text)
-                        .font(.system(size: 22 * subtitleSize, weight: .semibold, design: subtitleFont.design))
+                        .font(.system(size: subtitleSize, weight: .semibold, design: subtitleFont.design))
                         .foregroundColor(subtitleColor.color)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 12)
@@ -251,7 +252,7 @@ struct VideoPlayerView: View {
                 .transition(.opacity)
             }
         }
-        .sheet(isPresented: $showPlaybackSettings, onDismiss: { scheduleAutoHide() }) {
+        .fullScreenCover(isPresented: $showPlaybackSettings, onDismiss: { scheduleAutoHide() }) {
             PlayerAdvancedSettingsSheet(
                 selectedAudioTrack: $selectedAudioTrack,
                 subtitleSize: $subtitleSize,
@@ -479,12 +480,32 @@ struct VideoPlayerView: View {
         let scoped = fileURL.startAccessingSecurityScopedResource()
         defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
         guard let data = try? Data(contentsOf: fileURL),
-              let content = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else { return }
+              let content = decodeSubtitleText(data) else { return }
         let cues = ExternalSubtitleParser.parse(content)
         guard !cues.isEmpty else { return }
         externalSubtitleCues = cues
         externalSubtitleFileName = fileURL.lastPathComponent
         selectedSubtitleTrack = fileURL.lastPathComponent
+    }
+
+    private func decodeSubtitleText(_ data: Data) -> String? {
+        // Most Arabic subtitle files are UTF-8, UTF-16, or legacy Windows-1256.
+        // Trying the exact encodings avoids mojibake and replacement symbols.
+        let windowsArabic = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+            CFStringConvertWindowsCodepageToEncoding(1256)
+        ))
+        let hasUTF16BOM = data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF])
+        let encodings: [String.Encoding] = hasUTF16BOM
+            ? [.utf16, .utf16LittleEndian, .utf16BigEndian, .utf8, windowsArabic]
+            : [.utf8, windowsArabic, .utf16, .utf16LittleEndian, .utf16BigEndian]
+        for encoding in encodings {
+            if let value = String(data: data, encoding: encoding),
+               !value.isEmpty,
+               !value.contains("\u{FFFD}") {
+                return value.replacingOccurrences(of: "\r\n", with: "\n")
+            }
+        }
+        return nil
     }
 
     private var seriesDisplayName: String {
@@ -1463,94 +1484,272 @@ private struct PlayerAdvancedSettingsSheet: View {
     let onChooseSubtitleFile: () -> Void
     let onDisableSubtitles: () -> Void
     let onRateChange: (Float) -> Void
-    @State private var section = 0
+    @State private var section = 2
+
+    private let subtitleSizes: [Double] = [16, 18, 20, 22, 24, 26, 28, 32, 36, 40]
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 12) {
-                Picker("Section", selection: $section) {
-                    Label("Video", systemImage: "video.fill").tag(0)
-                    Label("Audio", systemImage: "speaker.wave.2.fill").tag(1)
-                    Label("Subtitles", systemImage: "captions.bubble.fill").tag(2)
-                }.pickerStyle(.segmented).padding(.horizontal, 18)
-                ScrollView {
-                    VStack(spacing: 14) {
-                        if section == 0 { videoSection }
-                        else if section == 1 { audioSection }
-                        else { subtitleSection }
-                    }.padding(18)
+            ZStack {
+                Color.black.ignoresSafeArea()
+                LinearGradient(
+                    colors: [AppPalette.accent.opacity(0.18), .clear, Color.blue.opacity(0.08)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ).ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    sectionPicker.padding(.horizontal, 18).padding(.bottom, 10)
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 14) {
+                            if section == 0 { videoSection }
+                            else if section == 1 { audioSection }
+                            else { subtitleSection }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .padding(.bottom, 36)
+                    }
                 }
             }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("Advanced Options")
+            .navigationTitle("Advanced")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(width: 34, height: 34)
+                            .background(Color.white.opacity(0.1), in: Circle())
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(AppPalette.accent)
+                }
+            }
+            .toolbarColorScheme(.dark, for: .navigationBar)
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
+    }
+
+    private var sectionPicker: some View {
+        HStack(spacing: 7) {
+            sectionButton("Video", icon: "play.rectangle.fill", value: 0)
+            sectionButton("Audio", icon: "waveform", value: 1)
+            sectionButton("Subtitles", icon: "captions.bubble.fill", value: 2)
+        }
+        .padding(5)
+        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func sectionButton(_ title: String, icon: String, value: Int) -> some View {
+        Button { withAnimation(.easeInOut(duration: 0.2)) { section = value } } label: {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 38)
+                .foregroundStyle(section == value ? Color.white : Color.white.opacity(0.55))
+                .background(section == value ? AppPalette.diagonalGradient : LinearGradient(colors: [.clear, .clear], startPoint: .leading, endPoint: .trailing),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private var videoSection: some View {
         VStack(spacing: 14) {
             card("Brightness", icon: "sun.max.fill") {
                 Slider(value: Binding(get: { brightness }, set: { brightness = $0; onBrightnessChange($0) }), in: 0.05...1)
+                    .tint(AppPalette.accent)
             }
             card("Aspect Ratio", icon: "aspectratio.fill") {
-                Button(isFillMode ? "Fit to Screen" : "Fill Screen", action: onAspectRatioToggle).buttonStyle(.borderedProminent).tint(AppPalette.accent)
+                optionRow(isFillMode ? "Fill Screen" : "Fit to Screen", detail: "Tap to change", selected: true, action: onAspectRatioToggle)
             }
-            card("Playback Speed", icon: "speedometer") {
-                speedButtons
-            }
+            card("Playback Speed", icon: "speedometer") { speedButtons }
         }
     }
 
     private var audioSection: some View {
-        VStack(spacing: 14) {
-            card("Audio Track", icon: "music.note") {
-                if audioTracks.count > 1 {
-                    ForEach(audioTracks) { track in
-                        Button { selectedAudioTrack = track.id; onAudioTrackChange(track.id) } label: {
-                            HStack { Text(track.title); Spacer(); if (selectedAudioTrack.isEmpty ? selectedAudioTrackID : selectedAudioTrack) == track.id { Image(systemName: "checkmark.circle.fill") } }
-                        }.foregroundColor(.primary).padding(.vertical, 5)
+        card("Audio Track", icon: "music.note") {
+            if audioTracks.count > 1 {
+                ForEach(audioTracks) { track in
+                    optionRow(track.title, detail: nil,
+                              selected: (selectedAudioTrack.isEmpty ? selectedAudioTrackID : selectedAudioTrack) == track.id) {
+                        selectedAudioTrack = track.id
+                        onAudioTrackChange(track.id)
                     }
-                } else { Text("This video has one audio track").foregroundColor(.secondary) }
+                }
+            } else {
+                emptyState("This video has one audio track", icon: "speaker.wave.2")
             }
         }
     }
 
     private var subtitleSection: some View {
         VStack(spacing: 14) {
-            card("Subtitle Track", icon: "captions.bubble.fill") {
-                Button("None", action: onDisableSubtitles)
+            subtitlePreview
+            card("Subtitle Source", icon: "captions.bubble.fill") {
+                optionRow("None", detail: nil, selected: selectedSubtitleTrackID == nil && subtitleFileName == nil, action: onDisableSubtitles)
                 ForEach(subtitleTracks) { track in
-                    Button { onSubtitleTrackChange(track.id) } label: {
-                        HStack { Text(track.title); Spacer(); if selectedSubtitleTrackID == track.id && subtitleFileName == nil { Image(systemName: "checkmark.circle.fill") } }
-                    }.foregroundColor(.primary)
+                    optionRow(track.title, detail: "Embedded", selected: selectedSubtitleTrackID == track.id && subtitleFileName == nil) {
+                        onSubtitleTrackChange(track.id)
+                    }
                 }
-                Button(subtitleFileName ?? "Choose from Files", action: onChooseSubtitleFile)
+                optionRow(subtitleFileName ?? "Choose from Files", detail: subtitleFileName == nil ? "SRT or VTT" : "External file", selected: subtitleFileName != nil, action: onChooseSubtitleFile)
             }
-            card("Appearance", icon: "textformat") {
-                Picker("Font", selection: $subtitleFont) { ForEach(PlayerSubtitleFont.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-                HStack { Text("Size"); Slider(value: $subtitleSize, in: 0.75...1.75, step: 0.25) }
-                HStack { Text("Color"); Spacer(); ForEach(PlayerSubtitleColor.allCases) { color in Button { subtitleColor = color } label: { Circle().fill(color.color).frame(width: 27, height: 27).overlay(Circle().stroke(AppPalette.accent, lineWidth: subtitleColor == color ? 3 : 0)) } } }
-                Toggle("Text Shadow", isOn: $subtitleShadow)
-                Toggle("Background", isOn: $subtitleBackground)
+            card("Font", icon: "textformat") {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 9) {
+                    ForEach(PlayerSubtitleFont.allCases) { font in
+                        choiceTile(font.rawValue, selected: subtitleFont == font) { subtitleFont = font }
+                    }
+                }
             }
-            card("Timing & Position", icon: "slider.horizontal.3") {
-                HStack { Text("Delay"); Slider(value: $subtitleDelay, in: -10...10, step: 0.25); Text(String(format: "%+.2fs", subtitleDelay)).monospacedDigit().frame(width: 62) }
-                HStack { Text("Height"); Slider(value: $subtitleHeight, in: 0...180, step: 5); Text("\(Int(subtitleHeight))").frame(width: 34) }
+            card("Font Size", icon: "textformat.size") {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
+                    ForEach(subtitleSizes, id: \.self) { size in
+                        numberButton(Int(size), selected: subtitleSize == size) { subtitleSize = size }
+                    }
+                }
+            }
+            card("Text Style", icon: "paintpalette.fill") {
+                HStack(spacing: 12) {
+                    ForEach(PlayerSubtitleColor.allCases) { color in
+                        Button { subtitleColor = color } label: {
+                            Circle().fill(color.color).frame(width: 34, height: 34)
+                                .overlay(Circle().stroke(Color.white, lineWidth: subtitleColor == color ? 3 : 0))
+                                .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1).padding(3))
+                        }.buttonStyle(.plain)
+                    }
+                    Spacer()
+                }
+                toggleRow("Text Shadow", icon: "circle.lefthalf.filled", isOn: $subtitleShadow)
+                toggleRow("Background", icon: "rectangle.fill", isOn: $subtitleBackground)
+            }
+            card("Timing", icon: "clock.arrow.circlepath") {
+                numericStepper("Subtitle Delay", value: subtitleDelay, display: String(format: "%+.2f s", subtitleDelay)) {
+                    subtitleDelay = max(-10, subtitleDelay - 0.25)
+                } increment: {
+                    subtitleDelay = min(10, subtitleDelay + 0.25)
+                }
+                numericStepper("Vertical Position", value: subtitleHeight, display: "\(Int(subtitleHeight)) pt") {
+                    subtitleHeight = max(0, subtitleHeight - 5)
+                } increment: {
+                    subtitleHeight = min(180, subtitleHeight + 5)
+                }
             }
         }
     }
 
+    private var subtitlePreview: some View {
+        ZStack {
+            LinearGradient(colors: [Color.indigo.opacity(0.55), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
+            Text("Arabic subtitle preview\nمرحباً، ستظهر الترجمة العربية بشكل صحيح")
+                .font(.system(size: min(subtitleSize, 28), weight: .semibold, design: subtitleFont.design))
+                .foregroundStyle(subtitleColor.color)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(subtitleBackground ? Color.black.opacity(0.58) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                .shadow(color: subtitleShadow ? .black : .clear, radius: 4)
+                .padding(16)
+        }
+        .frame(height: 126)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.1)))
+    }
+
     private var speedButtons: some View {
-        HStack(spacing: 7) { ForEach([0.5, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in Button("\(speed, specifier: "%g")×") { onRateChange(Float(speed)) }.buttonStyle(.bordered).tint(AppPalette.accent) } }
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+            ForEach([0.5, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
+                Button("\(speed, specifier: "%g")×") { onRateChange(Float(speed)) }
+                    .buttonStyle(PlayerSettingsChipStyle())
+            }
+        }
     }
 
     private func card<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) { Label(title, systemImage: icon).font(.headline).foregroundColor(AppPalette.accent); content() }
-            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        VStack(alignment: .leading, spacing: 14) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(Color.white)
+            content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.08)))
+    }
+
+    private func optionRow(_ title: String, detail: String?, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(.white).lineLimit(2)
+                    if let detail { Text(detail).font(.caption).foregroundStyle(.white.opacity(0.45)) }
+                }
+                Spacer()
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? AppPalette.accent : Color.white.opacity(0.22))
+            }
+            .padding(.horizontal, 12).frame(minHeight: 48)
+            .background(Color.white.opacity(selected ? 0.09 : 0.035), in: RoundedRectangle(cornerRadius: 13))
+        }.buttonStyle(.plain)
+    }
+
+    private func choiceTile(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack { Text(title); Spacer(); if selected { Image(systemName: "checkmark") } }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(selected ? Color.white : Color.white.opacity(0.62))
+                .padding(.horizontal, 12).frame(height: 44)
+                .background(selected ? AppPalette.accent.opacity(0.3) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? AppPalette.accent : .clear))
+        }.buttonStyle(.plain)
+    }
+
+    private func numberButton(_ number: Int, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("\(number)").font(.system(size: 14, weight: .bold, design: .rounded)).monospacedDigit()
+                .frame(maxWidth: .infinity).frame(height: 40)
+                .foregroundStyle(selected ? Color.white : Color.white.opacity(0.55))
+                .background(selected ? AppPalette.diagonalGradient : LinearGradient(colors: [.clear, .clear], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.white.opacity(selected ? 0.18 : 0.06)))
+        }.buttonStyle(.plain)
+    }
+
+    private func toggleRow(_ title: String, icon: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) { Label(title, systemImage: icon).font(.system(size: 14, weight: .medium)) }
+            .tint(AppPalette.accent)
+            .padding(.top, 4)
+    }
+
+    private func numericStepper(_ title: String, value: Double, display: String, decrement: @escaping () -> Void, increment: @escaping () -> Void) -> some View {
+        HStack {
+            Text(title).font(.system(size: 14, weight: .medium))
+            Spacer()
+            Button(action: decrement) { Image(systemName: "minus").frame(width: 34, height: 34) }
+            Text(display).font(.system(size: 13, weight: .bold, design: .monospaced)).frame(width: 78)
+            Button(action: increment) { Image(systemName: "plus").frame(width: 34, height: 34) }
+        }
+        .foregroundStyle(.white)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 13))
+    }
+
+    private func emptyState(_ text: String, icon: String) -> some View {
+        Label(text, systemImage: icon).font(.subheadline).foregroundStyle(.white.opacity(0.5)).padding(.vertical, 12)
+    }
+}
+
+private struct PlayerSettingsChipStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity).frame(height: 40)
+            .background(Color.white.opacity(configuration.isPressed ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 11))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
 }
 
