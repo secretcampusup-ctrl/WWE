@@ -446,6 +446,19 @@ struct VideoDetailsView: View {
                         if let details = tmdbDetails, details.director != nil || !details.cast.isEmpty {
                             movieCastAndCrew(details)
                         }
+
+                        if !recentMovieLinks.isEmpty {
+                            movieRecentlyAddedSection
+                        }
+
+                        VStack(spacing: 3) {
+                            Text("\(item.source) · \(item.fileExtension.uppercased())")
+                            Text("My Library · Movies")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.34))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 8)
                     }
                     .padding(.horizontal, 18)
                     .padding(.bottom, 42)
@@ -476,6 +489,28 @@ struct VideoDetailsView: View {
     }
 
     private var movieTitleTreatment: some View {
+        Group {
+            if let logoURL = tmdbDetails?.logoURL {
+                AsyncImage(url: logoURL) { phase in
+                    if let image = phase.image {
+                        image.resizable().scaledToFit()
+                    } else if phase.error != nil {
+                        fallbackMovieTitle
+                    } else {
+                        ProgressView().tint(.white)
+                    }
+                }
+                .frame(maxWidth: 270, minHeight: 72, maxHeight: 122)
+            } else {
+                fallbackMovieTitle
+            }
+        }
+        .shadow(color: .black.opacity(0.92), radius: 5, x: 0, y: 3)
+        .shadow(color: .black.opacity(0.6), radius: 14)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var fallbackMovieTitle: some View {
         Text(tmdbDetails?.title.uppercased() ?? item.displayTitle.uppercased())
             .font(.system(size: 38, weight: .black, design: .rounded))
             .italic()
@@ -484,9 +519,6 @@ struct VideoDetailsView: View {
             .lineLimit(2)
             .minimumScaleFactor(0.55)
             .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.95), radius: 4, x: 0, y: 3)
-            .shadow(color: .black.opacity(0.65), radius: 12)
-            .frame(maxWidth: .infinity)
     }
 
     private var movieDataRow: some View {
@@ -561,8 +593,6 @@ struct VideoDetailsView: View {
 
     private var movieActionRow: some View {
         HStack {
-            movieActionButton(icon: "arrow.down.circle", action: startDownload)
-            Spacer()
             movieActionButton(icon: vm.isFavorite(item) ? "heart.fill" : "heart") { _ = vm.toggleFavorite(item) }
             Spacer()
             movieActionButton(icon: "text.badge.plus") { showPlaylistPicker = true }
@@ -634,6 +664,81 @@ struct VideoDetailsView: View {
             Text(role).font(.system(size: 9)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
         }
         .frame(width: 78)
+    }
+
+    private var recentMovieLinks: [SavedVideoLink] {
+        vm.savedLinks
+            .filter { link in
+                link.id.uuidString != item.id &&
+                VideoTitleFormatter.seasonEpisode(from: link.title) == nil &&
+                link.displayTitle.caseInsensitiveCompare(item.displayTitle) != .orderedSame
+            }
+            .sorted { $0.dateAdded > $1.dateAdded }
+            .prefix(12)
+            .map { $0 }
+    }
+
+    private var movieRecentlyAddedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recently Added")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(recentMovieLinks) { link in
+                        Button {
+                            dismiss()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                vm.playSavedLink(link)
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ZStack(alignment: .bottomTrailing) {
+                                    PosterThumbnailView(
+                                        url: link.url,
+                                        remotePosterURL: link.remotePosterURL.flatMap { URL(string: $0) },
+                                        customFileName: link.thumbnailFileName,
+                                        stableCacheKey: link.favoriteIdentity ?? "saved|\(link.id.uuidString)",
+                                        title: link.title,
+                                        badge: link.fileExtension,
+                                        preferredTier: .small
+                                    )
+                                    .frame(width: 92, height: 134)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                    Text(link.resolutionTier.badgeText ?? "HD")
+                                        .font(.system(size: 8, weight: .black, design: .rounded))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 5).padding(.vertical, 3)
+                                        .background(Color.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 5))
+                                        .padding(5)
+                                }
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.15)))
+
+                                Text(link.displayTitle)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .frame(width: 92, alignment: .leading)
+                                Text(recentDateLabel(link.dateAdded))
+                                    .font(.system(size: 8.5, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.48))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func recentDateLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     private var preview: some View {

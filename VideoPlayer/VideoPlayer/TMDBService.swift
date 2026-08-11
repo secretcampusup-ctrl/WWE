@@ -41,6 +41,7 @@ struct TMDBTitleDetails: Identifiable, Codable {
     let productionCountries: [String]?
     let certification: String?
     let director: TMDBCrewMember?
+    let logoPath: String?
 
     var isSeries: Bool { mediaType == "tv" }
     var posterURL: URL? {
@@ -51,6 +52,10 @@ struct TMDBTitleDetails: Identifiable, Codable {
     var imageURL: URL? {
         guard let path = backdropPath ?? posterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/w1280\(path)")
+    }
+    var logoURL: URL? {
+        guard let logoPath else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/w500\(logoPath)")
     }
 }
 
@@ -99,7 +104,7 @@ actor TMDBService {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TMDBMetadata", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        cacheURL = directory.appendingPathComponent("metadata-v3.json")
+        cacheURL = directory.appendingPathComponent("metadata-v4.json")
         if let data = try? Data(contentsOf: cacheURL),
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
@@ -157,7 +162,10 @@ actor TMDBService {
         guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else { return nil }
         do {
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
-            let payload: DetailPayload = try await request(endpoint, query: ["append_to_response": "credits,videos,release_dates"])
+            let payload: DetailPayload = try await request(endpoint, query: [
+                "append_to_response": "credits,videos,release_dates,images",
+                "include_image_language": "en,null"
+            ])
             let trailers = payload.videos?.results ?? []
             let trailer = trailers.first { $0.site == "YouTube" && $0.type == "Trailer" && $0.official == true }
                 ?? trailers.first { $0.site == "YouTube" && $0.type == "Trailer" }
@@ -177,7 +185,9 @@ actor TMDBService {
                 runtimeMinutes: payload.runtime,
                 productionCountries: payload.productionCountries?.map(\.name),
                 certification: certification,
-                director: payload.credits?.crew.first(where: { $0.job == "Director" })
+                director: payload.credits?.crew.first(where: { $0.job == "Director" }),
+                logoPath: payload.images?.logos.first(where: { $0.iso6391 == "en" })?.filePath
+                    ?? payload.images?.logos.first?.filePath
             )
             detailsCache[cacheKey] = details
             persistCache()
@@ -348,13 +358,15 @@ private struct DetailPayload: Decodable {
     let releaseDate: String?; let firstAirDate: String?; let voteAverage: Double?; let runtime: Int?
     let genres: [TMDBGenre]?; let seasons: [TMDBSeason]?
     let credits: Credits?; let videos: Videos?; let productionCountries: [ProductionCountry]?
-    let releaseDates: ReleaseDatesResponse?
+    let releaseDates: ReleaseDatesResponse?; let images: TMDBImagesPayload?
 }
 private struct Credits: Decodable { let cast: [TMDBCastMember]; let crew: [TMDBCrewMember] }
 private struct ProductionCountry: Decodable { let name: String }
 private struct ReleaseDatesResponse: Decodable { let results: [ReleaseDatesCountry] }
 private struct ReleaseDatesCountry: Decodable { let iso31661: String; let releaseDates: [ReleaseDateEntry] }
 private struct ReleaseDateEntry: Decodable { let certification: String }
+private struct TMDBImagesPayload: Decodable { let logos: [TMDBLogoPayload] }
+private struct TMDBLogoPayload: Decodable { let filePath: String; let iso6391: String? }
 private struct Videos: Decodable { let results: [Video] }
 private struct Video: Decodable { let key: String; let site: String; let type: String; let official: Bool? }
 
