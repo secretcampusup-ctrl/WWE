@@ -405,6 +405,13 @@ struct VideoPlayerView: View {
     }
 
     private func resetNetworkAfterPlaybackIfNeeded() {
+        // Clear the active-playback guard on every close, even if the network
+        // reset below already ran once for this view instance — otherwise a
+        // reused player instance would leave a stale URL marked "playing"
+        // forever, permanently blocking that item's thumbnail from generating.
+        if ActivePlaybackGuard.currentURL?.absoluteString == url.absoluteString {
+            ActivePlaybackGuard.currentURL = nil
+        }
         guard !didResetNetworkAfterPlayback else { return }
         didResetNetworkAfterPlayback = true
         HighPriorityNetworkManager.shared.resetAfterPlayback()

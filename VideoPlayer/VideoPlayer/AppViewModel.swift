@@ -610,6 +610,7 @@ class AppViewModel: ObservableObject {
             contentType: "video"
         )
         nowPlayingURL = playbackURL
+        ActivePlaybackGuard.currentURL = playbackURL
 
         // Let the player transition appear first; moving the library card before
         // the cover opens causes a visible jump in the library.
@@ -872,6 +873,7 @@ class AppViewModel: ObservableObject {
         nowPlaying = nil
         nowPlayingURL = nil
         nowPlayingHeaders = nil
+        ActivePlaybackGuard.currentURL = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.isLoading = false }
@@ -902,6 +904,7 @@ class AppViewModel: ObservableObject {
         nowPlayingResumeAt = 0
         nowPlayingLinkId = nil
         nowPlaying = nil
+        ActivePlaybackGuard.currentURL = nil
     }
 
     // MARK: - Open any link (direct / HLS / PikPak share / magnet via PikPak)

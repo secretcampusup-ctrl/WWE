@@ -7,6 +7,29 @@ import CryptoKit
 import Kingfisher
 import KingfisherWebP
 
+// MARK: - Active playback guard
+
+/// Tracks the URL that's currently streaming to the player, so on-demand
+/// thumbnail generation never opens a second connection to that same URL
+/// while it's live. Some CDNs (e.g. PikPak) throttle a signed URL as soon as
+/// they see two concurrent connections to it, which stalls the real playback
+/// request — and since it's the same URL, waiting instead of skipping would
+/// just recreate the problem the moment the probe fires. AppViewModel updates
+/// this whenever `nowPlayingURL` changes.
+enum ActivePlaybackGuard {
+    private static let lock = NSLock()
+    private static var _url: URL?
+
+    static var currentURL: URL? {
+        get { lock.lock(); defer { lock.unlock() }; return _url }
+        set { lock.lock(); _url = newValue; lock.unlock() }
+    }
+
+    static func isActive(_ url: URL) -> Bool {
+        currentURL?.absoluteString == url.absoluteString
+    }
+}
+
 // MARK: - Diagnostic Logger
 
 /// In-memory logging system for thumbnail diagnostics
@@ -584,6 +607,12 @@ enum VideoThumbnailLoader {
         // remote URL, downloading) video bytes automatically. Skip unless the caller is a
         // manual, user-initiated action.
         guard isAutomaticDownloadEnabled else { return nil }
+
+        // Never open a second connection to the exact URL that's actively streaming —
+        // see ActivePlaybackGuard. The Recent list re-renders this item's cell the
+        // instant playback starts, and without this check it would race the real
+        // player connection for the same signed CDN URL.
+        guard !ActivePlaybackGuard.isActive(remote) else { return nil }
 
         return await requestCoordinator.image(for: "\(cacheKeyStr)|\(Int(targetPixelSize.width))x\(Int(targetPixelSize.height))") { [remote, headers] in
             let image: UIImage?
