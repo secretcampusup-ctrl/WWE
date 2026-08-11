@@ -359,6 +359,25 @@ final class VideoPlaybackEngine: ObservableObject {
         }
     }
 
+    /// Applies styling to AVFoundation-rendered embedded captions immediately.
+    func applySubtitleStyle(fontSize: Double, fontFamily: String, color: UIColor, background: Bool) {
+        guard let item = player.currentItem else { return }
+        var red: CGFloat = 1, green: CGFloat = 1, blue: CGFloat = 1, alpha: CGFloat = 1
+        color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        var attributes: [String: Any] = [
+            kCMTextMarkupAttribute_ForegroundColorARGB as String: [alpha, red, green, blue],
+            kCMTextMarkupAttribute_RelativeFontSize as String: max(50, min(220, fontSize / 24 * 100)),
+            kCMTextMarkupAttribute_FontFamilyName as String: fontFamily,
+            kCMTextMarkupAttribute_BoldStyle as String: true
+        ]
+        if background {
+            attributes[kCMTextMarkupAttribute_CharacterBackgroundColorARGB as String] = [0.62, 0, 0, 0]
+        } else {
+            attributes[kCMTextMarkupAttribute_CharacterBackgroundColorARGB as String] = [0, 0, 0, 0]
+        }
+        item.textStyleRules = [AVTextStyleRule(textMarkupAttributes: attributes)]
+    }
+
     private func refreshSubtitleTracks(for item: AVPlayerItem) {
         guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
             subtitleTracks = []; subtitleOptionsByID = [:]; selectedSubtitleTrackID = nil; return

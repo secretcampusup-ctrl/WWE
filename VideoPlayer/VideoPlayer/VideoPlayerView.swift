@@ -39,19 +39,19 @@ struct VideoPlayerView: View {
     @State private var showPlaybackSettings = false
     @State private var showQuickSettings = false
     @State private var showEpisodePicker = false
-    @State private var subtitleSize: Double = 24
-    @State private var subtitleColor: PlayerSubtitleColor = .white
+    @State private var subtitleSize: Double = UserDefaults.standard.object(forKey: "player.subtitle.size") as? Double ?? 24
+    @State private var subtitleColor: PlayerSubtitleColor = PlayerSubtitleColor(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.color") ?? "") ?? .white
     @State private var selectedAudioTrack = ""
     @State private var selectedSubtitleTrack = "Off"
     @State private var showSubtitleImporter = false
     @State private var externalSubtitleCues: [ExternalSubtitleCue] = []
     @State private var externalSubtitleFileName: String?
     @State private var screenBrightness: Double = 0.5
-    @State private var subtitleDelay: Double = 0
-    @State private var subtitleHeight: Double = 0
-    @State private var subtitleShadow = true
-    @State private var subtitleBackground = true
-    @State private var subtitleFont: PlayerSubtitleFont = .rounded
+    @State private var subtitleDelay: Double = UserDefaults.standard.object(forKey: "player.subtitle.delay") as? Double ?? 0
+    @State private var subtitleHeight: Double = UserDefaults.standard.object(forKey: "player.subtitle.height") as? Double ?? 0
+    @State private var subtitleShadow = UserDefaults.standard.object(forKey: "player.subtitle.shadow") as? Bool ?? true
+    @State private var subtitleBackground = UserDefaults.standard.object(forKey: "player.subtitle.background") as? Bool ?? true
+    @State private var subtitleFont: PlayerSubtitleFont = PlayerSubtitleFont(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.font") ?? "") ?? .rounded
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
 
@@ -81,7 +81,14 @@ struct VideoPlayerView: View {
                     resumeAt: resumeAt,
                     isFillMode: mkvFillMode,
                     resetZoomToken: mkvResetZoomToken,
-                    httpHeaders: httpHeaders
+                    httpHeaders: httpHeaders,
+                    subtitleSize: subtitleSize,
+                    subtitleFontName: subtitleFont.vlcFontName,
+                    subtitleColorValue: subtitleColor.vlcColorValue,
+                    subtitleBackground: subtitleBackground,
+                    subtitleShadow: subtitleShadow,
+                    subtitleHeight: Int(subtitleHeight),
+                    subtitleDelay: subtitleDelay
                 )
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
@@ -252,7 +259,10 @@ struct VideoPlayerView: View {
                 .transition(.opacity)
             }
         }
-        .fullScreenCover(isPresented: $showPlaybackSettings, onDismiss: { scheduleAutoHide() }) {
+        .fullScreenCover(isPresented: $showPlaybackSettings, onDismiss: {
+            applySubtitlePreferences()
+            scheduleAutoHide()
+        }) {
             PlayerAdvancedSettingsSheet(
                 selectedAudioTrack: $selectedAudioTrack,
                 subtitleSize: $subtitleSize,
@@ -322,6 +332,16 @@ struct VideoPlayerView: View {
             }
             if !usesMKVPlayer {
                 engine.load(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders)
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    guard !Task.isCancelled else { return }
+                    engine.applySubtitleStyle(
+                        fontSize: subtitleSize,
+                        fontFamily: subtitleFont.appleFontFamily,
+                        color: subtitleColor.uiColor,
+                        background: subtitleBackground
+                    )
+                }
             }
             scheduleAutoHide()
         }
@@ -486,6 +506,8 @@ struct VideoPlayerView: View {
         externalSubtitleCues = cues
         externalSubtitleFileName = fileURL.lastPathComponent
         selectedSubtitleTrack = fileURL.lastPathComponent
+        if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
+        else { engine.selectSubtitleTrack(id: nil) }
     }
 
     private func decodeSubtitleText(_ data: Data) -> String? {
@@ -506,6 +528,33 @@ struct VideoPlayerView: View {
             }
         }
         return nil
+    }
+
+    private func applySubtitlePreferences() {
+        let defaults = UserDefaults.standard
+        defaults.set(subtitleSize, forKey: "player.subtitle.size")
+        defaults.set(subtitleColor.rawValue, forKey: "player.subtitle.color")
+        defaults.set(subtitleDelay, forKey: "player.subtitle.delay")
+        defaults.set(subtitleHeight, forKey: "player.subtitle.height")
+        defaults.set(subtitleShadow, forKey: "player.subtitle.shadow")
+        defaults.set(subtitleBackground, forKey: "player.subtitle.background")
+        defaults.set(subtitleFont.rawValue, forKey: "player.subtitle.font")
+
+        engine.applySubtitleStyle(
+            fontSize: subtitleSize,
+            fontFamily: subtitleFont.appleFontFamily,
+            color: subtitleColor.uiColor,
+            background: subtitleBackground
+        )
+        mkvControls.applySubtitleStyle(
+            fontSize: subtitleSize,
+            fontName: subtitleFont.vlcFontName,
+            color: subtitleColor.vlcColorValue,
+            background: subtitleBackground,
+            shadow: subtitleShadow,
+            margin: Int(subtitleHeight),
+            delay: subtitleDelay
+        )
     }
 
     private var seriesDisplayName: String {
@@ -813,6 +862,9 @@ private final class MKVPlaybackControls: ObservableObject {
     func setRate(_ rate: Float) { surface?.setRate(rate) }
     func selectAudioTrack(id: String) { surface?.selectAudioTrack(id: id) }
     func selectSubtitleTrack(id: String?) { surface?.selectSubtitleTrack(id: id) }
+    func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
+        surface?.applySubtitleStyle(fontSize: fontSize, fontName: fontName, color: color, background: background, shadow: shadow, margin: margin, delay: delay)
+    }
     func updateEmbeddedTracks(
         audio: [PlayerAudioTrackOption],
         subtitles: [PlayerSubtitleTrackOption],
@@ -841,6 +893,13 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
     var isFillMode = false
     var resetZoomToken = 0
     var httpHeaders: [String: String]? = nil
+    let subtitleSize: Double
+    let subtitleFontName: String
+    let subtitleColorValue: Int
+    let subtitleBackground: Bool
+    let subtitleShadow: Bool
+    let subtitleHeight: Int
+    let subtitleDelay: Double
     var onSingleTap: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> MKVPlayerSurface {
@@ -848,6 +907,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         view.controls = controls
         view.onSingleTap = onSingleTap
         view.setFillMode(isFillMode)
+        view.configureInitialSubtitleStyle(fontSize: subtitleSize, fontName: subtitleFontName, color: subtitleColorValue, background: subtitleBackground, shadow: subtitleShadow, margin: subtitleHeight, delay: subtitleDelay)
         view.play(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
         return view
     }
@@ -871,6 +931,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private let videoView = UIView()
     private let loadingIndicator = UIActivityIndicatorView(style: .large)
     private var currentURL: URL?
+    private var currentHTTPHeaders: [String: String]?
+    private var subtitleStyle = (fontSize: 24.0, fontName: "Helvetica Neue", color: 0xFFFFFF, background: true, shadow: true, margin: 0, delay: 0.0)
     private var loadingTimer: Timer?
     private var videoSize: CGSize = .zero
     private var sourceFormat = "Video"
@@ -884,6 +946,10 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
     private lazy var tapGesture = UITapGestureRecognizer(target: self, action: #selector(togglePlayback))
     private lazy var doubleTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+
+    func configureInitialSubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
+        subtitleStyle = (fontSize: fontSize, fontName: fontName, color: color, background: background, shadow: shadow, margin: margin, delay: delay)
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -939,6 +1005,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
 
     func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
         currentURL = url
+        currentHTTPHeaders = httpHeaders
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
         controls?.isBuffering = true
@@ -961,6 +1028,13 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=500")
         media.addOption(":drop-late-frames")
+        media.addOption(":freetype-font=\(subtitleStyle.fontName)")
+        media.addOption(":freetype-fontsize=\(Int(subtitleStyle.fontSize))")
+        media.addOption(":freetype-color=\(subtitleStyle.color)")
+        media.addOption(":freetype-background-opacity=\(subtitleStyle.background ? 155 : 0)")
+        media.addOption(":freetype-shadow-opacity=\(subtitleStyle.shadow ? 255 : 0)")
+        media.addOption(":sub-margin=\(subtitleStyle.margin)")
+        media.addOption(":spu-delay=\(Int(subtitleStyle.delay * 1_000_000))")
         mediaPlayer.drawable = videoView
         mediaPlayer.media = media
         mediaPlayer.play()
@@ -1035,6 +1109,22 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let index = id.flatMap(Int32.init) ?? -1
         mediaPlayer.currentVideoSubTitleIndex = index
         controls?.selectedSubtitleTrackID = index >= 0 ? String(index) : nil
+    }
+
+    func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
+        subtitleStyle = (fontSize: fontSize, fontName: fontName, color: color, background: background, shadow: shadow, margin: margin, delay: delay)
+        guard let url = currentURL else { return }
+        let resumeAt = Double(mediaPlayer.time.intValue) / 1000
+        let selectedAudio = controls?.selectedAudioTrackID
+        let selectedSubtitle = controls?.selectedSubtitleTrackID
+        let wasPlaying = mediaPlayer.isPlaying
+        play(url: url, resumeAt: resumeAt, httpHeaders: currentHTTPHeaders)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self else { return }
+            if let selectedAudio { self.selectAudioTrack(id: selectedAudio) }
+            self.selectSubtitleTrack(id: selectedSubtitle)
+            if !wasPlaying { self.mediaPlayer.pause() }
+        }
     }
 
     func playIfNeeded(url: URL, httpHeaders: [String: String]? = nil) {
@@ -1315,6 +1405,12 @@ private enum PlayerSubtitleColor: String, CaseIterable, Identifiable {
     var color: Color {
         switch self { case .white: return .white; case .yellow: return .yellow; case .cyan: return .cyan }
     }
+    var uiColor: UIColor {
+        switch self { case .white: return .white; case .yellow: return .yellow; case .cyan: return .cyan }
+    }
+    var vlcColorValue: Int {
+        switch self { case .white: return 0xFFFFFF; case .yellow: return 0xFFFF00; case .cyan: return 0x00FFFF }
+    }
 }
 
 private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
@@ -1325,6 +1421,10 @@ private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
     var design: Font.Design {
         switch self { case .rounded: return .rounded; case .standard: return .default; case .monospaced: return .monospaced }
     }
+    var appleFontFamily: String {
+        switch self { case .rounded: return "Arial Rounded MT Bold"; case .standard: return "Helvetica Neue"; case .monospaced: return "Menlo" }
+    }
+    var vlcFontName: String { appleFontFamily }
 }
 
 private enum QuickSettingsPage { case main, speed, audio, subtitles }

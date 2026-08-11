@@ -361,6 +361,16 @@ enum VideoThumbnailLoader {
     static let stablePosterDidUpdateNotification = Notification.Name.stablePosterDidUpdate
     static let posterPrefetchDidFinishNotification = Notification.Name.posterPrefetchDidFinish
 
+    /// One poster identity shared by Details, Favorites, Recent and every provider list.
+    static func canonicalPosterCacheKey(for title: String) -> String {
+        let normalized = VideoTitleFormatter.title(from: title)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return "canonical-poster|\(normalized)"
+    }
+
     // MARK: - Cache API (for stable keys)
 
     private static func stableCacheFileURL(for key: String) -> URL {
@@ -1478,7 +1488,9 @@ struct PosterThumbnailView: View {
                 await load(targetPointSize: preferredTier.map { ThumbnailPipeline.targetPointSize(for: $0) } ?? targetSize)
             }
             .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
-                guard let stableCacheKey, notification.object as? String == stableCacheKey else { return }
+                let updatedKey = notification.object as? String
+                let canonicalKey = VideoThumbnailLoader.canonicalPosterCacheKey(for: title)
+                guard updatedKey == stableCacheKey || updatedKey == canonicalKey else { return }
                 Task { await load(targetPointSize: lastTargetPointSize) }
             }
         }
@@ -1530,10 +1542,42 @@ struct PosterThumbnailView: View {
             return
         }
 
-        // 2) Stable provider cover or previously generated thumbnail.
+        // Every screen resolves the same title-based key before its provider-specific key.
+        let canonicalKey = VideoThumbnailLoader.canonicalPosterCacheKey(for: title)
+        if let canonical = VideoThumbnailLoader.cachedImage(forStableKey: canonicalKey) {
+            image = canonical
+            if let stableCacheKey {
+                VideoThumbnailLoader.cacheImage(canonical, forStableKey: stableCacheKey)
+            }
+            return
+        }
+
+        // Favorites and Recent resolve TMDB themselves; opening Details is not
+        // required to populate the shared poster cache.
+        if !title.isEmpty, TMDBSettings.isConfigured {
+            await ThumbnailLoadGate.shared.acquire()
+            let details = await TMDBService.shared.details(for: title)
+            var tmdbPoster: UIImage?
+            if let posterURL = details?.posterURL,
+               let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: posterURL) {
+                tmdbPoster = UIImage(data: data)
+            }
+            await ThumbnailLoadGate.shared.release()
+            if let tmdbPoster {
+                image = tmdbPoster
+                VideoThumbnailLoader.cacheImage(tmdbPoster, forStableKey: canonicalKey)
+                if let resolvedStableCacheKey {
+                    VideoThumbnailLoader.cacheImage(tmdbPoster, forStableKey: resolvedStableCacheKey)
+                }
+                return
+            }
+        }
+
+        // Provider-specific artwork is the fallback after the shared TMDB poster.
         if let stableCacheKey,
            let stable = VideoThumbnailLoader.cachedImage(forStableKey: stableCacheKey) {
             image = stable
+            VideoThumbnailLoader.cacheImage(stable, forStableKey: canonicalKey)
             return
         }
 
@@ -1556,6 +1600,7 @@ struct PosterThumbnailView: View {
 
             if let downloaded {
                 image = downloaded
+                VideoThumbnailLoader.cacheImage(downloaded, forStableKey: canonicalKey)
                 VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=remotePoster result=success", level: .info, fileID: fileID)
                 print("[PikPakThumbnail] file=\(fileID) stage=remotePoster result=success")
                 return
@@ -1587,6 +1632,7 @@ struct PosterThumbnailView: View {
 
         if let frame {
             image = frame
+            VideoThumbnailLoader.cacheImage(frame, forStableKey: canonicalKey)
             VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=videoFrame result=success", level: .info, fileID: fileID)
             print("[PikPakThumbnail] file=\(fileID) stage=videoFrame result=success")
             return
@@ -1609,6 +1655,7 @@ struct PosterThumbnailView: View {
         if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query),
            let cover = metadata.coverImage {
             image = cover
+            VideoThumbnailLoader.cacheImage(cover, forStableKey: canonicalKey)
             if let resolvedStableCacheKey {
                 VideoThumbnailLoader.cacheImage(cover, forStableKey: resolvedStableCacheKey)
             }

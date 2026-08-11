@@ -287,6 +287,9 @@ struct VideoDetailsView: View {
             // Note: the ThePornDB cover/metadata fallback runs in its own `.task`
             // below (always on), so it isn't duplicated here.
         }
+        .onAppear {
+            prepareForCurrentItem()
+        }
         .onChange(of: item.id) { _ in
             prepareForCurrentItem()
         }
@@ -348,6 +351,7 @@ struct VideoDetailsView: View {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 frame = image
                 VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
+                VideoThumbnailLoader.cacheImage(image, forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
                 if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
             }
             guard tmdbDetails == nil else { return }
@@ -433,7 +437,7 @@ struct VideoDetailsView: View {
                         moviePlayButton
                         movieActionRow
 
-                        if let details = tmdbDetails, !details.overview.isEmpty {
+                        if let details = resolvedMovieDetails, !details.overview.isEmpty {
                             Text("\(details.title) — \(details.overview)")
                                 .font(.system(size: 12.5, weight: .regular))
                                 .foregroundStyle(.white.opacity(0.82))
@@ -443,7 +447,7 @@ struct VideoDetailsView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
 
-                        if let details = tmdbDetails, details.director != nil || !details.cast.isEmpty {
+                        if let details = resolvedMovieDetails, details.director != nil || !details.cast.isEmpty {
                             movieCastAndCrew(details)
                         }
 
@@ -490,16 +494,8 @@ struct VideoDetailsView: View {
 
     private var movieTitleTreatment: some View {
         Group {
-            if let logoURL = tmdbDetails?.logoURL {
-                AsyncImage(url: logoURL) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFit()
-                    } else if phase.error != nil {
-                        fallbackMovieTitle
-                    } else {
-                        ProgressView().tint(.white)
-                    }
-                }
+            if let logoURL = resolvedMovieDetails?.logoURL {
+                CachedTMDBImage(url: logoURL, contentMode: .fit)
                 .frame(maxWidth: 270, minHeight: 72, maxHeight: 122)
             } else {
                 fallbackMovieTitle
@@ -511,7 +507,7 @@ struct VideoDetailsView: View {
     }
 
     private var fallbackMovieTitle: some View {
-        Text(tmdbDetails?.title.uppercased() ?? item.displayTitle.uppercased())
+        Text(resolvedMovieDetails?.title.uppercased() ?? item.displayTitle.uppercased())
             .font(.system(size: 38, weight: .black, design: .rounded))
             .italic()
             .tracking(-1.6)
@@ -523,14 +519,14 @@ struct VideoDetailsView: View {
 
     private var movieDataRow: some View {
         HStack(spacing: 8) {
-            Label(tmdbDetails.map { String(format: "%.1f", $0.voteAverage) } ?? "-", systemImage: "star.fill")
+            Label(resolvedMovieDetails.map { String(format: "%.1f", $0.voteAverage) } ?? "-", systemImage: "star.fill")
                 .foregroundStyle(Color.yellow)
             movieDataDivider
             Text(movieReleaseDateLabel)
             movieDataDivider
-            Text(tmdbDetails?.productionCountries?.first ?? "-")
+            Text(resolvedMovieDetails?.productionCountries?.first ?? "-")
             movieDataDivider
-            Text(tmdbDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
+            Text(resolvedMovieDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
             movieDataDivider
             Text("[\(movieCertificationLabel)]")
         }
@@ -546,7 +542,7 @@ struct VideoDetailsView: View {
     }
 
     private var movieReleaseDateLabel: String {
-        guard let raw = tmdbDetails?.releaseDate else { return movieYearLabel }
+        guard let raw = resolvedMovieDetails?.releaseDate else { return movieYearLabel }
         let input = DateFormatter()
         input.locale = Locale(identifier: "en_US_POSIX")
         input.dateFormat = "yyyy-MM-dd"
@@ -558,7 +554,7 @@ struct VideoDetailsView: View {
     }
 
     private var movieCertificationLabel: String {
-        guard let value = tmdbDetails?.certification, !value.isEmpty else { return "NR" }
+        guard let value = resolvedMovieDetails?.certification, !value.isEmpty else { return "NR" }
         return value
     }
 
@@ -651,13 +647,7 @@ struct VideoDetailsView: View {
 
     private func moviePersonCard(name: String, role: String, imageURL: URL?) -> some View {
         VStack(spacing: 5) {
-            AsyncImage(url: imageURL) { phase in
-                if let image = phase.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    Image(systemName: "person.fill").resizable().scaledToFit().padding(18).foregroundStyle(.white.opacity(0.38))
-                }
-            }
+            CachedTMDBImage(url: imageURL, contentMode: .fill, placeholderSystemName: "person.fill")
             .frame(width: 66, height: 76)
             .background(Color.white.opacity(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -816,6 +806,7 @@ struct VideoDetailsView: View {
 
     private var displayedFrame: UIImage? {
         VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
             ?? frame
             ?? VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-episode|\(stableMetadataCacheKey)")
             ?? VideoThumbnailLoader.cachedImage(forStableKey: "details-artwork|\(stableMetadataCacheKey)")
@@ -1006,8 +997,12 @@ struct VideoDetailsView: View {
         return (item.relatedEpisodes.isEmpty ? "movie|" : "series|") + normalizedTitle
     }
 
+    private var resolvedMovieDetails: TMDBTitleDetails? {
+        tmdbDetails ?? VideoDetailsMemoryCache.details[stableMetadataCacheKey]
+    }
+
     private var movieYearLabel: String {
-        if let date = tmdbDetails?.releaseDate, date.count >= 4 {
+        if let date = resolvedMovieDetails?.releaseDate, date.count >= 4 {
             return String(date.prefix(4))
         }
         let pattern = #"(?<!\d)((?:19|20)\d{2})(?!\d)"#
@@ -1018,7 +1013,7 @@ struct VideoDetailsView: View {
     }
 
     private var movieRuntimeLabel: String {
-        if let minutes = tmdbDetails?.runtimeMinutes, minutes > 0 {
+        if let minutes = resolvedMovieDetails?.runtimeMinutes, minutes > 0 {
             let hours = minutes / 60
             let remainder = minutes % 60
             return hours > 0 ? "\(hours)h \(remainder)m" : "\(minutes)m"
@@ -1347,6 +1342,52 @@ struct VideoDetailsView: View {
 }
 
 // MARK: - إضافة الفيديو لقائمة تشغيل
+
+private struct CachedTMDBImage: View {
+    let url: URL?
+    let contentMode: ContentMode
+    var placeholderSystemName: String? = nil
+    @State private var image: UIImage?
+
+    init(url: URL?, contentMode: ContentMode, placeholderSystemName: String? = nil) {
+        self.url = url
+        self.contentMode = contentMode
+        self.placeholderSystemName = placeholderSystemName
+        let cached = url.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-remote|\($0.absoluteString)") }
+        _image = State(initialValue: cached)
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+            } else if let placeholderSystemName {
+                Image(systemName: placeholderSystemName)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(18)
+                    .foregroundStyle(.white.opacity(0.38))
+            } else {
+                Color.clear
+            }
+        }
+        .task(id: url) {
+            guard image == nil, let url else { return }
+            let key = "tmdb-remote|\(url.absoluteString)"
+            if let cached = VideoThumbnailLoader.cachedImage(forStableKey: key) {
+                image = cached
+                return
+            }
+            guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: url),
+                  let loaded = UIImage(data: data),
+                  !Task.isCancelled else { return }
+            VideoThumbnailLoader.cacheImage(loaded, forStableKey: key)
+            image = loaded
+        }
+    }
+}
 
 struct PlaylistPickerView: View {
     @ObservedObject var vm: AppViewModel

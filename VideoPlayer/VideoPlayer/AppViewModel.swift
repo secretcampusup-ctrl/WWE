@@ -174,11 +174,15 @@ class AppViewModel: ObservableObject {
     }
 
     private func cachePoster(for item: VideoDetailsItem, savedID: UUID) {
+        let canonicalKey = VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
         let image = item.customPosterImage
             ?? item.customPosterFileName.flatMap { VideoThumbnailLoader.loadCustomPoster(fileName: $0) }
             ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: canonicalKey)
         guard let image else { return }
         VideoThumbnailLoader.cacheImage(image, forStableKey: "saved|\(savedID.uuidString)")
+        VideoThumbnailLoader.cacheImage(image, forStableKey: item.id)
+        VideoThumbnailLoader.cacheImage(image, forStableKey: canonicalKey)
         if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
     }
     private func matches(_ link: SavedVideoLink, item: VideoDetailsItem) -> Bool {
