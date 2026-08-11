@@ -347,13 +347,17 @@ struct VideoPlayerView: View {
         }
         .onDisappear {
             hideTask?.cancel()
+            BackgroundVideoCacheManager.shared.cancelAllPrefetches()
             if !usesMKVPlayer {
                 if engine.durationSeconds > 0 {
                     onProgress?(engine.currentSeconds, engine.durationSeconds, engine.resolutionWidth, engine.resolutionHeight)
                 }
                 engine.cleanup()
-            } else if mkvControls.durationSeconds > 0 {
-                onProgress?(mkvControls.currentSeconds, mkvControls.durationSeconds, mkvControls.videoWidth, mkvControls.videoHeight)
+            } else {
+                if mkvControls.durationSeconds > 0 {
+                    onProgress?(mkvControls.currentSeconds, mkvControls.durationSeconds, mkvControls.videoWidth, mkvControls.videoHeight)
+                }
+                mkvControls.stop()
             }
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
@@ -862,6 +866,7 @@ private final class MKVPlaybackControls: ObservableObject {
     func setRate(_ rate: Float) { surface?.setRate(rate) }
     func selectAudioTrack(id: String) { surface?.selectAudioTrack(id: id) }
     func selectSubtitleTrack(id: String?) { surface?.selectSubtitleTrack(id: id) }
+    func stop() { surface?.stop() }
     func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
         surface?.applySubtitleStyle(fontSize: fontSize, fontName: fontName, color: color, background: background, shadow: shadow, margin: margin, delay: delay)
     }
@@ -1134,8 +1139,13 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
 
     func stop() {
         mediaPlayer.stop()
+        mediaPlayer.media = nil
         mediaPlayer.drawable = nil
         loadingTimer?.invalidate()
+        loadingTimer = nil
+        currentURL = nil
+        currentHTTPHeaders = nil
+        controls?.isBuffering = false
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? {

@@ -659,7 +659,7 @@ struct VideoDetailsView: View {
                 .foregroundStyle(.white)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 14) {
+                LazyHStack(alignment: .top, spacing: 14) {
                     if let director = details.director {
                         moviePersonCard(name: director.name, role: "Director", imageURL: director.imageURL)
                     }
@@ -704,7 +704,7 @@ struct VideoDetailsView: View {
                 .foregroundStyle(.white)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 12) {
+                LazyHStack(alignment: .top, spacing: 12) {
                     ForEach(recentMovieLinks) { link in
                         Button {
                             dismiss()

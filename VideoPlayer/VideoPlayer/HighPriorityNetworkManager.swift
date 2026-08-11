@@ -30,6 +30,28 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
     private let videoSession: URLSession
     private let responsiveSession: URLSession
 
+    private final class CancellableTaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionTask?
+        private var cancelled = false
+
+        func install(_ value: URLSessionTask) {
+            lock.lock()
+            task = value
+            let shouldCancel = cancelled
+            lock.unlock()
+            if shouldCancel { value.cancel() }
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let value = task
+            lock.unlock()
+            value?.cancel()
+        }
+    }
+
     private init() {
         let video = URLSessionConfiguration.default
         video.networkServiceType = .video
@@ -48,6 +70,8 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         api.allowsExpensiveNetworkAccess = true
         api.allowsConstrainedNetworkAccess = true
         api.httpMaximumConnectionsPerHost = 6
+        api.timeoutIntervalForRequest = 20
+        api.timeoutIntervalForResource = 45
         responsiveSession = URLSession(configuration: api)
     }
 
@@ -71,14 +95,20 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         case .video: session = videoSession
         case .responsiveData: session = responsiveSession
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            let task = session.dataTask(with: request) { data, response, error in
-                if let error { continuation.resume(throwing: error); return }
-                guard let data, let response else { continuation.resume(throwing: URLError(.badServerResponse)); return }
-                continuation.resume(returning: (data, response))
+        let box = CancellableTaskBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request) { data, response, error in
+                    if let error { continuation.resume(throwing: error); return }
+                    guard let data, let response else { continuation.resume(throwing: URLError(.badServerResponse)); return }
+                    continuation.resume(returning: (data, response))
+                }
+                box.install(task)
+                task.priority = trafficClass.priority
+                task.resume()
             }
-            task.priority = trafficClass.priority
-            task.resume()
+        } onCancel: {
+            box.cancel()
         }
     }
 }

@@ -87,7 +87,7 @@ struct VideoPlayerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     init() {
         ThumbnailPipeline.configure()
-        BackgroundVideoCacheManager.shared.activate()
+        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
         VideoDownloadManager.shared.activate()
         PikPakAutoSyncManager.shared.activate()
         let session = AVAudioSession.sharedInstance()

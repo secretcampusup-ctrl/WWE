@@ -68,6 +68,16 @@ final class BackgroundVideoCacheManager: NSObject, URLSessionDownloadDelegate {
         }
     }
 
+    /// Stops obsolete hidden prefetches without touching user-visible downloads.
+    func cancelAllPrefetches() {
+        session.getAllTasks { [weak self] tasks in
+            tasks.forEach { $0.cancel() }
+            self?.stateQueue.async {
+                self?.activeKeys.removeAll()
+            }
+        }
+    }
+
     func setBackgroundEventsCompletionHandler(_ handler: @escaping () -> Void) {
         stateQueue.async {
             self.eventsCompletionHandler = handler

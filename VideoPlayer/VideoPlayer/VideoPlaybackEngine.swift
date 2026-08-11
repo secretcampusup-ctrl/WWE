@@ -243,6 +243,9 @@ final class VideoPlaybackEngine: ObservableObject {
         removeTimeObserver()
         player.currentItem?.cancelPendingSeeks()
         player.currentItem?.videoComposition = nil
+        player.currentItem?.asset.cancelLoading()
+        loadedAsset?.cancelLoading()
+        pendingMetadataAsset?.cancelLoading()
         player.replaceCurrentItem(with: nil)
         loadedAsset = nil
         pendingMetadataAsset = nil
@@ -301,7 +304,7 @@ final class VideoPlaybackEngine: ObservableObject {
 
     private func startDeferredMetadataAfterPlayback(item: AVPlayerItem?) {
         guard let asset = pendingMetadataAsset,
-              let url = pendingMetadataURL,
+              pendingMetadataURL != nil,
               pendingMetadataGeneration == loadGeneration else { return }
         let title = pendingMetadataTitle
         let generation = pendingMetadataGeneration
@@ -313,10 +316,9 @@ final class VideoPlaybackEngine: ObservableObject {
             refreshAudioTracks(for: item)
             refreshSubtitleTracks(for: item)
         }
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            _ = await VideoThumbnailLoader.cachePoster(from: asset, for: url)
-        }
+        // Do not start a second AVAsset read for thumbnail extraction while the
+        // movie is playing. That detached request survived player dismissal and
+        // kept the remote connection saturated after returning to the app.
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard let self, generation == self.loadGeneration else { return }
