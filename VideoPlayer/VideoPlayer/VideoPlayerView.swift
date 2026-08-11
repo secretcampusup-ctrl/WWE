@@ -337,6 +337,14 @@ struct VideoPlayerView: View {
             engine.cleanup()
             useExtendedPlayer = true
         }
+        .onChange(of: engine.isPlaying) { playing in
+            guard !usesMKVPlayer else { return }
+            playbackRunningChanged(playing)
+        }
+        .onChange(of: mkvControls.isPlaying) { playing in
+            guard usesMKVPlayer else { return }
+            playbackRunningChanged(playing)
+        }
         .onChange(of: showControls) { visible in
             if !visible { showQuickSettings = false; showPlaybackSettings = false; showEpisodePicker = false }
         }
@@ -655,13 +663,41 @@ struct VideoPlayerView: View {
             : String(format: "- %02d:%02d", minutes, seconds)
     }
 
+    private var playbackIsActuallyRunning: Bool {
+        usesMKVPlayer ? mkvControls.isPlaying : engine.isPlaying
+    }
+
+    private func playbackRunningChanged(_ running: Bool) {
+        hideTask?.cancel()
+        if running {
+            // Start the eight-second chrome timeout from the first real playback
+            // frame/rate, never from the moment the player screen was presented.
+            showControls = true
+            scheduleAutoHide()
+        } else if (usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering) {
+            // A pending or stalled stream must keep the loading ring visible.
+            showControls = true
+        }
+    }
+
     private func scheduleAutoHide() {
         hideTask?.cancel()
-        guard showControls else { return }
+        guard showControls, playbackIsActuallyRunning else {
+            // Before playback begins there is no auto-hide timer. This keeps the
+            // loading ring visible for as long as the stream is still opening.
+            if (usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering) {
+                showControls = true
+            }
+            return
+        }
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 8_000_000_000)
             guard !Task.isCancelled, !isScrubbing else { return }
             await MainActor.run {
+                guard playbackIsActuallyRunning else {
+                    showControls = true
+                    return
+                }
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showControls = false
                     showQuickSettings = false
