@@ -133,9 +133,9 @@ final class VideoPlaybackEngine: ObservableObject {
     /// just for the queue, which is a common cause of stalls/jetsam on 8K content.
     /// Once actual resolution is known, high-res clips are trimmed down to
     /// `highResForwardBufferSeconds` (see the presentationSize observer below).
-    private let forwardBufferSeconds: TimeInterval = 900
+    private let forwardBufferSeconds: TimeInterval = 60
     /// Cap used once we know a clip is very high resolution (8K-class).
-    private let highResForwardBufferSeconds: TimeInterval = 120
+    private let highResForwardBufferSeconds: TimeInterval = 30
 
     /// Allow high bitrates needed for 4K (0 = no artificial cap).
     private let unlimitedPeakBitRate: Double = 0
@@ -207,7 +207,11 @@ final class VideoPlaybackEngine: ObservableObject {
 
         // Load playable keys off the main thread, then attach item on main.
         assetQueue.async { [weak self] in
-            let keys = ["playable", "duration", "tracks"]
+            // Only gate startup on playability. Duration, tracks, chapters and
+            // media-selection metadata are loaded by AVPlayerItem after the first
+            // frame path is attached; waiting for them here can require multiple
+            // remote Range requests on non-fast-start files.
+            let keys = ["playable"]
             asset.loadValuesAsynchronously(forKeys: keys) {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -222,16 +226,27 @@ final class VideoPlaybackEngine: ObservableObject {
                         return
                     }
 
-                    self.detectIntroChapter(in: asset, title: title)
                     let item = self.makePlayerItem(asset: asset)
                     self.attach(item: item)
                     Task.detached(priority: .utility) {
+                        // Remote frame extraction can issue extra Range requests.
+                        // Give the playback request exclusive bandwidth at startup.
+                        if !url.isFileURL {
+                            try? await Task.sleep(nanoseconds: 8_000_000_000)
+                        }
                         _ = await VideoThumbnailLoader.cachePoster(from: asset, for: url)
                     }
                     // Resume is applied when item is ready (see status observer)
                     if self.pendingResumeSeconds < 1 {
                         self.player.play()
                         self.isPlaying = true
+                    }
+                    // Chapter inspection is useful but never startup-critical.
+                    // Delay it until playback has had time to deliver initial frames.
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 8_000_000_000)
+                        guard let self, generation == self.loadGeneration else { return }
+                        self.detectIntroChapter(in: asset, title: title)
                     }
                     UIApplication.shared.isIdleTimerDisabled = true
                 }

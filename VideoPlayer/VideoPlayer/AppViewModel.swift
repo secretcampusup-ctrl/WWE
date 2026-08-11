@@ -556,12 +556,10 @@ class AppViewModel: ObservableObject {
             resume = link.resumePositionSeconds ?? 0
         }
 
-        let playbackURL = BackgroundVideoCacheManager.shared.playbackURL(
-            for: url,
-            stableKey: matchedId?.uuidString ?? url.absoluteString,
-            suggestedFileName: title,
-            headers: headers ?? [:]
-        )
+        // Playback must own the only active network request. Starting the hidden
+        // full-file background cache here created a second priority-1 transfer for
+        // the same PikPak URL, splitting bandwidth and triggering CDN throttling.
+        let playbackURL = url
 
         nowPlayingLinkId = matchedId
         nowPlayingResumeAt = resume
