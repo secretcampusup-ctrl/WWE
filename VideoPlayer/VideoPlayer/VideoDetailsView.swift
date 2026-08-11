@@ -149,17 +149,21 @@ struct VideoDetailsView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .top) {
-                preview
+            Group {
+                if isMovieDetailsPage {
+                    movieDetailsScreen
+                } else {
+                    ZStack(alignment: .top) {
+                        preview
 
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Color.clear.frame(height: heroHeight - 24)
+                        ScrollView(showsIndicators: false) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Color.clear.frame(height: heroHeight - 24)
 
-                        VStack(alignment: .leading, spacing: 14) {
-                        if item.is4K || item.isFullHD || qualityStyle != nil {
-                            qualityFeatureStrip
-                        }
+                                VStack(alignment: .leading, spacing: 14) {
+                                if item.is4K || item.isFullHD || qualityStyle != nil {
+                                    qualityFeatureStrip
+                                }
 
                         VStack(spacing: 12) {
                             primaryPlayButton
@@ -218,6 +222,8 @@ struct VideoDetailsView: View {
                         .padding(.bottom, 28)
                         .background(AppTheme.bg)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            }
+                        }
                     }
                 }
             }
@@ -378,6 +384,256 @@ struct VideoDetailsView: View {
         .sheet(isPresented: $showPlaylistPicker) {
             PlaylistPickerView(vm: vm, item: item)
         }
+    }
+
+    private var isMovieDetailsPage: Bool {
+        item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil
+    }
+
+    private var movieDetailsScreen: some View {
+        ZStack(alignment: .top) {
+            GeometryReader { proxy in
+                ZStack {
+                    Color.black
+                    if let displayedFrame {
+                        Image(uiImage: displayedFrame)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .clipped()
+                    }
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black.opacity(0.08), location: 0),
+                            .init(color: .black.opacity(0.18), location: 0.34),
+                            .init(color: .black.opacity(0.72), location: 0.62),
+                            .init(color: .black.opacity(0.96), location: 0.83),
+                            .init(color: .black, location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+            }
+            .ignoresSafeArea()
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: max(300, UIScreen.main.bounds.height * 0.39))
+
+                    VStack(spacing: 16) {
+                        movieTitleTreatment
+                        movieDataRow
+
+                        Text(item.fileSizeLabel)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .monospacedDigit()
+
+                        moviePlayButton
+                        movieActionRow
+
+                        if let details = tmdbDetails, !details.overview.isEmpty {
+                            Text("\(details.title) — \(details.overview)")
+                                .font(.system(size: 12.5, weight: .regular))
+                                .foregroundStyle(.white.opacity(0.82))
+                                .lineSpacing(3)
+                                .lineLimit(3)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let details = tmdbDetails, details.director != nil || !details.cast.isEmpty {
+                            movieCastAndCrew(details)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 42)
+                }
+            }
+
+            HStack {
+                movieTopButton(icon: "chevron.left") { dismiss() }
+                Spacer()
+                Menu {
+                    Button(action: startDownload) { Label("Download", systemImage: "arrow.down.circle") }
+                    Button { showPlaylistPicker = true } label: { Label("Add to Playlist", systemImage: "text.badge.plus") }
+                    if onDelete != nil {
+                        Button(role: .destructive) { showDeleteConfirmation = true } label: { Label("Delete", systemImage: "trash") }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(Color.white.opacity(0.18)))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, topSafeAreaInset + 8)
+        }
+    }
+
+    private var movieTitleTreatment: some View {
+        Text(tmdbDetails?.title.uppercased() ?? item.displayTitle.uppercased())
+            .font(.system(size: 38, weight: .black, design: .rounded))
+            .italic()
+            .tracking(-1.6)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .minimumScaleFactor(0.55)
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.95), radius: 4, x: 0, y: 3)
+            .shadow(color: .black.opacity(0.65), radius: 12)
+            .frame(maxWidth: .infinity)
+    }
+
+    private var movieDataRow: some View {
+        HStack(spacing: 8) {
+            Label(tmdbDetails.map { String(format: "%.1f", $0.voteAverage) } ?? "-", systemImage: "star.fill")
+                .foregroundStyle(Color.yellow)
+            movieDataDivider
+            Text(movieReleaseDateLabel)
+            movieDataDivider
+            Text(tmdbDetails?.productionCountries?.first ?? "-")
+            movieDataDivider
+            Text(tmdbDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
+            movieDataDivider
+            Text("[\(movieCertificationLabel)]")
+        }
+        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+        .foregroundStyle(.white.opacity(0.88))
+        .lineLimit(1)
+        .minimumScaleFactor(0.65)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var movieDataDivider: some View {
+        Rectangle().fill(Color.white.opacity(0.34)).frame(width: 1, height: 12)
+    }
+
+    private var movieReleaseDateLabel: String {
+        guard let raw = tmdbDetails?.releaseDate else { return movieYearLabel }
+        let input = DateFormatter()
+        input.locale = Locale(identifier: "en_US_POSIX")
+        input.dateFormat = "yyyy-MM-dd"
+        guard let date = input.date(from: raw) else { return raw }
+        let output = DateFormatter()
+        output.locale = Locale(identifier: "en_US_POSIX")
+        output.dateFormat = "MM/dd/yyyy"
+        return output.string(from: date)
+    }
+
+    private var movieCertificationLabel: String {
+        guard let value = tmdbDetails?.certification, !value.isEmpty else { return "NR" }
+        return value
+    }
+
+    private var moviePlayButton: some View {
+        Button(action: playAndClose) {
+            VStack(spacing: 2) {
+                Label(hasMovieProgress ? "Resume" : "Play", systemImage: "play.fill")
+                    .font(.system(size: 15, weight: .bold))
+                if hasMovieProgress {
+                    Text("Played: \(movieProgressPercent)%")
+                        .font(.system(size: 9, weight: .semibold))
+                        .opacity(0.65)
+                }
+            }
+            .foregroundStyle(Color.black.opacity(0.86))
+            .frame(maxWidth: .infinity)
+            .frame(height: hasMovieProgress ? 52 : 46)
+            .background(Color.white.opacity(0.92), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+    }
+
+    private var hasMovieProgress: Bool {
+        (item.resumePositionSeconds ?? 0) > 3
+    }
+
+    private var movieProgressPercent: Int {
+        guard let current = item.resumePositionSeconds, current > 0,
+              let duration = item.durationSeconds, duration > 0 else { return 1 }
+        return min(99, max(1, Int((current / duration) * 100)))
+    }
+
+    private var movieActionRow: some View {
+        HStack {
+            movieActionButton(icon: "arrow.down.circle", action: startDownload)
+            Spacer()
+            movieActionButton(icon: vm.isFavorite(item) ? "heart.fill" : "heart") { _ = vm.toggleFavorite(item) }
+            Spacer()
+            movieActionButton(icon: "text.badge.plus") { showPlaylistPicker = true }
+            Spacer()
+            movieActionButton(icon: "flag") {
+                if onDelete != nil { showDeleteConfirmation = true }
+                else { showDeleteUnavailable = true }
+            }
+        }
+        .padding(.horizontal, 22)
+    }
+
+    private func movieActionButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 42, height: 36)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func movieTopButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 42, height: 42)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func movieCastAndCrew(_ details: TMDBTitleDetails) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Cast & Crew")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 14) {
+                    if let director = details.director {
+                        moviePersonCard(name: director.name, role: "Director", imageURL: director.imageURL)
+                    }
+                    ForEach(details.cast.prefix(12)) { member in
+                        moviePersonCard(name: member.name, role: member.character, imageURL: member.imageURL)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func moviePersonCard(name: String, role: String, imageURL: URL?) -> some View {
+        VStack(spacing: 5) {
+            AsyncImage(url: imageURL) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    Image(systemName: "person.fill").resizable().scaledToFit().padding(18).foregroundStyle(.white.opacity(0.38))
+                }
+            }
+            .frame(width: 66, height: 76)
+            .background(Color.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            Text(name).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+            Text(role).font(.system(size: 9)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+        }
+        .frame(width: 78)
     }
 
     private var preview: some View {

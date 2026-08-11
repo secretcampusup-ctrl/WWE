@@ -38,6 +38,9 @@ struct TMDBTitleDetails: Identifiable, Codable {
     let seasons: [TMDBSeason]
     let trailerKey: String?
     let runtimeMinutes: Int?
+    let productionCountries: [String]?
+    let certification: String?
+    let director: TMDBCrewMember?
 
     var isSeries: Bool { mediaType == "tv" }
     var posterURL: URL? {
@@ -56,6 +59,13 @@ struct TMDBCastMember: Codable, Identifiable {
     let id: Int
     let name: String
     let character: String
+    let profilePath: String?
+    var imageURL: URL? { profilePath.flatMap { URL(string: "https://image.tmdb.org/t/p/w342\($0)") } }
+}
+struct TMDBCrewMember: Codable, Identifiable {
+    let id: Int
+    let name: String
+    let job: String
     let profilePath: String?
     var imageURL: URL? { profilePath.flatMap { URL(string: "https://image.tmdb.org/t/p/w342\($0)") } }
 }
@@ -89,7 +99,7 @@ actor TMDBService {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TMDBMetadata", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        cacheURL = directory.appendingPathComponent("metadata-v2.json")
+        cacheURL = directory.appendingPathComponent("metadata-v3.json")
         if let data = try? Data(contentsOf: cacheURL),
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
@@ -147,10 +157,15 @@ actor TMDBService {
         guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else { return nil }
         do {
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
-            let payload: DetailPayload = try await request(endpoint, query: ["append_to_response": "credits,videos"])
+            let payload: DetailPayload = try await request(endpoint, query: ["append_to_response": "credits,videos,release_dates"])
             let trailers = payload.videos?.results ?? []
             let trailer = trailers.first { $0.site == "YouTube" && $0.type == "Trailer" && $0.official == true }
                 ?? trailers.first { $0.site == "YouTube" && $0.type == "Trailer" }
+            let certification = payload.releaseDates?.results
+                .first(where: { $0.iso31661 == "US" })?.releaseDates
+                .first(where: { !$0.certification.isEmpty })?.certification
+                ?? payload.releaseDates?.results.flatMap(\.releaseDates)
+                    .first(where: { !$0.certification.isEmpty })?.certification
             let details = TMDBTitleDetails(
                 id: match.id, mediaType: match.mediaType,
                 title: payload.title ?? payload.name ?? match.title ?? match.name ?? normalizedQuery,
@@ -159,7 +174,10 @@ actor TMDBService {
                 voteAverage: payload.voteAverage ?? 0, genres: payload.genres ?? [],
                 cast: Array((payload.credits?.cast ?? []).prefix(20)),
                 seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 }, trailerKey: trailer?.key,
-                runtimeMinutes: payload.runtime
+                runtimeMinutes: payload.runtime,
+                productionCountries: payload.productionCountries?.map(\.name),
+                certification: certification,
+                director: payload.credits?.crew.first(where: { $0.job == "Director" })
             )
             detailsCache[cacheKey] = details
             persistCache()
@@ -329,9 +347,14 @@ private struct DetailPayload: Decodable {
     let posterPath: String?; let backdropPath: String?
     let releaseDate: String?; let firstAirDate: String?; let voteAverage: Double?; let runtime: Int?
     let genres: [TMDBGenre]?; let seasons: [TMDBSeason]?
-    let credits: Credits?; let videos: Videos?
+    let credits: Credits?; let videos: Videos?; let productionCountries: [ProductionCountry]?
+    let releaseDates: ReleaseDatesResponse?
 }
-private struct Credits: Decodable { let cast: [TMDBCastMember] }
+private struct Credits: Decodable { let cast: [TMDBCastMember]; let crew: [TMDBCrewMember] }
+private struct ProductionCountry: Decodable { let name: String }
+private struct ReleaseDatesResponse: Decodable { let results: [ReleaseDatesCountry] }
+private struct ReleaseDatesCountry: Decodable { let iso31661: String; let releaseDates: [ReleaseDateEntry] }
+private struct ReleaseDateEntry: Decodable { let certification: String }
 private struct Videos: Decodable { let results: [Video] }
 private struct Video: Decodable { let key: String; let site: String; let type: String; let official: Bool? }
 
