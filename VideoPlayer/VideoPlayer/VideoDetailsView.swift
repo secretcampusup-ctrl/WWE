@@ -481,9 +481,14 @@ struct VideoDetailsView: View {
                             movieCastAndCrew(details)
                         }
 
-                        if !recentMovieLinks.isEmpty {
-                            movieRecentlyAddedSection
-                        }
+                        // Temporarily disabled for diagnostics: testing whether this
+                        // section (or generating thumbnails for its freshly-added
+                        // items) is what triggers the network stall reported when a
+                        // new item is added to the library. Re-enable by restoring
+                        // the block below once confirmed either way.
+                        // if !recentMovieLinks.isEmpty {
+                        //     movieRecentlyAddedSection
+                        // }
 
                         VStack(spacing: 3) {
                             Text("\(item.source) · \(item.fileExtension.uppercased())")
