@@ -374,7 +374,15 @@ class AppViewModel: ObservableObject {
         savedLinks.insert(link, at: 0)
         copyProviderPosterIfAvailable(from: posterCacheKey, to: link.id)
         persistSavedLinksImmediately()
-        if link.fileSizeBytes == nil { fetchFileSize(for: link) }
+        // Deferred, not fired immediately: a fresh link is usually saved in the
+        // same instant playback starts on this exact URL. Probing it right away
+        // opens a second concurrent connection to the same signed CDN URL,
+        // which some providers (e.g. PikPak) throttle — stalling the real
+        // playback request and, since it shares the video connection pool,
+        // every other in-flight video request too. See the matching note in
+        // startPlayback about the background-cache transfer causing the same
+        // CDN throttling.
+        if link.fileSizeBytes == nil { scheduleFileSizeProbe(for: link) }
         return link
     }
 
@@ -386,7 +394,27 @@ class AppViewModel: ObservableObject {
     }
     private func refreshMissingFileSizes() {
         for link in savedLinks where link.fileSizeBytes == nil {
-            fetchFileSize(for: link)
+            scheduleFileSizeProbe(for: link)
+        }
+    }
+
+    /// Waits until this link's URL is no longer the one actively streaming
+    /// before probing its size, and uses the low-priority responsive session
+    /// (not the video session) so it never competes with a real playback
+    /// connection for the same host/URL.
+    private func scheduleFileSizeProbe(for link: SavedVideoLink) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Give playback (if this is the link that was just opened) time to
+            // establish its own connection first, then keep waiting as long as
+            // this exact URL is still the one on screen.
+            try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+            var guardTicks = 0
+            while self.nowPlayingURL?.absoluteString == link.url?.absoluteString, guardTicks < 30 {
+                try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+                guardTicks += 1
+            }
+            self.fetchFileSize(for: link)
         }
     }
 
@@ -399,15 +427,18 @@ class AppViewModel: ObservableObject {
                 if let range = http.value(forHTTPHeaderField: "Content-Range"), let total = range.split(separator: "/").last, let bytes = Int64(total), bytes > 0 { return bytes }
                 return nil
             }
+            // Uses the responsive session (not the video session) so this
+            // throwaway probe never occupies one of the few connection slots
+            // that real video streaming needs.
             var head = URLRequest(url: url)
             head.httpMethod = "HEAD"
             head.timeoutInterval = 12
-            var discovered = (try? await HighPriorityNetworkManager.shared.videoData(for: head)).flatMap { size(from: $0.1) }
+            var discovered = (try? await HighPriorityNetworkManager.shared.responsiveData(for: head)).flatMap { size(from: $0.1) }
             if discovered == nil {
                 var range = URLRequest(url: url)
                 range.setValue("bytes=0-0", forHTTPHeaderField: "Range")
                 range.timeoutInterval = 12
-                discovered = (try? await HighPriorityNetworkManager.shared.videoData(for: range)).flatMap { size(from: $0.1) }
+                discovered = (try? await HighPriorityNetworkManager.shared.responsiveData(for: range)).flatMap { size(from: $0.1) }
             }
             guard let bytes = discovered, let index = savedLinks.firstIndex(where: { $0.id == link.id }) else { return }
             savedLinks[index].fileSizeBytes = bytes
