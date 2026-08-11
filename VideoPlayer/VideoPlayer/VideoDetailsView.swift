@@ -276,6 +276,9 @@ struct VideoDetailsView: View {
             // Note: the ThePornDB cover/metadata fallback runs in its own `.task`
             // below (always on), so it isn't duplicated here.
         }
+        .onChange(of: item.id) { _ in
+            prepareForCurrentItem()
+        }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let key = notification.object as? String,
                   key == item.posterCacheKey,
@@ -286,28 +289,50 @@ struct VideoDetailsView: View {
         // lookup that's always on, independent of the poster-frame logic above — see
         // VideoThumbnailLoader.fetchThePornDBMetadata.
         .task(id: item.id) {
+            let requestedItemID = item.id
             let metadataKey = item.posterCacheKey ?? item.id
             tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
             tmdbEpisode = VideoDetailsMemoryCache.episodes[metadataKey]
             thePornDBMetadata = ThePornDBSettings.isEnabled
                 ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
                 : nil
+
+            let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
+            let titleArtworkKey = "tmdb-title|\(metadataKey)"
+            if let cachedEpisode = VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) {
+                frame = cachedEpisode
+            } else if let cachedTitle = VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) {
+                frame = cachedTitle
+            }
             if tmdbEpisode == nil, let value = VideoTitleFormatter.episodeComponents(from: item.title) {
-                tmdbEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
-                if let tmdbEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = tmdbEpisode }
-                if let imageURL = tmdbEpisode?.imageURL,
+                let loadedEpisode = await TMDBService.shared.episodeDetails(seriesTitle: item.title, season: value.season, episode: value.episode)
+                guard !Task.isCancelled, requestedItemID == item.id else { return }
+                tmdbEpisode = loadedEpisode
+                if let loadedEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = loadedEpisode }
+                if VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) == nil,
+                   let imageURL = loadedEpisode?.imageURL,
                    let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
+                    guard !Task.isCancelled, requestedItemID == item.id else { return }
                     frame = image
+                    VideoThumbnailLoader.cacheImage(image, forStableKey: episodeArtworkKey)
                     if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
                 }
             }
-            if tmdbDetails == nil { tmdbDetails = await TMDBService.shared.details(for: item.title) }
+            if tmdbDetails == nil {
+                let loadedDetails = await TMDBService.shared.details(for: item.title)
+                guard !Task.isCancelled, requestedItemID == item.id else { return }
+                tmdbDetails = loadedDetails
+            }
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
-            if tmdbEpisode?.imageURL == nil, let imageURL = tmdbDetails?.imageURL,
+            if tmdbEpisode?.imageURL == nil,
+               VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
+               let imageURL = tmdbDetails?.imageURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
+                guard !Task.isCancelled, requestedItemID == item.id else { return }
                 frame = image
+                VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
                 if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
             }
             guard tmdbDetails == nil else { return }
@@ -574,6 +599,25 @@ struct VideoDetailsView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         )
+    }
+
+    private func prepareForCurrentItem() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            let metadataKey = item.posterCacheKey ?? item.id
+            tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
+            tmdbEpisode = VideoDetailsMemoryCache.episodes[metadataKey]
+            thePornDBMetadata = ThePornDBSettings.isEnabled
+                ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
+                : nil
+
+            let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
+            let titleArtworkKey = "tmdb-title|\(metadataKey)"
+            frame = VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey)
+                ?? VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey)
+                ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
+        }
     }
 
     private var seriesEpisodesSection: some View {

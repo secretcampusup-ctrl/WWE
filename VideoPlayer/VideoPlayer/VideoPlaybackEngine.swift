@@ -109,6 +109,10 @@ final class VideoPlaybackEngine: ObservableObject {
     private var pendingResumeSeconds: Double = 0
     private var didApplyResume = false
     private var loadedAsset: AVURLAsset?
+    private var pendingMetadataAsset: AVURLAsset?
+    private var pendingMetadataURL: URL?
+    private var pendingMetadataTitle = ""
+    private var pendingMetadataGeneration: UInt64 = 0
     private var progressSaveCounter: Int = 0
     /// Keeps the scrubber at the requested spot while AVPlayer buffers the seek.
     private var pendingSeekSeconds: Double?
@@ -133,6 +137,7 @@ final class VideoPlaybackEngine: ObservableObject {
     /// just for the queue, which is a common cause of stalls/jetsam on 8K content.
     /// Once actual resolution is known, high-res clips are trimmed down to
     /// `highResForwardBufferSeconds` (see the presentationSize observer below).
+    private let startupForwardBufferSeconds: TimeInterval = 3
     private let forwardBufferSeconds: TimeInterval = 60
     /// Cap used once we know a clip is very high resolution (8K-class).
     private let highResForwardBufferSeconds: TimeInterval = 30
@@ -205,53 +210,24 @@ final class VideoPlaybackEngine: ObservableObject {
         let asset = AVURLAsset(url: url, options: options)
         loadedAsset = asset
 
-        // Load playable keys off the main thread, then attach item on main.
-        assetQueue.async { [weak self] in
-            // Only gate startup on playability. Duration, tracks, chapters and
-            // media-selection metadata are loaded by AVPlayerItem after the first
-            // frame path is attached; waiting for them here can require multiple
-            // remote Range requests on non-fast-start files.
-            let keys = ["playable"]
-            asset.loadValuesAsynchronously(forKeys: keys) {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard generation == self.loadGeneration else { return }
+        // Attach immediately. Preloading AVAsset `playable` can force remote
+        // metadata/Range scans before AVPlayerItem exists, which is especially
+        // slow for large non-fast-start cloud files. AVPlayerItem reports failure
+        // through its status observer without blocking the first-frame pipeline.
+        // Register deferred track/metadata discovery before playImmediately.
+        // AVPlayer can publish a positive rate synchronously for an already warm
+        // asset; registering afterwards loses that only trigger and leaves the
+        // embedded audio/subtitle lists empty.
+        pendingMetadataAsset = asset
+        pendingMetadataURL = url
+        pendingMetadataTitle = title
+        pendingMetadataGeneration = generation
 
-                    var error: NSError?
-                    let status = asset.statusOfValue(forKey: "playable", error: &error)
-                    guard status == .loaded, asset.isPlayable else {
-                        self.isBuffering = false
-                        self.errorMessage = error?.localizedDescription
-                            ?? "This video cannot be played on this device."
-                        return
-                    }
-
-                    let item = self.makePlayerItem(asset: asset)
-                    self.attach(item: item)
-                    Task.detached(priority: .utility) {
-                        // Remote frame extraction can issue extra Range requests.
-                        // Give the playback request exclusive bandwidth at startup.
-                        if !url.isFileURL {
-                            try? await Task.sleep(nanoseconds: 8_000_000_000)
-                        }
-                        _ = await VideoThumbnailLoader.cachePoster(from: asset, for: url)
-                    }
-                    // Resume is applied when item is ready (see status observer)
-                    if self.pendingResumeSeconds < 1 {
-                        self.player.play()
-                        self.isPlaying = true
-                    }
-                    // Chapter inspection is useful but never startup-critical.
-                    // Delay it until playback has had time to deliver initial frames.
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: 8_000_000_000)
-                        guard let self, generation == self.loadGeneration else { return }
-                        self.detectIntroChapter(in: asset, title: title)
-                    }
-                    UIApplication.shared.isIdleTimerDisabled = true
-                }
-            }
-        }
+        let item = makePlayerItem(asset: asset)
+        attach(item: item)
+        player.automaticallyWaitsToMinimizeStalling = false
+        player.playImmediately(atRate: 1)
+        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     func cleanup() {
@@ -269,6 +245,9 @@ final class VideoPlaybackEngine: ObservableObject {
         player.currentItem?.videoComposition = nil
         player.replaceCurrentItem(with: nil)
         loadedAsset = nil
+        pendingMetadataAsset = nil
+        pendingMetadataURL = nil
+        pendingMetadataTitle = ""
         audioTracks = []
         audioOptionsByID = [:]
         selectedAudioTrackID = nil
@@ -318,6 +297,31 @@ final class VideoPlaybackEngine: ObservableObject {
               let option = audioOptionsByID[id] else { return }
         item.select(option, in: group)
         selectedAudioTrackID = id
+    }
+
+    private func startDeferredMetadataAfterPlayback(item: AVPlayerItem?) {
+        guard let asset = pendingMetadataAsset,
+              let url = pendingMetadataURL,
+              pendingMetadataGeneration == loadGeneration else { return }
+        let title = pendingMetadataTitle
+        let generation = pendingMetadataGeneration
+        pendingMetadataAsset = nil
+        pendingMetadataURL = nil
+        pendingMetadataTitle = ""
+
+        if let item {
+            refreshAudioTracks(for: item)
+            refreshSubtitleTracks(for: item)
+        }
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            _ = await VideoThumbnailLoader.cachePoster(from: asset, for: url)
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, generation == self.loadGeneration else { return }
+            self.detectIntroChapter(in: asset, title: title)
+        }
     }
 
     private func refreshAudioTracks(for item: AVPlayerItem) {
@@ -472,7 +476,17 @@ final class VideoPlaybackEngine: ObservableObject {
                 // A positive playback rate is definitive proof that frames are flowing.
                 // Clear stale buffer-empty notifications immediately instead of leaving
                 // the branded loading ring spinning until the controls auto-hide.
-                if player.rate > 0 { self.isBuffering = false }
+                if player.rate > 0 {
+                    self.isBuffering = false
+                    // Once the first frames are flowing, restore the sustained
+                    // forward buffer used for smooth cloud playback.
+                    let isHighRes = self.resolutionWidth >= 6000 || self.resolutionHeight >= 6000
+                    player.currentItem?.preferredForwardBufferDuration = isHighRes
+                        ? self.highResForwardBufferSeconds
+                        : self.forwardBufferSeconds
+                    player.automaticallyWaitsToMinimizeStalling = true
+                    self.startDeferredMetadataAfterPlayback(item: player.currentItem)
+                }
             }
         }
     }
@@ -497,7 +511,7 @@ final class VideoPlaybackEngine: ObservableObject {
         let item = AVPlayerItem(asset: asset)
 
         // Keep several minutes ready ahead for smooth seeking and 4K playback.
-        item.preferredForwardBufferDuration = forwardBufferSeconds
+        item.preferredForwardBufferDuration = startupForwardBufferSeconds
 
         // No artificial bitrate cap → allow full 4K HLS / progressive streams.
         item.preferredPeakBitRate = unlimitedPeakBitRate
@@ -613,10 +627,13 @@ final class VideoPlaybackEngine: ObservableObject {
                 guard let self else { return }
                 switch item.status {
                 case .readyToPlay:
-                    self.isBuffering = false
+                    // `readyToPlay` means metadata is ready, not that pixels are
+                    // moving. Keep the loading ring until the rate observer sees
+                    // actual playback and defer media-selection discovery.
                     self.errorMessage = nil
-                    self.refreshAudioTracks(for: item)
-                    self.refreshSubtitleTracks(for: item)
+                    if self.player.rate > 0 {
+                        self.startDeferredMetadataAfterPlayback(item: item)
+                    }
                     // Apply saved resume position once
                     if !self.didApplyResume, self.pendingResumeSeconds > 1 {
                         self.didApplyResume = true
@@ -624,12 +641,10 @@ final class VideoPlaybackEngine: ObservableObject {
                         self.pendingResumeSeconds = 0
                         self.seek(toSeconds: resume)
                         self.player.play()
-                        self.isPlaying = true
                     } else if !self.didApplyResume {
                         self.didApplyResume = true
                         if self.player.rate == 0 {
                             self.player.play()
-                            self.isPlaying = true
                         }
                     }
                 case .failed:
@@ -653,7 +668,9 @@ final class VideoPlaybackEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if item.isPlaybackLikelyToKeepUp {
-                    self.isBuffering = false
+                    // Buffer readiness alone is not proof that frames are moving.
+                    // The rate observer is the only path allowed to hide loading.
+                    if self.player.rate > 0 { self.isBuffering = false }
                     // Auto-resume after rebuffer if user intended to play.
                     if self.isPlaying, self.player.rate == 0 {
                         self.player.play()

@@ -24,7 +24,7 @@ enum TMDBSettings {
     }
 }
 
-struct TMDBTitleDetails: Identifiable, Decodable {
+struct TMDBTitleDetails: Identifiable, Codable {
     let id: Int
     let mediaType: String
     let title: String
@@ -50,15 +50,15 @@ struct TMDBTitleDetails: Identifiable, Decodable {
     }
 }
 
-struct TMDBGenre: Decodable, Identifiable { let id: Int; let name: String }
-struct TMDBCastMember: Decodable, Identifiable {
+struct TMDBGenre: Codable, Identifiable { let id: Int; let name: String }
+struct TMDBCastMember: Codable, Identifiable {
     let id: Int
     let name: String
     let character: String
     let profilePath: String?
     var imageURL: URL? { profilePath.flatMap { URL(string: "https://image.tmdb.org/t/p/w342\($0)") } }
 }
-struct TMDBSeason: Decodable, Identifiable {
+struct TMDBSeason: Codable, Identifiable {
     let id: Int
     let name: String
     let seasonNumber: Int
@@ -67,7 +67,7 @@ struct TMDBSeason: Decodable, Identifiable {
 }
 
 
-struct TMDBEpisodeDetails {
+struct TMDBEpisodeDetails: Codable {
     let name: String
     let overview: String
     let stillPath: String?
@@ -75,12 +75,35 @@ struct TMDBEpisodeDetails {
 }
 actor TMDBService {
     static let shared = TMDBService()
-    private var detailsCache: [String: TMDBTitleDetails] = [:]
+    private var detailsCache: [String: TMDBTitleDetails]
+    private var episodeCache: [String: TMDBEpisodeDetails]
+    private let cacheURL: URL
     private let decoder: JSONDecoder = {
         let value = JSONDecoder()
         value.keyDecodingStrategy = .convertFromSnakeCase
         return value
     }()
+
+    init() {
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TMDBMetadata", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        cacheURL = directory.appendingPathComponent("metadata-v1.json")
+        if let data = try? Data(contentsOf: cacheURL),
+           let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
+            detailsCache = payload.details
+            episodeCache = payload.episodes
+        } else {
+            detailsCache = [:]
+            episodeCache = [:]
+        }
+    }
+
+    private func persistCache() {
+        let payload = TMDBPersistentCache(details: detailsCache, episodes: episodeCache)
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        try? data.write(to: cacheURL, options: .atomic)
+    }
 
     /// Returns nil on success, otherwise a precise user-facing TMDB error.
     func testConnection() async -> String? {
@@ -137,6 +160,7 @@ actor TMDBService {
                 seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 }, trailerKey: trailer?.key
             )
             detailsCache[cacheKey] = details
+            persistCache()
             return details
         } catch { return nil }
     }
@@ -251,9 +275,14 @@ actor TMDBService {
     }
     func episodeDetails(seriesTitle: String, season: Int, episode: Int) async -> TMDBEpisodeDetails? {
         guard let series = await details(for: seriesTitle), series.isSeries else { return nil }
+        let cacheKey = "\(series.id)|s\(season)|e\(episode)"
+        if let cached = episodeCache[cacheKey] { return cached }
         do {
             let payload: EpisodePayload = try await request("/3/tv/\(series.id)/season/\(season)/episode/\(episode)", query: [:])
-            return TMDBEpisodeDetails(name: payload.name ?? "Episode \(episode)", overview: payload.overview ?? "", stillPath: payload.stillPath)
+            let details = TMDBEpisodeDetails(name: payload.name ?? "Episode \(episode)", overview: payload.overview ?? "", stillPath: payload.stillPath)
+            episodeCache[cacheKey] = details
+            persistCache()
+            return details
         } catch { return nil }
     }
     private func request<T: Decodable>(_ path: String, query: [String: String]) async throws -> T {
@@ -275,6 +304,11 @@ actor TMDBService {
         }
         return try decoder.decode(T.self, from: data)
     }
+}
+
+private struct TMDBPersistentCache: Codable {
+    let details: [String: TMDBTitleDetails]
+    let episodes: [String: TMDBEpisodeDetails]
 }
 
 private struct SearchResponse: Decodable { let results: [SearchResult] }

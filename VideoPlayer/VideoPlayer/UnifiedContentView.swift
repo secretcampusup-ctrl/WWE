@@ -404,13 +404,20 @@ struct UnifiedContentView: View {
 
 @MainActor private final class UnifiedEpisodeSelection: ObservableObject {
     @Published var id: String?
+    init(id: String? = nil) { self.id = id }
 }
 
 private struct UnifiedMediaDetailsHost: View {
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
-    @StateObject private var selection = UnifiedEpisodeSelection()
+    @StateObject private var selection: UnifiedEpisodeSelection
     @State private var showPlayer = false
+
+    init(vm: AppViewModel, entry: UnifiedMediaEntry) {
+        self.vm = vm
+        self.entry = entry
+        _selection = StateObject(wrappedValue: UnifiedEpisodeSelection(id: entry.episodes.first?.id))
+    }
 
     private var selectedEpisode: UnifiedEpisode? {
         guard let selectedEpisodeID = selection.id else { return nil }
@@ -424,10 +431,10 @@ private struct UnifiedMediaDetailsHost: View {
             onPlay: playCurrent,
             dismissOnPlay: false,
             onSelectEpisode: { episodeID in
-                withAnimation(.easeOut(duration: 0.16)) { selection.id = episodeID }
+                guard selection.id != episodeID else { return }
+                selection.id = episodeID
             }
         )
-        .animation(.easeInOut(duration: 0.18), value: selection.id)
         .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
     }
 
