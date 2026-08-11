@@ -138,9 +138,9 @@ final class VideoPlaybackEngine: ObservableObject {
     /// Once actual resolution is known, high-res clips are trimmed down to
     /// `highResForwardBufferSeconds` (see the presentationSize observer below).
     private let startupForwardBufferSeconds: TimeInterval = 3
-    private let forwardBufferSeconds: TimeInterval = 60
+    private let forwardBufferSeconds: TimeInterval = 12
     /// Cap used once we know a clip is very high resolution (8K-class).
-    private let highResForwardBufferSeconds: TimeInterval = 30
+    private let highResForwardBufferSeconds: TimeInterval = 8
 
     /// Allow high bitrates needed for 4K (0 = no artificial cap).
     private let unlimitedPeakBitRate: Double = 0

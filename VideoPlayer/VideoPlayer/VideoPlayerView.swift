@@ -137,7 +137,7 @@ struct VideoPlayerView: View {
             if usesMKVPlayer, showControls {
                 VStack {
                     HStack {
-                        Button { dismiss() } label: {
+                        Button { closePlayer() } label: {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 17, weight: .semibold))
                                 .foregroundColor(.white)
@@ -254,7 +254,7 @@ struct VideoPlayerView: View {
                     title: VideoTitleFormatter.title(from: title),
                     countdown: nextEpisodeCountdown,
                     onReplay: replayCurrentVideo,
-                    onBack: { dismiss() }
+                    onBack: { closePlayer() }
                 )
                 .transition(.opacity)
             }
@@ -323,6 +323,9 @@ struct VideoPlayerView: View {
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
+            // Details may still be fetching cast/logo artwork underneath the full-screen
+            // player. Cancel those UI requests so playback does not leave the API pool busy.
+            HighPriorityNetworkManager.shared.cancelOutstandingResponsiveRequests()
             screenBrightness = Double(UIScreen.main.brightness)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Defensive reset: guarantees a clean VR state for this video even
@@ -389,11 +392,21 @@ struct VideoPlayerView: View {
 
     // MARK: - Top chrome
 
+    private func closePlayer() {
+        hideTask?.cancel()
+        endCountdownTask?.cancel()
+        if usesMKVPlayer { mkvControls.stop() }
+        else { engine.cleanup() }
+        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
+        HighPriorityNetworkManager.shared.cancelOutstandingResponsiveRequests()
+        dismiss()
+    }
+
     private var topOverlay: some View {
         HStack(spacing: 12) {
             Button {
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                dismiss()
+                closePlayer()
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 17, weight: .semibold))

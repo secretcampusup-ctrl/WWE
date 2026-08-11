@@ -87,6 +87,12 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         try await data(for: URLRequest(url: url), trafficClass: .responsiveData)
     }
 
+    func cancelOutstandingResponsiveRequests() {
+        responsiveSession.getAllTasks { tasks in
+            tasks.forEach { $0.cancel() }
+        }
+    }
+
     func data(for originalRequest: URLRequest, trafficClass: TrafficClass) async throws -> (Data, URLResponse) {
         var request = originalRequest
         request.networkServiceType = trafficClass.serviceType
