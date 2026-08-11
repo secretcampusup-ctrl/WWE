@@ -311,7 +311,7 @@ struct VideoDetailsView: View {
                 : nil
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
-            let titleArtworkKey = "tmdb-title|\(metadataKey)"
+            let titleArtworkKey = tmdbTitleArtworkCacheKey
             if let cachedEpisode = VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) {
                 frame = cachedEpisode
             } else if let cachedTitle = VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) {
@@ -342,7 +342,7 @@ struct VideoDetailsView: View {
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil,
                VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
-               let imageURL = tmdbDetails?.imageURL,
+               let imageURL = isMovieDetailsPage ? tmdbDetails?.posterURL : tmdbDetails?.imageURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
@@ -593,6 +593,8 @@ struct VideoDetailsView: View {
 
     private var movieActionRow: some View {
         HStack {
+            movieActionButton(icon: "arrow.down.circle", action: startDownload)
+            Spacer()
             movieActionButton(icon: vm.isFavorite(item) ? "heart.fill" : "heart") { _ = vm.toggleFavorite(item) }
             Spacer()
             movieActionButton(icon: "text.badge.plus") { showPlaylistPicker = true }
@@ -813,12 +815,16 @@ struct VideoDetailsView: View {
     }
 
     private var displayedFrame: UIImage? {
-        frame
+        VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
+            ?? frame
             ?? VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-episode|\(stableMetadataCacheKey)")
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-title|\(stableMetadataCacheKey)")
             ?? VideoThumbnailLoader.cachedImage(forStableKey: "details-artwork|\(stableMetadataCacheKey)")
             ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
             ?? VideoThumbnailLoader.cachedImage(for: item.url)
+    }
+
+    private var tmdbTitleArtworkCacheKey: String {
+        (isMovieDetailsPage ? "tmdb-movie-poster-v1|" : "tmdb-title|") + stableMetadataCacheKey
     }
 
     private var topSafeAreaInset: CGFloat {
@@ -1040,7 +1046,7 @@ struct VideoDetailsView: View {
                 : nil
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
-            let titleArtworkKey = "tmdb-title|\(metadataKey)"
+            let titleArtworkKey = tmdbTitleArtworkCacheKey
             frame = VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey)
                 ?? VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey)
                 ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
