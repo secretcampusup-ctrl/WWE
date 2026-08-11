@@ -128,7 +128,7 @@ actor ThumbnailLoadGate {
     /// bounded-parallelism version (3) still wasn't enough given how many
     /// screens fire requests independently, so this is now a hard one-at-a-time
     /// queue across every section (PikPak, Offcloud, Recent, etc.).
-    private let maxConcurrent = 1
+    private let maxConcurrent = 6
     private var running = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -310,7 +310,7 @@ enum VideoThumbnailLoader {
 
     private static let cacheFolderName = "VideoPostersV3"
     private static let maxPixelSize: CGFloat = 600
-    private static let maximumDiskCacheBytes: Int64 = 20 * 1_024 * 1_024
+    private static let maximumDiskCacheBytes: Int64 = 300 * 1_024 * 1_024
 
     /// Small compatibility cache; Kingfisher owns the main 50 MB memory cache.
     private static let memoryCache: NSCache<NSString, UIImage> = {

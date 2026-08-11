@@ -12,12 +12,12 @@ enum UnifiedMediaSection: String, CaseIterable, Identifiable {
     }
 }
 
-private enum UnifiedSource {
+private enum UnifiedSource: Codable {
     case webDAV(server: WebDAVServer, file: WebDAVFile)
     case offcloud(transfer: OffcloudTransfer, file: OffcloudFile)
 }
 
-private struct UnifiedMediaEntry: Identifiable {
+private struct UnifiedMediaEntry: Identifiable, Codable {
     let id: String
     let rawTitle: String
     var title: String
@@ -34,13 +34,19 @@ private struct UnifiedMediaEntry: Identifiable {
     }
 }
 
-private struct UnifiedEpisode: Identifiable {
+private struct UnifiedEpisode: Identifiable, Codable {
     let id: String
     let title: String
     let season: Int
     let episode: Int
     let source: UnifiedSource
     let url: URL
+}
+
+private struct UnifiedContentSnapshot: Codable {
+    let movies: [UnifiedMediaEntry]
+    let shows: [UnifiedMediaEntry]
+    let unknown: [UnifiedMediaEntry]
 }
 
 @MainActor
@@ -53,12 +59,33 @@ private final class UnifiedContentModel: ObservableObject {
     private var loaded = false
     private var lastSourceSignature = ""
     private let cloud = OffcloudViewModel()
+    private static var snapshotURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = base.appendingPathComponent("UnifiedContent", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(values)
+        return directory.appendingPathComponent("snapshot-v1.json")
+    }
+
+    init() {
+        if let data = try? Data(contentsOf: Self.snapshotURL),
+           let snapshot = try? JSONDecoder().decode(UnifiedContentSnapshot.self, from: data) {
+            movies = snapshot.movies
+            shows = snapshot.shows
+            unknown = snapshot.unknown
+            loaded = true
+        }
+    }
 
     func load(vm: AppViewModel, force: Bool = false) async {
         let sourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
         }.joined(separator: "|") + "|tmdb:" + String(TMDBSettings.readAccessToken.hashValue)
-        if loaded && !force && sourceSignature == lastSourceSignature { return }
+        // A cached library is immutable until the user explicitly refreshes.
+        if loaded && !force { return }
         guard !isLoading else { return }
         isLoading = true
         status = "Scanning connected libraries…"
@@ -79,7 +106,9 @@ private final class UnifiedContentModel: ObservableObject {
         }
 
         if cloud.hasKey {
-            await cloud.refreshAll()
+            // Startup uses the persisted Offcloud history/files only. Network refresh
+            // happens exclusively from pull-to-refresh or the refresh button.
+            if force { await cloud.refreshAll() }
             for transfer in cloud.transfers where transfer.isDownloaded {
                 for file in cloud.cachedVideoFiles(for: transfer) {
                     guard let url = file.streamURL else { continue }
@@ -95,6 +124,7 @@ private final class UnifiedContentModel: ObservableObject {
         guard !raw.isEmpty else {
             movies = []; shows = []; unknown = []; loaded = true
             lastSourceSignature = sourceSignature; status = ""
+            persistSnapshot()
             return
         }
         status = "Scanning files with TMDB…"
@@ -112,14 +142,30 @@ private final class UnifiedContentModel: ObservableObject {
                 guard let (key, entry) = iterator.next() else { break }
                 let lookupTitle = metadataLookupTitle(for: entry)
                 let preferredType = preferredMediaType(for: entry)
-                group.addTask { (key, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)) }
+                group.addTask {
+                    let details: TMDBTitleDetails?
+                    if force {
+                        details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
+                    } else {
+                        details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
+                    }
+                    return (key, details)
+                }
             }
             while let (key, details) = await group.next() {
                 if let details { metadataByQuery[key] = details }
                 if let (nextKey, nextEntry) = iterator.next() {
                     let lookupTitle = metadataLookupTitle(for: nextEntry)
                     let preferredType = preferredMediaType(for: nextEntry)
-                    group.addTask { (nextKey, await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)) }
+                    group.addTask {
+                        let details: TMDBTitleDetails?
+                        if force {
+                            details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
+                        } else {
+                            details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
+                        }
+                        return (nextKey, details)
+                    }
                 }
             }
         }
@@ -162,12 +208,19 @@ private final class UnifiedContentModel: ObservableObject {
         unknown = unknownItems.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
 
         // Adult fallback runs after the usable Content screen has finished loading.
-        if ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
+        if force && ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
             Task { await self.enrichUnknownWithAdultMetadata() }
         }
         loaded = true
         lastSourceSignature = sourceSignature
         status = ""
+        persistSnapshot()
+    }
+
+    private func persistSnapshot() {
+        let snapshot = UnifiedContentSnapshot(movies: movies, shows: shows, unknown: unknown)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: Self.snapshotURL, options: .atomic)
     }
 
     private func preferredMediaType(for entry: UnifiedMediaEntry) -> String {

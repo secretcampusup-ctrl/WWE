@@ -152,6 +152,20 @@ actor TMDBService {
         return nil
     }
 
+    /// Cache-only lookup used during app launch. It never performs a network request.
+    func cachedDetailsOriginalFirst(for rawTitle: String, preferredMediaType: String? = nil) -> TMDBTitleDetails? {
+        let original = Self.originalSearchTitle(from: rawTitle)
+        let filtered = Self.searchTitle(from: rawTitle)
+        var attempted = Set<String>()
+        for query in [original, filtered] where !query.isEmpty {
+            let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard attempted.insert(normalized.lowercased()).inserted else { continue }
+            let key = normalized.lowercased() + "|" + (preferredMediaType ?? "any")
+            if let cached = detailsCache[key] { return cached }
+        }
+        return nil
+    }
+
     private func detailsForQuery(_ query: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)

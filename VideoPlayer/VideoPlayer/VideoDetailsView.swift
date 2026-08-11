@@ -400,18 +400,45 @@ struct VideoDetailsView: View {
                 ZStack {
                     Color.black
                     if let displayedFrame {
+                        // A blurred full-bleed layer extends the poster's own colors
+                        // into empty edges without stretching/cropping the artwork.
                         Image(uiImage: displayedFrame)
                             .resizable()
                             .scaledToFill()
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .clipped()
+                            .blur(radius: 34)
+                            .scaleEffect(1.16)
+                            .saturation(1.12)
+                            .opacity(0.82)
+
+                        VStack(spacing: 0) {
+                            Image(uiImage: displayedFrame)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: proxy.size.width)
+                                .mask(
+                                    LinearGradient(
+                                        stops: [
+                                            .init(color: .white.opacity(0.96), location: 0),
+                                            .init(color: .white, location: 0.68),
+                                            .init(color: .white.opacity(0.55), location: 0.86),
+                                            .init(color: .clear, location: 1)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                            Spacer(minLength: 0)
+                        }
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                     }
                     LinearGradient(
                         stops: [
-                            .init(color: .black.opacity(0.08), location: 0),
-                            .init(color: .black.opacity(0.18), location: 0.34),
-                            .init(color: .black.opacity(0.72), location: 0.62),
-                            .init(color: .black.opacity(0.96), location: 0.83),
+                            .init(color: .black.opacity(0.03), location: 0),
+                            .init(color: .black.opacity(0.10), location: 0.34),
+                            .init(color: .black.opacity(0.52), location: 0.62),
+                            .init(color: .black.opacity(0.92), location: 0.84),
                             .init(color: .black, location: 1)
                         ],
                         startPoint: .top,
@@ -429,10 +456,13 @@ struct VideoDetailsView: View {
                         movieTitleTreatment
                         movieDataRow
 
-                        Text(item.fileSizeLabel)
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.7))
-                            .monospacedDigit()
+                        Label(
+                            resolvedMovieDetails.map { String(format: "%.1f", $0.voteAverage) } ?? "-",
+                            systemImage: "star.fill"
+                        )
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.yellow)
+                        .monospacedDigit()
 
                         moviePlayButton
                         movieActionRow
@@ -519,9 +549,6 @@ struct VideoDetailsView: View {
 
     private var movieDataRow: some View {
         HStack(spacing: 8) {
-            Label(resolvedMovieDetails.map { String(format: "%.1f", $0.voteAverage) } ?? "-", systemImage: "star.fill")
-                .foregroundStyle(Color.yellow)
-            movieDataDivider
             Text(movieReleaseDateLabel)
             movieDataDivider
             Text(resolvedMovieDetails?.productionCountries?.first ?? "-")
