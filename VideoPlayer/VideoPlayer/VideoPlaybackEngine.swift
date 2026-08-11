@@ -375,7 +375,9 @@ final class VideoPlaybackEngine: ObservableObject {
         } else {
             attributes[kCMTextMarkupAttribute_CharacterBackgroundColorARGB as String] = [0, 0, 0, 0]
         }
-        item.textStyleRules = [AVTextStyleRule(textMarkupAttributes: attributes)]
+        if let rule = AVTextStyleRule(textMarkupAttributes: attributes) {
+            item.textStyleRules = [rule]
+        }
     }
 
     private func refreshSubtitleTracks(for item: AVPlayerItem) {
