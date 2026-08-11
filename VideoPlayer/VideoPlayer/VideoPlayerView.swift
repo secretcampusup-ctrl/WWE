@@ -54,6 +54,7 @@ struct VideoPlayerView: View {
     @State private var subtitleFont: PlayerSubtitleFont = PlayerSubtitleFont(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.font") ?? "") ?? .rounded
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
+    @State private var didResetNetworkAfterPlayback = false
 
     // Temporary test mode: every file uses the main Apple player only.
     // The MKV player remains in the project but is not selected.
@@ -323,9 +324,6 @@ struct VideoPlayerView: View {
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
-            // Details may still be fetching cast/logo artwork underneath the full-screen
-            // player. Cancel those UI requests so playback does not leave the API pool busy.
-            HighPriorityNetworkManager.shared.cancelOutstandingResponsiveRequests()
             screenBrightness = Double(UIScreen.main.brightness)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Defensive reset: guarantees a clean VR state for this video even
@@ -362,6 +360,10 @@ struct VideoPlayerView: View {
                 }
                 mkvControls.stop()
             }
+            // Tear the media asset down first, then rotate only the video request
+            // pool. Doing this in the opposite order can leave AVPlayer's range
+            // request alive while unrelated API calls resume.
+            resetNetworkAfterPlaybackIfNeeded()
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
         .onChange(of: engine.errorMessage) { error in
@@ -398,8 +400,14 @@ struct VideoPlayerView: View {
         if usesMKVPlayer { mkvControls.stop() }
         else { engine.cleanup() }
         BackgroundVideoCacheManager.shared.cancelAllPrefetches()
-        HighPriorityNetworkManager.shared.cancelOutstandingResponsiveRequests()
+        resetNetworkAfterPlaybackIfNeeded()
         dismiss()
+    }
+
+    private func resetNetworkAfterPlaybackIfNeeded() {
+        guard !didResetNetworkAfterPlayback else { return }
+        didResetNetworkAfterPlayback = true
+        HighPriorityNetworkManager.shared.resetAfterPlayback()
     }
 
     private var topOverlay: some View {

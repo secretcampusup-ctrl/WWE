@@ -863,6 +863,16 @@ class AppViewModel: ObservableObject {
         }
     }
 
+    /// Releases the presented playback state without touching metadata/API work.
+    /// This prevents a dismissed player from being reconstructed with its stale URL.
+    func endPlaybackPresentation() {
+        nowPlayingURL = nil
+        nowPlayingHeaders = nil
+        nowPlayingResumeAt = 0
+        nowPlayingLinkId = nil
+        nowPlaying = nil
+    }
+
     // MARK: - Open any link (direct / HLS / PikPak share / magnet via PikPak)
 
     /// Save first immediately, then play or resolve.

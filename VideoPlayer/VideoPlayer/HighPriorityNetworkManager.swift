@@ -27,8 +27,9 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         }
     }
 
-    private let videoSession: URLSession
-    private let responsiveSession: URLSession
+    private let sessionLock = NSLock()
+    private var videoSession: URLSession
+    private var responsiveSession: URLSession
 
     private final class CancellableTaskBox: @unchecked Sendable {
         private let lock = NSLock()
@@ -53,6 +54,11 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
     }
 
     private init() {
+        videoSession = Self.makeVideoSession()
+        responsiveSession = Self.makeResponsiveSession()
+    }
+
+    private static func makeVideoSession() -> URLSession {
         let video = URLSessionConfiguration.default
         video.networkServiceType = .video
         video.waitsForConnectivity = true
@@ -61,8 +67,10 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         video.allowsConstrainedNetworkAccess = true
         video.httpMaximumConnectionsPerHost = 6
         video.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        videoSession = URLSession(configuration: video)
+        return URLSession(configuration: video)
+    }
 
+    private static func makeResponsiveSession() -> URLSession {
         let api = URLSessionConfiguration.default
         api.networkServiceType = .responsiveData
         api.waitsForConnectivity = true
@@ -72,7 +80,7 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         api.httpMaximumConnectionsPerHost = 6
         api.timeoutIntervalForRequest = 20
         api.timeoutIntervalForResource = 45
-        responsiveSession = URLSession(configuration: api)
+        return URLSession(configuration: api)
     }
 
     func videoData(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -87,20 +95,27 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         try await data(for: URLRequest(url: url), trafficClass: .responsiveData)
     }
 
-    func cancelOutstandingResponsiveRequests() {
-        responsiveSession.getAllTasks { tasks in
-            tasks.forEach { $0.cancel() }
-        }
+    func resetAfterPlayback() {
+        sessionLock.lock()
+        let oldVideo = videoSession
+        videoSession = Self.makeVideoSession()
+        sessionLock.unlock()
+        // Playback may leave long-lived range requests/connections behind. Reset
+        // only that pool; API/artwork requests use responsiveSession and must not
+        // be cancelled when the player closes.
+        oldVideo.invalidateAndCancel()
     }
 
     func data(for originalRequest: URLRequest, trafficClass: TrafficClass) async throws -> (Data, URLResponse) {
         var request = originalRequest
         request.networkServiceType = trafficClass.serviceType
         let session: URLSession
+        sessionLock.lock()
         switch trafficClass {
         case .video: session = videoSession
         case .responsiveData: session = responsiveSession
         }
+        sessionLock.unlock()
         let box = CancellableTaskBox()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in

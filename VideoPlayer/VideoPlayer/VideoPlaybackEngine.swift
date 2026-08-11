@@ -236,6 +236,7 @@ final class VideoPlaybackEngine: ObservableObject {
             onProgressTick?(currentSeconds, durationSeconds, resolutionWidth, resolutionHeight)
         }
         loadGeneration &+= 1
+        player.cancelPendingPrerolls()
         player.pause()
         isPlaying = false
         isBuffering = false
@@ -261,6 +262,12 @@ final class VideoPlaybackEngine: ObservableObject {
         onProgressTick = nil
         UIApplication.shared.isIdleTimerDisabled = false
         player.automaticallyWaitsToMinimizeStalling = true
+        assetQueue.async {
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: [.notifyOthersOnDeactivation]
+            )
+        }
     }
 
     func formattedTime(forFraction fraction: Double) -> String {

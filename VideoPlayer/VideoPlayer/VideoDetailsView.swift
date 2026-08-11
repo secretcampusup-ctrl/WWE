@@ -1539,6 +1539,7 @@ struct ResolvedPlayerScreen: View {
     var onSelectEpisode: ((String) -> Void)? = nil
 
     var body: some View {
+        Group {
         if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
             RoutedVideoPlayerView(
                 url: url,
@@ -1560,6 +1561,10 @@ struct ResolvedPlayerScreen: View {
             }
         } else {
             ImmediatePlayerLoadingView()
+        }
+        }
+        .onDisappear {
+            vm.endPlaybackPresentation()
         }
     }
 }
