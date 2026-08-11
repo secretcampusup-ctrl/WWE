@@ -492,7 +492,7 @@ class AppViewModel: ObservableObject {
             defer { isLoading = false }
             do {
                 let stream = try await PikPakClient.shared.streamURL(forFileId: fileId)
-                startPlayback(url: stream, title: link.title, linkId: link.id)
+                startPlayback(url: stream, title: link.title, linkId: link.id, headers: PikPakClient.shared.directPlaybackHeaders())
                 if let idx = savedLinks.firstIndex(where: { $0.id == link.id }) {
                     savedLinks[idx].resolvedStreamURL = stream.absoluteString
                     persistSavedLinksImmediately()
@@ -1050,7 +1050,7 @@ class AppViewModel: ObservableObject {
                 poster: file.thumbnailLink,
                 fileSizeBytes: file.size
             )
-            startPlayback(url: stream, title: file.name)
+            startPlayback(url: stream, title: file.name, headers: PikPakClient.shared.directPlaybackHeaders())
             return nil
         } catch {
             return error.localizedDescription
@@ -1081,7 +1081,7 @@ class AppViewModel: ObservableObject {
             poster: file.thumbnailLink,
             fileSizeBytes: file.size
         )
-        startPlayback(url: stream, title: file.name)
+        startPlayback(url: stream, title: file.name, headers: PikPakClient.shared.directPlaybackHeaders())
     }
 
     func addMagnetToPikPak(_ magnet: String) async -> String? {
