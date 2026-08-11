@@ -110,6 +110,36 @@ final class WebDAVClient: NSObject {
     }
 
     /// HTTP headers AVPlayer must send for authenticated WebDAV GET / Range requests.
+    /// Resolves WebDAV redirects before playback so PikPak's signed CDN URL
+    /// reaches AVPlayer/VLC directly. This also prevents Authorization headers
+    /// from being lost when the player follows a cross-host redirect itself.
+    func resolvedStreamURL(for file: WebDAVFile) async -> URL? {
+        guard let originalURL = streamURL(for: file) else { return nil }
+
+        // PikPak WebDAV commonly delays or rejects HEAD for large media. Resolve
+        // the signed CDN redirect immediately with a one-byte GET instead.
+        var request = URLRequest(url: originalURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
+        request.setValue("VideoPlayer/1.0 (iOS; WebDAV)", forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+
+        do {
+            // Returns as soon as response headers arrive; the media body is not
+            // consumed. The final response URL is PikPak's signed CDN stream URL.
+            let (_, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200...399).contains(http.statusCode) else { return originalURL }
+            return response.url ?? originalURL
+        } catch {
+            // Let the player try the authenticated WebDAV URL without adding a
+            // second blocking probe when redirect resolution is unavailable.
+            return originalURL
+        }
+    }
+
     func streamHeaders() -> [String: String] {
         var headers: [String: String] = [
             "User-Agent": "VideoPlayer/1.0 (iOS; AVPlayer; WebDAV)",

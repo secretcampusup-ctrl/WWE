@@ -825,20 +825,36 @@ class AppViewModel: ObservableObject {
 
     func play(file: WebDAVFile, server: WebDAVServer) {
         let client = WebDAVClient(server: server)
-        guard let url = client.streamURL(for: file) else {
+        guard client.streamURL(for: file) != nil else {
             errorMessage = "Could not build stream URL for this file"
             return
         }
-        let headers = client.streamHeaders()
-        // Auto-save WebDAV streams to library too
-        let saved = saveDirectLink(
-            url.absoluteString,
-            resolvedStream: url,
-            source: .webdav,
-            title: file.name,
-            fileSizeBytes: file.size
-        )
-        startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
+        isLoading = true
+        errorMessage = nil
+        // Never leave the previous video mounted while a fresh signed URL resolves.
+        nowPlaying = nil
+        nowPlayingURL = nil
+        nowPlayingHeaders = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isLoading = false }
+            guard let url = await client.resolvedStreamURL(for: file) else {
+                self.errorMessage = "Could not resolve the signed playback URL"
+                return
+            }
+            // A signed cross-host CDN URL no longer needs WebDAV Basic auth.
+            // Keep headers only when playback remains on the configured DAV host.
+            let sameHost = url.host?.caseInsensitiveCompare(server.baseURL?.host ?? "") == .orderedSame
+            let headers = sameHost ? client.streamHeaders() : [:]
+            let saved = self.saveDirectLink(
+                url.absoluteString,
+                resolvedStream: url,
+                source: .webdav,
+                title: file.name,
+                fileSizeBytes: file.size
+            )
+            self.startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
+        }
     }
 
     // MARK: - Open any link (direct / HLS / PikPak share / magnet via PikPak)
