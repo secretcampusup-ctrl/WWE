@@ -243,6 +243,14 @@ final class PikPakAutoSyncManager: ObservableObject {
               let servers = try? JSONDecoder().decode([WebDAVServer].self, from: data) else {
             return nil
         }
-        return servers.first { $0.host.lowercased().contains("dav.mypikpak.com") }
+        guard var server = servers.first(where: { $0.host.lowercased().contains("dav.mypikpak.com") }) else {
+            return nil
+        }
+        if let password = SecureCredentialStore.string(
+            for: AppCredentialKeys.webDAVPassword(serverID: server.id)
+        ) {
+            server.password = password
+        }
+        return server
     }
 }

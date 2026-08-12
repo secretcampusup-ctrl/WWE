@@ -141,19 +141,28 @@ final class PikPakClient {
     // MARK: - Account storage
 
     func loadAccount() -> PikPakAccount? {
-        guard let data = UserDefaults.standard.data(forKey: accountKey),
-              let acc = try? JSONDecoder().decode(PikPakAccount.self, from: data) else { return nil }
-        return acc
+        if let data = SecureCredentialStore.data(for: AppCredentialKeys.pikpakAccount),
+           let account = try? JSONDecoder().decode(PikPakAccount.self, from: data) {
+            return account
+        }
+        guard let legacy = UserDefaults.standard.data(forKey: accountKey),
+              let account = try? JSONDecoder().decode(PikPakAccount.self, from: legacy) else { return nil }
+        if SecureCredentialStore.set(legacy, for: AppCredentialKeys.pikpakAccount) {
+            UserDefaults.standard.removeObject(forKey: accountKey)
+        }
+        return account
     }
 
     func saveAccount(_ account: PikPakAccount) {
         if let data = try? JSONEncoder().encode(account) {
-            UserDefaults.standard.set(data, forKey: accountKey)
-            UserDefaults.standard.synchronize()
+            if SecureCredentialStore.set(data, for: AppCredentialKeys.pikpakAccount) {
+                UserDefaults.standard.removeObject(forKey: accountKey)
+            }
         }
     }
 
     func logout() {
+        SecureCredentialStore.remove(AppCredentialKeys.pikpakAccount)
         UserDefaults.standard.removeObject(forKey: accountKey)
     }
 

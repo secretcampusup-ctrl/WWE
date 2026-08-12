@@ -11,13 +11,19 @@ struct ThePornDBSettings {
     /// الحصول على مفتاح API من UserDefaults
     static var apiKey: String {
         get {
-            if let userKey = UserDefaults.standard.string(forKey: "theporndb_api_key"), !userKey.isEmpty {
-                return userKey
+            if let stored = SecureCredentialStore.string(for: AppCredentialKeys.thePornDB) { return stored }
+            if let legacy = UserDefaults.standard.string(forKey: "theporndb_api_key"), !legacy.isEmpty {
+                if SecureCredentialStore.set(legacy, for: AppCredentialKeys.thePornDB) {
+                    UserDefaults.standard.removeObject(forKey: "theporndb_api_key")
+                }
+                return legacy
             }
-            return "6r14sZOEGrWSD7L9E1MZkP4g1wNSGrSMyIWh5dOh5f271c34"
+            return ""
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: "theporndb_api_key")
+            if SecureCredentialStore.set(newValue, for: AppCredentialKeys.thePornDB) {
+                UserDefaults.standard.removeObject(forKey: "theporndb_api_key")
+            }
         }
     }
 

@@ -81,13 +81,36 @@ class AppViewModel: ObservableObject {
     func loadServers() {
         guard let data = UserDefaults.standard.data(forKey: serversKey),
               let decoded = try? JSONDecoder().decode([WebDAVServer].self, from: data) else { return }
-        servers = decoded
+        servers = decoded.map { server in
+            var value = server
+            let key = AppCredentialKeys.webDAVPassword(serverID: server.id)
+            if let secured = SecureCredentialStore.string(for: key) {
+                value.password = secured
+            } else if !server.password.isEmpty,
+                      SecureCredentialStore.set(server.password, for: key) {
+                // The next save removes the successfully migrated plaintext copy.
+                value.password = server.password
+            }
+            return value
+        }
+        saveServers()
     }
 
     func saveServers() {
-        if let data = try? JSONEncoder().encode(servers) {
+        let safeServers = servers.map { server -> WebDAVServer in
+            var persisted = server
+            if server.password.isEmpty {
+                SecureCredentialStore.remove(AppCredentialKeys.webDAVPassword(serverID: server.id))
+            } else if SecureCredentialStore.set(
+                server.password,
+                for: AppCredentialKeys.webDAVPassword(serverID: server.id)
+            ) {
+                persisted.password = ""
+            }
+            return persisted
+        }
+        if let data = try? JSONEncoder().encode(safeServers) {
             UserDefaults.standard.set(data, forKey: serversKey)
-            UserDefaults.standard.synchronize()
         }
     }
 
@@ -104,11 +127,15 @@ class AppViewModel: ObservableObject {
     }
 
     func deleteServer(at offsets: IndexSet) {
+        for index in offsets where servers.indices.contains(index) {
+            SecureCredentialStore.remove(AppCredentialKeys.webDAVPassword(serverID: servers[index].id))
+        }
         servers.remove(atOffsets: offsets)
         saveServers()
     }
 
     func deleteServer(_ server: WebDAVServer) {
+        SecureCredentialStore.remove(AppCredentialKeys.webDAVPassword(serverID: server.id))
         servers.removeAll { $0.id == server.id }
         saveServers()
     }
