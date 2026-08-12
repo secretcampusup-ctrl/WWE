@@ -402,6 +402,7 @@ class AppViewModel: ObservableObject {
         if let idx = savedLinks.firstIndex(where: {
             $0.urlString == key || $0.urlString == raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 || ($0.pikpakFileId != nil && $0.pikpakFileId == pikpakFileId)
+                || (posterCacheKey != nil && $0.favoriteIdentity == posterCacheKey)
         }) {
             var existing = savedLinks.remove(at: idx)
             existing.lastPlayed = Date()
@@ -894,7 +895,8 @@ class AppViewModel: ObservableObject {
                 resolvedStream: url,
                 source: .webdav,
                 title: file.name,
-                fileSizeBytes: file.size
+                fileSizeBytes: file.size,
+                posterCacheKey: "webdav|\(server.id.uuidString)|\(file.path)"
             )
             self.startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
         }
@@ -904,6 +906,11 @@ class AppViewModel: ObservableObject {
     /// This prevents a dismissed player from being reconstructed with its stale URL.
     func endPlaybackPresentation() {
         DiagnosticLogger.log("PLAYBACK END")
+        // The final player callback updates the in-memory resume position just
+        // before this runs. Flush it now so reopening immediately can resume.
+        progressPersistWorkItem?.cancel()
+        progressPersistWorkItem = nil
+        persistSavedLinksImmediately()
         nowPlayingURL = nil
         nowPlayingHeaders = nil
         nowPlayingResumeAt = 0

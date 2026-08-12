@@ -1018,8 +1018,15 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         mediaPlayer.media = media
         mediaPlayer.play()
         if resumeAt > 3 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.mediaPlayer.time = VLCTime(int: Int32(resumeAt * 1000))
+            // Remote VLC media is not always seekable after a fixed 0.6s delay.
+            // Retry while the same stream is alive; stop after the seek sticks.
+            for delay in [0.6, 1.5, 3.0, 5.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, !self.isStopped, self.currentURL == url else { return }
+                    let current = Double(self.mediaPlayer.time.intValue) / 1000
+                    guard current < resumeAt - 2 else { return }
+                    self.mediaPlayer.time = VLCTime(int: Int32(clamping: Int64(resumeAt * 1000)))
+                }
             }
         }
         loadingTimer?.invalidate()
