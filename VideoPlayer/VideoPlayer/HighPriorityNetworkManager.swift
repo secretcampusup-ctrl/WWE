@@ -98,15 +98,11 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
     func resetAfterPlayback() {
         sessionLock.lock()
         let oldVideo = videoSession
-        let oldResponsive = responsiveSession
         let newVideo = Self.makeVideoSession()
-        let newResponsive = Self.makeResponsiveSession()
         videoSession = newVideo
-        responsiveSession = newResponsive
         sessionLock.unlock()
 
         Self.logTaskCounts(oldVideo, label: "resetAfterPlayback: oldVideoSession BEFORE invalidate")
-        Self.logTaskCounts(oldResponsive, label: "resetAfterPlayback: oldResponsiveSession BEFORE finish")
 
         // Playback can leave long-lived range requests/connections behind on
         // videoSession — those aren't useful to any in-flight caller anymore,
@@ -127,7 +123,6 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         // finishTasksAndInvalidate (not invalidateAndCancel) so any requests
         // that are still genuinely in flight elsewhere in the app get to
         // complete normally instead of being aborted.
-        oldResponsive.finishTasksAndInvalidate()
 
         // Follow-up snapshots: if the NEW sessions accumulate stuck tasks in
         // the seconds right after a close, this is where we'll see it in the
@@ -135,7 +130,6 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         for delay in [2, 6, 12] {
             DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(delay)) {
                 Self.logTaskCounts(newVideo, label: "T+\(delay)s after close: NEW videoSession")
-                Self.logTaskCounts(newResponsive, label: "T+\(delay)s after close: NEW responsiveSession")
             }
         }
     }
