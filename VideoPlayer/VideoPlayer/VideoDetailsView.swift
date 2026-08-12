@@ -137,6 +137,7 @@ struct VideoDetailsView: View {
     var onDelete: (() -> Void)? = nil
     var dismissOnPlay: Bool = true
     var onSelectEpisode: ((String) -> Void)? = nil
+    var onClose: (() -> Void)? = nil
 
     @State private var frame: UIImage?
     @State private var showDownloadManager = false
@@ -386,6 +387,10 @@ struct VideoDetailsView: View {
         }
     }
 
+    private func closeDetails() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
     private var preview: some View {
         GeometryReader { proxy in
             ZStack {
@@ -426,7 +431,7 @@ struct VideoDetailsView: View {
 
                 VStack {
                     HStack {
-                        Button { dismiss() } label: {
+                        Button(action: closeDetails) {
                             Image(systemName: "xmark")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundColor(.white)
@@ -438,6 +443,8 @@ struct VideoDetailsView: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .contentShape(Circle())
+                        .zIndex(100)
 
                         Spacer()
                     }

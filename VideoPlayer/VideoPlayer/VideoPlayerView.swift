@@ -54,7 +54,6 @@ struct VideoPlayerView: View {
     @State private var subtitleFont: PlayerSubtitleFont = PlayerSubtitleFont(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.font") ?? "") ?? .rounded
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
-    @State private var didResetNetworkAfterPlayback = false
 
     // Temporary test mode: every file uses the main Apple player only.
     // The MKV player remains in the project but is not selected.
@@ -363,7 +362,7 @@ struct VideoPlayerView: View {
             // Tear the media asset down first, then rotate only the video request
             // pool. Doing this in the opposite order can leave AVPlayer's range
             // request alive while unrelated API calls resume.
-            resetNetworkAfterPlaybackIfNeeded()
+            releasePlaybackResources()
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
         .onChange(of: engine.errorMessage) { error in
@@ -400,22 +399,15 @@ struct VideoPlayerView: View {
         if usesMKVPlayer { mkvControls.stop() }
         else { engine.cleanup() }
         BackgroundVideoCacheManager.shared.cancelAllPrefetches()
-        resetNetworkAfterPlaybackIfNeeded()
+        releasePlaybackResources()
         dismiss()
     }
 
-    private func resetNetworkAfterPlaybackIfNeeded() {
-        // Clear the active-playback guard on every close, even if the network
-        // reset below already ran once for this view instance — otherwise a
-        // reused player instance would leave a stale URL marked "playing"
-        // forever, permanently blocking that item's thumbnail from generating.
+    private func releasePlaybackResources() {
         if ActivePlaybackGuard.currentURL?.absoluteString == url.absoluteString {
             ActivePlaybackGuard.currentURL = nil
         }
         VideoDownloadManager.shared.resumeAfterActivePlayback()
-        guard !didResetNetworkAfterPlayback else { return }
-        didResetNetworkAfterPlayback = true
-        HighPriorityNetworkManager.shared.resetAfterPlayback()
     }
 
     private var topOverlay: some View {

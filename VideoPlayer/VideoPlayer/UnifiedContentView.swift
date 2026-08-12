@@ -461,6 +461,7 @@ struct UnifiedContentView: View {
 }
 
 private struct UnifiedMediaDetailsHost: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
     @StateObject private var selection: UnifiedEpisodeSelection
@@ -486,7 +487,8 @@ private struct UnifiedMediaDetailsHost: View {
             onSelectEpisode: { episodeID in
                 guard selection.id != episodeID else { return }
                 selection.id = episodeID
-            }
+            },
+            onClose: { dismiss() }
         )
         .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
     }

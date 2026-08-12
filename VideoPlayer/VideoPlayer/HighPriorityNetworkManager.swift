@@ -95,33 +95,6 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         try await data(for: URLRequest(url: url), trafficClass: .responsiveData)
     }
 
-    func resetAfterPlayback() {
-        sessionLock.lock()
-        let oldVideo = videoSession
-        let oldResponsive = responsiveSession
-        let newVideo = Self.makeVideoSession()
-        let newResponsive = Self.makeResponsiveSession()
-        videoSession = newVideo
-        responsiveSession = newResponsive
-        sessionLock.unlock()
-
-        Self.logTaskCounts(oldVideo, label: "resetAfterPlayback: old video pool")
-        Self.logTaskCounts(oldResponsive, label: "resetAfterPlayback: old API pool")
-
-        // Cancel abandoned range, metadata and poster tasks only after the new
-        // sessions are installed. New TMDB/Discover calls can therefore start
-        // immediately on clean connections while stale playback work is torn down.
-        oldVideo.invalidateAndCancel()
-        oldResponsive.invalidateAndCancel()
-
-        for delay in [2, 6] {
-            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(delay)) {
-                Self.logTaskCounts(newVideo, label: "T+\(delay)s: new video pool")
-                Self.logTaskCounts(newResponsive, label: "T+\(delay)s: new API pool")
-            }
-        }
-    }
-
     private static func logTaskCounts(_ session: URLSession, label: String) {
         session.getAllTasks { tasks in
             let states = tasks.map { "\($0.taskIdentifier):\($0.state.rawValue)" }.joined(separator: ", ")
