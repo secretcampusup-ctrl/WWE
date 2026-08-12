@@ -1311,7 +1311,7 @@ struct CoverImageSearchView: View {
         do {
             var request = URLRequest(url: url)
             request.setValue("Mozilla/5.0 (iPhone)", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard !Task.isCancelled else { return }
             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
                   let page = String(data: data, encoding: .utf8) else {

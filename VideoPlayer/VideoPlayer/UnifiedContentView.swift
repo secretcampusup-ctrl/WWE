@@ -345,7 +345,9 @@ struct UnifiedContentView: View {
                 }
             }
             .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
-            .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
+            .fullScreenCover(item: $selected) { entry in
+                detailsHost(entry, onClose: { selected = nil })
+            }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
         }
     }
@@ -436,8 +438,8 @@ struct UnifiedContentView: View {
         .padding(.top, 70)
     }
 
-    @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry) -> some View {
-        UnifiedMediaDetailsHost(vm: vm, entry: entry)
+    @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry, onClose: @escaping () -> Void) -> some View {
+        UnifiedMediaDetailsHost(vm: vm, entry: entry, onClose: onClose)
     }
 
     private func play(_ source: UnifiedSource) {
@@ -461,15 +463,16 @@ struct UnifiedContentView: View {
 }
 
 private struct UnifiedMediaDetailsHost: View {
-    @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
+    let onClose: () -> Void
     @StateObject private var selection: UnifiedEpisodeSelection
     @State private var showPlayer = false
 
-    init(vm: AppViewModel, entry: UnifiedMediaEntry) {
+    init(vm: AppViewModel, entry: UnifiedMediaEntry, onClose: @escaping () -> Void) {
         self.vm = vm
         self.entry = entry
+        self.onClose = onClose
         _selection = StateObject(wrappedValue: UnifiedEpisodeSelection(id: entry.episodes.first?.id))
     }
 
@@ -488,7 +491,7 @@ private struct UnifiedMediaDetailsHost: View {
                 guard selection.id != episodeID else { return }
                 selection.id = episodeID
             },
-            onClose: { dismiss() }
+            onClose: onClose
         )
         .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
     }

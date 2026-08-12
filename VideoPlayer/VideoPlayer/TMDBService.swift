@@ -340,7 +340,7 @@ actor TMDBService {
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 25
-        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw TMDBRequestError(message: "TMDB returned no HTTP response.") }
         guard 200..<300 ~= http.statusCode else {
             let payload = try? decoder.decode(TMDBErrorPayload.self, from: data)

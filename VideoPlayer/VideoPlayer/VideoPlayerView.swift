@@ -407,7 +407,6 @@ struct VideoPlayerView: View {
         if ActivePlaybackGuard.currentURL?.absoluteString == url.absoluteString {
             ActivePlaybackGuard.currentURL = nil
         }
-        VideoDownloadManager.shared.resumeAfterActivePlayback()
     }
 
     private var topOverlay: some View {

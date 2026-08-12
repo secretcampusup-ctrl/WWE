@@ -126,10 +126,8 @@ final class WebDAVClient: NSObject {
             originalHost: originalURL.host
         )
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.networkServiceType = .video
         configuration.timeoutIntervalForRequest = 8
         configuration.timeoutIntervalForResource = 8
-        configuration.waitsForConnectivity = false
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let resolverSession = URLSession(
             configuration: configuration,
@@ -349,10 +347,8 @@ final class WebDAVClient: NSObject {
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.networkServiceType = .responsiveData // PROPFIND/metadata should remain responsive beside video transfers.
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 90
-        config.waitsForConnectivity = true
         config.httpAdditionalHeaders = [
             "User-Agent": "VideoPlayer/1.0 (WebDAV; iOS)"
         ]

@@ -58,7 +58,6 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     /// Downloads this manager paused itself because a video started streaming —
     /// tracked separately from user-paused or background-expired downloads so
     /// only these get auto-resumed once playback ends.
-    private var pausedForPlaybackIDs: Set<UUID> = []
 
     private struct TaskDescriptor: Codable {
         let id: UUID
@@ -73,14 +72,8 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
             withIdentifier: Self.sessionIdentifier
         )
         configuration.sessionSendsLaunchEvents = true
-        configuration.networkServiceType = .video // Sustained movie downloads: ask iOS for video-oriented scheduling.
         configuration.isDiscretionary = false
-        configuration.waitsForConnectivity = true
-        configuration.allowsCellularAccess = true
-        configuration.allowsExpensiveNetworkAccess = true
-        configuration.allowsConstrainedNetworkAccess = true
         configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        configuration.httpMaximumConnectionsPerHost = 3
         configuration.httpCookieStorage = HTTPCookieStorage.shared
         configuration.httpShouldSetCookies = true
 
@@ -245,38 +238,6 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
         ))
     }
 
-    /// Downloads never yielded bandwidth to active playback before — a
-    /// download running in the background competes with the video stream for
-    /// the same connection/bandwidth budget, which is enough on its own to
-    /// stall playback regardless of what UI screen is open. Called when a
-    /// video starts.
-    func pauseAllForActivePlayback() {
-        let targets = downloads.filter { $0.isActive && !pausedForPlaybackIDs.contains($0.id) }
-        guard !targets.isEmpty else {
-            DiagnosticLogger.log("DOWNLOADS none active — nothing to pause for playback")
-            return
-        }
-        DiagnosticLogger.log("DOWNLOADS pausing \(targets.count) active download(s) for playback: \(targets.map(\.title))")
-        for download in targets {
-            pausedForPlaybackIDs.insert(download.id)
-            pause(download)
-        }
-    }
-
-    /// Called when playback ends — resumes only the downloads this manager
-    /// paused for that playback session, leaving anything the user paused
-    /// themselves (or that iOS paused for background expiration) alone.
-    func resumeAfterActivePlayback() {
-        let ids = pausedForPlaybackIDs
-        pausedForPlaybackIDs.removeAll()
-        guard !ids.isEmpty else { return }
-        DiagnosticLogger.log("DOWNLOADS resuming \(ids.count) download(s) after playback ended")
-        for id in ids {
-            guard let download = downloads.first(where: { $0.id == id }) else { continue }
-            resume(download)
-        }
-    }
-
     func pause(_ download: ManagedVideoDownload, backgroundExpiration: Bool = false) {
         guard download.state == .downloading || download.state == .queued else { return }
         if let task = hlsTasks[download.id] {
@@ -414,14 +375,12 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 7 * 24 * 60 * 60
-        request.networkServiceType = .video // This is a movie file, not an API request.
         for (field, value) in headers {
             request.setValue(value, forHTTPHeaderField: field)
         }
 
         let task = session.downloadTask(with: request)
         task.taskDescription = encoded(descriptor)
-        task.priority = 1.0 // Highest URLSession priority; advisory within iOS, not router/ISP control.
         task.resume()
 
         if let index = downloads.firstIndex(where: { $0.id == id }) {

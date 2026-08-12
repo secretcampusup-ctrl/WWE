@@ -45,7 +45,7 @@ enum LinkResolver {
         var request = URLRequest(url: apiURL)
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw NSError(domain: "TwitterVideo", code: 2, userInfo: [NSLocalizedDescriptionKey: "Twitter video service is unavailable"])
         }

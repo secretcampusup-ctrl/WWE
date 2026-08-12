@@ -326,7 +326,7 @@ struct VideoDetailsView: View {
                 if let loadedEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = loadedEpisode }
                 if VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) == nil,
                    let imageURL = loadedEpisode?.imageURL,
-                   let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
+                   let (data, _) = try? await URLSession.shared.data(from: imageURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled, requestedItemID == item.id else { return }
                     frame = image
@@ -343,7 +343,7 @@ struct VideoDetailsView: View {
             if tmdbEpisode?.imageURL == nil,
                VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
                let imageURL = tmdbDetails?.imageURL,
-               let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
+               let (data, _) = try? await URLSession.shared.data(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 frame = image
@@ -1040,7 +1040,7 @@ private struct CachedTMDBImage: View {
                 image = cached
                 return
             }
-            guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: url),
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
                   let loaded = UIImage(data: data),
                   !Task.isCancelled else { return }
             VideoThumbnailLoader.cacheImage(loaded, forStableKey: key)
