@@ -345,9 +345,7 @@ struct UnifiedContentView: View {
                 }
             }
             .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
-            .fullScreenCover(item: $selected) { entry in
-                detailsHost(entry, onClose: { selected = nil })
-            }
+            .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
         }
     }
@@ -438,23 +436,16 @@ struct UnifiedContentView: View {
         .padding(.top, 70)
     }
 
-    @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry, onClose: @escaping () -> Void) -> some View {
-        UnifiedMediaDetailsHost(vm: vm, entry: entry, onClose: onClose)
+    @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry) -> some View {
+        UnifiedMediaDetailsHost(vm: vm, entry: entry)
     }
 
     private func play(_ source: UnifiedSource) {
         switch source {
         case let .webDAV(server, file): vm.play(file: file, server: server)
-        case let .offcloud(transfer, file):
+        case let .offcloud(_, file):
             guard let url = file.streamURL else { return }
-            if let saved = vm.saveDirectLink(
-                url.absoluteString,
-                resolvedStream: url,
-                source: .offcloud,
-                title: file.name,
-                fileSizeBytes: file.size,
-                posterCacheKey: "offcloud|\(transfer.requestId)|\(file.id)"
-            ) {
+            if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
                 vm.playSavedLink(saved)
             } else {
                 _ = vm.playOnlineURL(url.absoluteString)
@@ -472,14 +463,12 @@ struct UnifiedContentView: View {
 private struct UnifiedMediaDetailsHost: View {
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
-    let onClose: () -> Void
     @StateObject private var selection: UnifiedEpisodeSelection
     @State private var showPlayer = false
 
-    init(vm: AppViewModel, entry: UnifiedMediaEntry, onClose: @escaping () -> Void) {
+    init(vm: AppViewModel, entry: UnifiedMediaEntry) {
         self.vm = vm
         self.entry = entry
-        self.onClose = onClose
         _selection = StateObject(wrappedValue: UnifiedEpisodeSelection(id: entry.episodes.first?.id))
     }
 
@@ -497,8 +486,7 @@ private struct UnifiedMediaDetailsHost: View {
             onSelectEpisode: { episodeID in
                 guard selection.id != episodeID else { return }
                 selection.id = episodeID
-            },
-            onClose: onClose
+            }
         )
         .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
     }
@@ -532,16 +520,9 @@ private struct UnifiedMediaDetailsHost: View {
         let source = selectedEpisode?.source ?? entry.source
         switch source {
         case let .webDAV(server, file): vm.play(file: file, server: server)
-        case let .offcloud(transfer, file):
+        case let .offcloud(_, file):
             guard let url = file.streamURL else { return }
-            if let saved = vm.saveDirectLink(
-                url.absoluteString,
-                resolvedStream: url,
-                source: .offcloud,
-                title: file.name,
-                fileSizeBytes: file.size,
-                posterCacheKey: "offcloud|\(transfer.requestId)|\(file.id)"
-            ) {
+            if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
                 vm.playSavedLink(saved)
             } else { _ = vm.playOnlineURL(url.absoluteString) }
         }
@@ -557,7 +538,7 @@ struct UnifiedSettingsView: View {
     @State private var destination: SettingsDestination?
 
     private enum SettingsDestination: String, Identifiable {
-        case webdav, offcloud, tmdb, adult, diagnostics
+        case webdav, offcloud, tmdb, adult
         var id: String { rawValue }
     }
 
@@ -571,9 +552,6 @@ struct UnifiedSettingsView: View {
                 Section("Metadata") {
                     settingsRow("TMDB", "Movies and TV metadata — first priority", "film.stack.fill", .tmdb)
                     settingsRow("ThePornDB", "Temporarily paused — TMDB only mode", "pause.circle.fill", .adult)
-                }
-                Section("Troubleshooting") {
-                    settingsRow("Diagnostics Log", "See exactly what happens when playback stalls", "doc.text.magnifyingglass", .diagnostics)
                 }
                 Section {
                     Text("TMDB is currently the only active metadata provider. Original file names are sent without release-keyword filtering. Unmatched files remain in Unknown.")
@@ -602,7 +580,6 @@ struct UnifiedSettingsView: View {
         case .webdav: WebDAVSettingsView(vm: vm)
         case .tmdb: TMDBSettingsView()
         case .adult: ThePornDBSettingsView()
-        case .diagnostics: DiagnosticLogView()
         case .offcloud:
             NavigationStack {
                 Form {

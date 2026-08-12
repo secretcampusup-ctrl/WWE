@@ -108,8 +108,10 @@ final class PikPakClient {
 
     private init() {
         let config = URLSessionConfiguration.default
+        config.networkServiceType = .responsiveData // API/auth JSON: prioritize UI responsiveness, not bulk throughput.
         config.timeoutIntervalForRequest = 35
         config.timeoutIntervalForResource = 120
+        config.waitsForConnectivity = true
         session = URLSession(configuration: config)
     }
 
@@ -141,28 +143,19 @@ final class PikPakClient {
     // MARK: - Account storage
 
     func loadAccount() -> PikPakAccount? {
-        if let data = SecureCredentialStore.data(for: AppCredentialKeys.pikpakAccount),
-           let account = try? JSONDecoder().decode(PikPakAccount.self, from: data) {
-            return account
-        }
-        guard let legacy = UserDefaults.standard.data(forKey: accountKey),
-              let account = try? JSONDecoder().decode(PikPakAccount.self, from: legacy) else { return nil }
-        if SecureCredentialStore.set(legacy, for: AppCredentialKeys.pikpakAccount) {
-            UserDefaults.standard.removeObject(forKey: accountKey)
-        }
-        return account
+        guard let data = UserDefaults.standard.data(forKey: accountKey),
+              let acc = try? JSONDecoder().decode(PikPakAccount.self, from: data) else { return nil }
+        return acc
     }
 
     func saveAccount(_ account: PikPakAccount) {
         if let data = try? JSONEncoder().encode(account) {
-            if SecureCredentialStore.set(data, for: AppCredentialKeys.pikpakAccount) {
-                UserDefaults.standard.removeObject(forKey: accountKey)
-            }
+            UserDefaults.standard.set(data, forKey: accountKey)
+            UserDefaults.standard.synchronize()
         }
     }
 
     func logout() {
-        SecureCredentialStore.remove(AppCredentialKeys.pikpakAccount)
         UserDefaults.standard.removeObject(forKey: accountKey)
     }
 

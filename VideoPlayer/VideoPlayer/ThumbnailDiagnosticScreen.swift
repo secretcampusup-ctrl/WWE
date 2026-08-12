@@ -7,7 +7,6 @@ struct ThumbnailDiagnosticScreen: View {
     @State private var searchTerm: String = ""
     @State private var showingExportAlert = false
     @State private var exportSuccess = false
-    @State private var shareText: String?
     
     private let maxDisplayLogs = 200
     
@@ -96,30 +95,6 @@ struct ThumbnailDiagnosticScreen: View {
                     .cornerRadius(8)
                     .padding(16)
                 }
-
-                // Share the disk-persisted log directly — this is the version
-                // that survives a crash or force-quit, unlike the in-memory
-                // list above (which is what "Export Logs" writes).
-                Button {
-                    shareText = VideoThumbnailLoader.exportPersistedDiagnosticLog()
-                } label: {
-                    HStack {
-                        Image(systemName: "ladybug.fill")
-                        Text("Share Persisted Log (survives crash)")
-                    }
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity)
-                    .background(Color.red.opacity(0.8))
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 16)
-                }
-                .sheet(isPresented: Binding(get: { shareText != nil }, set: { if !$0 { shareText = nil } })) {
-                    if let shareText {
-                        ActivityShareSheet(items: [shareText])
-                    }
-                }
             }
             .navigationTitle("Thumbnails Debug")
             .navigationBarTitleDisplayMode(.inline)
@@ -203,16 +178,6 @@ extension Date {
         formatter.formatOptions = [.withFullDate, .withTime, .withDashSeparatorInDate]
         return formatter.string(from: self).replacingOccurrences(of: ":", with: "-")
     }
-}
-
-// MARK: - Share Sheet
-
-struct ActivityShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - Preview

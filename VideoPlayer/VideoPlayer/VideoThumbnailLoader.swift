@@ -7,29 +7,6 @@ import CryptoKit
 import Kingfisher
 import KingfisherWebP
 
-// MARK: - Active playback guard
-
-/// Tracks the URL that's currently streaming to the player, so on-demand
-/// thumbnail generation never opens a second connection to that same URL
-/// while it's live. Some CDNs (e.g. PikPak) throttle a signed URL as soon as
-/// they see two concurrent connections to it, which stalls the real playback
-/// request — and since it's the same URL, waiting instead of skipping would
-/// just recreate the problem the moment the probe fires. AppViewModel updates
-/// this whenever `nowPlayingURL` changes.
-enum ActivePlaybackGuard {
-    private static let lock = NSLock()
-    private static var _url: URL?
-
-    static var currentURL: URL? {
-        get { lock.lock(); defer { lock.unlock() }; return _url }
-        set { lock.lock(); _url = newValue; lock.unlock() }
-    }
-
-    static func isActive(_ url: URL) -> Bool {
-        currentURL?.absoluteString == url.absoluteString
-    }
-}
-
 // MARK: - Diagnostic Logger
 
 /// In-memory logging system for thumbnail diagnostics
@@ -608,16 +585,6 @@ enum VideoThumbnailLoader {
         // manual, user-initiated action.
         guard isAutomaticDownloadEnabled else { return nil }
 
-        // Never open a second connection to the exact URL that's actively streaming —
-        // see ActivePlaybackGuard. The Recent list re-renders this item's cell the
-        // instant playback starts, and without this check it would race the real
-        // player connection for the same signed CDN URL.
-        guard !ActivePlaybackGuard.isActive(remote) else {
-            DiagnosticLogger.log("POSTER blocked — \(remote.lastPathComponent) is actively playing")
-            return nil
-        }
-        DiagnosticLogger.log("POSTER extracting frame from \(remote.lastPathComponent)")
-
         return await requestCoordinator.image(for: "\(cacheKeyStr)|\(Int(targetPixelSize.width))x\(Int(targetPixelSize.height))") { [remote, headers] in
             let image: UIImage?
             if targetPixelSize.width <= 360 {
@@ -1124,8 +1091,7 @@ enum VideoThumbnailLoader {
                 stableKey: link.favoriteIdentity ?? "saved|\(link.id.uuidString)",
                 headers: [:],
                 fileExtension: link.fileExtension,
-                searchQuery: VideoTitleFormatter.title(from: link.title),
-                allowsVideoFrameExtraction: false
+                searchQuery: VideoTitleFormatter.title(from: link.title)
             )
         }
         schedulePrefetchPosters(requests)
@@ -1171,27 +1137,11 @@ enum VideoThumbnailLoader {
                 maxRetries: 1,
                 targetPointSize: target
             )
-        } else if request.allowsVideoFrameExtraction {
+        } else {
             image = await loadPoster(
                 for: request.url,
                 headers: request.headers,
                 stableKey: request.stableKey,
-                targetPointSize: target
-            )
-        }
-
-        // Saved/Recent items use metadata artwork only. Reopening the remote
-        // movie as an AVAsset here can leave a hidden range request alive after
-        // playback and starve every API request in the app.
-        if image == nil, !request.allowsVideoFrameExtraction,
-           let query = request.searchQuery, !query.isEmpty,
-           let details = await TMDBService.shared.details(for: query),
-           let posterURL = details.posterURL {
-            image = await downloadRemoteImage(
-                from: posterURL,
-                headers: [:],
-                stableKey: request.stableKey,
-                maxRetries: 1,
                 targetPointSize: target
             )
         }
@@ -1374,11 +1324,6 @@ enum VideoThumbnailLoader {
         ThumbnailDiagnosticLogger.shared.exportLogs()
     }
 
-    /// Export the disk-persisted diagnostic log that survives app restarts.
-    static func exportPersistedDiagnosticLog() -> String {
-        DiagnosticLogger.readAll()
-    }
-
     /// Log a diagnostic message
     static func logDiagnostic(_ message: String, level: LogLevel = .info, fileID: String? = nil) {
         ThumbnailDiagnosticLogger.shared.log(message, level: level, fileID: fileID)
@@ -1393,7 +1338,6 @@ enum VideoThumbnailLoader {
         let stableKey: String
         let headers: [String: String]
         let fileExtension: String
-        var allowsVideoFrameExtraction: Bool = true
         /// عنوان نصي اختياري يُستخدم كخطوة أخيرة لجلب غلاف تلقائيًا من ThePornDB
         /// إن فشلت الصورة البعيدة واستخراج إطار الفيديو معًا.
         let searchQuery: String?
@@ -1404,8 +1348,7 @@ enum VideoThumbnailLoader {
             stableKey: String,
             headers: [String: String],
             fileExtension: String,
-            searchQuery: String? = nil,
-            allowsVideoFrameExtraction: Bool = true
+            searchQuery: String? = nil
         ) {
             self.url = url
             self.remotePosterURL = remotePosterURL
@@ -1413,7 +1356,6 @@ enum VideoThumbnailLoader {
             self.headers = headers
             self.fileExtension = fileExtension
             self.searchQuery = searchQuery
-            self.allowsVideoFrameExtraction = allowsVideoFrameExtraction
         }
     }
 }
@@ -1617,7 +1559,7 @@ struct PosterThumbnailView: View {
             let details = await TMDBService.shared.details(for: title)
             var tmdbPoster: UIImage?
             if let posterURL = details?.posterURL,
-               let (data, _) = try? await AppNetworkSession.shared.data(from: posterURL) {
+               let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: posterURL) {
                 tmdbPoster = UIImage(data: data)
             }
             await ThumbnailLoadGate.shared.release()

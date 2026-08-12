@@ -55,9 +55,6 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     private var hlsTasks: [UUID: Task<Void, Never>] = [:]
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var lifecycleObservers: [NSObjectProtocol] = []
-    /// Downloads this manager paused itself because a video started streaming —
-    /// tracked separately from user-paused or background-expired downloads so
-    /// only these get auto-resumed once playback ends.
 
     private struct TaskDescriptor: Codable {
         let id: UUID
@@ -72,8 +69,14 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
             withIdentifier: Self.sessionIdentifier
         )
         configuration.sessionSendsLaunchEvents = true
+        configuration.networkServiceType = .video // Sustained movie downloads: ask iOS for video-oriented scheduling.
         configuration.isDiscretionary = false
+        configuration.waitsForConnectivity = true
+        configuration.allowsCellularAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
+        configuration.allowsConstrainedNetworkAccess = true
         configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
+        configuration.httpMaximumConnectionsPerHost = 3
         configuration.httpCookieStorage = HTTPCookieStorage.shared
         configuration.httpShouldSetCookies = true
 
@@ -375,12 +378,14 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 7 * 24 * 60 * 60
+        request.networkServiceType = .video // This is a movie file, not an API request.
         for (field, value) in headers {
             request.setValue(value, forHTTPHeaderField: field)
         }
 
         let task = session.downloadTask(with: request)
         task.taskDescription = encoded(descriptor)
+        task.priority = 1.0 // Highest URLSession priority; advisory within iOS, not router/ISP control.
         task.resume()
 
         if let index = downloads.firstIndex(where: { $0.id == id }) {

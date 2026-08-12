@@ -8,7 +8,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        VideoThumbnailLoader.logDiagnostic("========== APP LAUNCH ==========", level: .info)
         // Must happen before this method returns, per BGTaskScheduler requirements.
         PikPakAutoSyncManager.shared.registerBackgroundTask()
         return true

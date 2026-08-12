@@ -20,10 +20,6 @@ struct VideoPlaylist: Identifiable, Codable, Equatable {
 
 @MainActor
 class AppViewModel: ObservableObject {
-    private let persistQueue = DispatchQueue(label: "com.mortaza.minoz.VideoPlayer.persist", qos: .utility)
-    private var lastProgressPersistDate: Date?
-    private var progressPersistWorkItem: DispatchWorkItem?
-    private let progressPersistInterval: TimeInterval = 4
     @Published var servers: [WebDAVServer] = []
     @Published var currentFiles: [WebDAVFile] = []
     @Published var isLoading = false
@@ -74,36 +70,13 @@ class AppViewModel: ObservableObject {
     func loadServers() {
         guard let data = UserDefaults.standard.data(forKey: serversKey),
               let decoded = try? JSONDecoder().decode([WebDAVServer].self, from: data) else { return }
-        servers = decoded.map { server in
-            var value = server
-            let key = AppCredentialKeys.webDAVPassword(serverID: server.id)
-            if let secured = SecureCredentialStore.string(for: key) {
-                value.password = secured
-            } else if !server.password.isEmpty,
-                      SecureCredentialStore.set(server.password, for: key) {
-                // The next save removes the successfully migrated plaintext copy.
-                value.password = server.password
-            }
-            return value
-        }
-        saveServers()
+        servers = decoded
     }
 
     func saveServers() {
-        let safeServers = servers.map { server -> WebDAVServer in
-            var persisted = server
-            if server.password.isEmpty {
-                SecureCredentialStore.remove(AppCredentialKeys.webDAVPassword(serverID: server.id))
-            } else if SecureCredentialStore.set(
-                server.password,
-                for: AppCredentialKeys.webDAVPassword(serverID: server.id)
-            ) {
-                persisted.password = ""
-            }
-            return persisted
-        }
-        if let data = try? JSONEncoder().encode(safeServers) {
+        if let data = try? JSONEncoder().encode(servers) {
             UserDefaults.standard.set(data, forKey: serversKey)
+            UserDefaults.standard.synchronize()
         }
     }
 
@@ -120,15 +93,11 @@ class AppViewModel: ObservableObject {
     }
 
     func deleteServer(at offsets: IndexSet) {
-        for index in offsets where servers.indices.contains(index) {
-            SecureCredentialStore.remove(AppCredentialKeys.webDAVPassword(serverID: servers[index].id))
-        }
         servers.remove(atOffsets: offsets)
         saveServers()
     }
 
     func deleteServer(_ server: WebDAVServer) {
-        SecureCredentialStore.remove(AppCredentialKeys.webDAVPassword(serverID: server.id))
         servers.removeAll { $0.id == server.id }
         saveServers()
     }
@@ -148,42 +117,10 @@ class AppViewModel: ObservableObject {
     }
 
     func persistSavedLinksImmediately() {
-        persistSavedLinksAsync()
-    }
-
-    /// Encodes and writes `savedLinks` off the main thread. `synchronize()` is
-    /// deliberately not called — it forces a synchronous disk flush and is
-    /// unnecessary; `UserDefaults.set` already persists in the background.
-    private func persistSavedLinksAsync() {
-        DiagnosticLogger.log("PERSIST savedLinks (\(savedLinks.count) items) — off-main")
-        let snapshot = savedLinks
-        persistQueue.async {
-            guard let data = try? JSONEncoder().encode(snapshot) else { return }
-            UserDefaults.standard.set(data, forKey: self.linksKey)
+        if let data = try? JSONEncoder().encode(savedLinks) {
+            UserDefaults.standard.set(data, forKey: linksKey)
+            UserDefaults.standard.synchronize()
         }
-    }
-
-    /// Used for high-frequency updates (playback progress ticks ~4×/s). Encoding
-    /// and writing the whole `savedLinks` array on every tick was blocking the
-    /// main thread continuously for as long as any video played — which is why
-    /// the rest of the app (including unrelated screens like Discover) appeared
-    /// to lose its network connection the moment playback started. This coalesces
-    /// those writes to at most one every few seconds, off the main thread, with
-    /// a trailing write so the final position is never lost for long.
-    private func persistSavedLinksThrottled() {
-        progressPersistWorkItem?.cancel()
-        let now = Date()
-        if let last = lastProgressPersistDate, now.timeIntervalSince(last) < progressPersistInterval {
-            let work = DispatchWorkItem { [weak self] in
-                self?.lastProgressPersistDate = Date()
-                self?.persistSavedLinksAsync()
-            }
-            progressPersistWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + progressPersistInterval, execute: work)
-            return
-        }
-        lastProgressPersistDate = now
-        persistSavedLinksAsync()
     }
 
     func isFavorite(_ item: VideoDetailsItem) -> Bool {
@@ -296,10 +233,9 @@ class AppViewModel: ObservableObject {
     }
 
     func persistPlaylistsImmediately() {
-        let snapshot = playlists
-        persistQueue.async {
-            guard let data = try? JSONEncoder().encode(snapshot) else { return }
-            UserDefaults.standard.set(data, forKey: self.playlistsKey)
+        if let data = try? JSONEncoder().encode(playlists) {
+            UserDefaults.standard.set(data, forKey: playlistsKey)
+            UserDefaults.standard.synchronize()
         }
     }
 
@@ -402,7 +338,6 @@ class AppViewModel: ObservableObject {
         if let idx = savedLinks.firstIndex(where: {
             $0.urlString == key || $0.urlString == raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 || ($0.pikpakFileId != nil && $0.pikpakFileId == pikpakFileId)
-                || (posterCacheKey != nil && $0.favoriteIdentity == posterCacheKey)
         }) {
             var existing = savedLinks.remove(at: idx)
             existing.lastPlayed = Date()
@@ -432,14 +367,7 @@ class AppViewModel: ObservableObject {
         savedLinks.insert(link, at: 0)
         copyProviderPosterIfAvailable(from: posterCacheKey, to: link.id)
         persistSavedLinksImmediately()
-        // Deferred, not fired immediately: a fresh link is usually saved in the
-        // same instant playback starts on this exact URL. Probing it right away
-        // opens a second concurrent connection to the same signed CDN URL,
-        // which some providers (e.g. PikPak) throttle — stalling the real
-        // playback request and, since it shares the video connection pool,
-        // every other in-flight video request too. See the matching note in
-        // startPlayback about the background-cache transfer causing the same
-        // CDN throttling.
+        if link.fileSizeBytes == nil { fetchFileSize(for: link) }
         return link
     }
 
@@ -448,6 +376,36 @@ class AppViewModel: ObservableObject {
         guard let providerKey,
               let poster = VideoThumbnailLoader.cachedImage(forStableKey: providerKey) else { return }
         VideoThumbnailLoader.cacheImage(poster, forStableKey: "saved|\(savedID.uuidString)")
+    }
+    private func refreshMissingFileSizes() {
+        for link in savedLinks where link.fileSizeBytes == nil {
+            fetchFileSize(for: link)
+        }
+    }
+
+    private func fetchFileSize(for link: SavedVideoLink) {
+        guard link.fileSizeBytes == nil, let url = link.url else { return }
+        Task {
+            func size(from response: URLResponse) -> Int64? {
+                guard let http = response as? HTTPURLResponse else { return nil }
+                if let length = http.value(forHTTPHeaderField: "Content-Length"), let bytes = Int64(length), bytes > 0 { return bytes }
+                if let range = http.value(forHTTPHeaderField: "Content-Range"), let total = range.split(separator: "/").last, let bytes = Int64(total), bytes > 0 { return bytes }
+                return nil
+            }
+            var head = URLRequest(url: url)
+            head.httpMethod = "HEAD"
+            head.timeoutInterval = 12
+            var discovered = (try? await HighPriorityNetworkManager.shared.videoData(for: head)).flatMap { size(from: $0.1) }
+            if discovered == nil {
+                var range = URLRequest(url: url)
+                range.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+                range.timeoutInterval = 12
+                discovered = (try? await HighPriorityNetworkManager.shared.videoData(for: range)).flatMap { size(from: $0.1) }
+            }
+            guard let bytes = discovered, let index = savedLinks.firstIndex(where: { $0.id == link.id }) else { return }
+            savedLinks[index].fileSizeBytes = bytes
+            persistSavedLinksImmediately()
+        }
     }
     func deleteSavedLink(_ link: SavedVideoLink) {
         BackgroundVideoCacheManager.shared.removeCachedVideo(
@@ -614,8 +572,6 @@ class AppViewModel: ObservableObject {
             contentType: "video"
         )
         nowPlayingURL = playbackURL
-        ActivePlaybackGuard.currentURL = playbackURL
-        DiagnosticLogger.log("PLAYBACK START url=\(playbackURL.lastPathComponent)")
 
         // Let the player transition appear first; moving the library card before
         // the cover opens causes a visible jump in the library.
@@ -663,7 +619,7 @@ class AppViewModel: ObservableObject {
         } else if seconds > 3 {
             savedLinks[idx].resumePositionSeconds = seconds
         }
-        persistSavedLinksThrottled()
+        persistSavedLinksImmediately()
     }
 
     func resumeSeconds(for link: SavedVideoLink) -> Double {
@@ -878,7 +834,6 @@ class AppViewModel: ObservableObject {
         nowPlaying = nil
         nowPlayingURL = nil
         nowPlayingHeaders = nil
-        ActivePlaybackGuard.currentURL = nil
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.isLoading = false }
@@ -895,8 +850,7 @@ class AppViewModel: ObservableObject {
                 resolvedStream: url,
                 source: .webdav,
                 title: file.name,
-                fileSizeBytes: file.size,
-                posterCacheKey: "webdav|\(server.id.uuidString)|\(file.path)"
+                fileSizeBytes: file.size
             )
             self.startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
         }
@@ -905,18 +859,11 @@ class AppViewModel: ObservableObject {
     /// Releases the presented playback state without touching metadata/API work.
     /// This prevents a dismissed player from being reconstructed with its stale URL.
     func endPlaybackPresentation() {
-        DiagnosticLogger.log("PLAYBACK END")
-        // The final player callback updates the in-memory resume position just
-        // before this runs. Flush it now so reopening immediately can resume.
-        progressPersistWorkItem?.cancel()
-        progressPersistWorkItem = nil
-        persistSavedLinksImmediately()
         nowPlayingURL = nil
         nowPlayingHeaders = nil
         nowPlayingResumeAt = 0
         nowPlayingLinkId = nil
         nowPlaying = nil
-        ActivePlaybackGuard.currentURL = nil
     }
 
     // MARK: - Open any link (direct / HLS / PikPak share / magnet via PikPak)

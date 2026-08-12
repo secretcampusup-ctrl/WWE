@@ -6,9 +6,6 @@ struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
     @State private var selectedTab = 0
     @Namespace private var dockSelection
-    // Always-reachable diagnostic log entry point — long-press the bottom
-    // dock for ~1.5s from any tab, regardless of PikPak login state.
-    @State private var showingDiagnosticScreen = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -30,17 +27,11 @@ struct MainTabView: View {
             .shadow(color: .black.opacity(0.38), radius: 18, y: 8)
             .padding(.horizontal, 20)
             .padding(.bottom, 1)
-            .onLongPressGesture(minimumDuration: 1.5) {
-                showingDiagnosticScreen = true
-            }
         }
         .animation(.easeOut(duration: 0.18), value: selectedTab)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
         .preferredColorScheme(.dark)
-        .fullScreenCover(isPresented: $showingDiagnosticScreen) {
-            ThumbnailDiagnosticScreen()
-        }
     }
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
@@ -182,7 +173,7 @@ private final class PirateBayLatestModel: ObservableObject {
         guard let url else { error = "Invalid request"; return }
         do {
             var request = URLRequest(url: url); request.timeoutInterval = 25; request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            let (data, response) = try await AppNetworkSession.shared.data(for: request)
+            let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
             let decoded = try JSONDecoder().decode([PirateBayResult].self, from: data)
             guard requestID == currentID else { return }
@@ -349,7 +340,7 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
         guard imageURLs.isEmpty, let url = URL(string: "https://apibay.org/t.php?id=\(id)") else { return }
         isLoading = true; defer { isLoading = false }
         do {
-            let (data, response) = try await AppNetworkSession.shared.data(from: url)
+            let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(from: url)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             let text = root.values.compactMap { $0 as? String }.joined(separator: "\n").replacingOccurrences(of: "&amp;", with: "&")
             let regex = try NSRegularExpression(pattern: #"https?://[^\s\]\[\"'<>]+"#, options: .caseInsensitive)
@@ -375,7 +366,7 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
         do {
             var request = URLRequest(url: url); request.timeoutInterval = 15
             request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await AppNetworkSession.shared.data(for: request)
+            let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
             if (response.mimeType ?? "").lowercased().hasPrefix("image/") { return url }
             guard let html = String(data: data, encoding: .utf8) else { return nil }
             let patterns = [#"property=["']og:image["'][^>]+content=["']([^"']+)"#, #"content=["']([^"']+)["'][^>]+property=["']og:image"#, #"<img[^>]+src=["']([^"']+)"#]

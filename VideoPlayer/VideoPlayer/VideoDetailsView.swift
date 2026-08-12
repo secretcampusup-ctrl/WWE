@@ -137,7 +137,6 @@ struct VideoDetailsView: View {
     var onDelete: (() -> Void)? = nil
     var dismissOnPlay: Bool = true
     var onSelectEpisode: ((String) -> Void)? = nil
-    var onClose: (() -> Void)? = nil
 
     @State private var frame: UIImage?
     @State private var showDownloadManager = false
@@ -151,6 +150,9 @@ struct VideoDetailsView: View {
     var body: some View {
         NavigationStack {
             Group {
+                if isMovieDetailsPage {
+                    movieDetailsScreen
+                } else {
                     ZStack(alignment: .top) {
                         preview
 
@@ -223,15 +225,11 @@ struct VideoDetailsView: View {
                             }
                         }
                     }
+                }
             }
             .background(AppTheme.bg.ignoresSafeArea())
             .ignoresSafeArea(edges: .top)
             .toolbar(.hidden, for: .navigationBar)
-            .overlay(alignment: .topLeading) {
-                detailsCloseButton
-                    .padding(.leading, 16)
-                    .padding(.top, topSafeAreaInset + 8)
-            }
         }
         .preferredColorScheme(.dark)
         .task(id: detailsLoadingIdentity) {
@@ -331,7 +329,7 @@ struct VideoDetailsView: View {
                 if let loadedEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = loadedEpisode }
                 if VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) == nil,
                    let imageURL = loadedEpisode?.imageURL,
-                   let (data, _) = try? await AppNetworkSession.shared.data(from: imageURL),
+                   let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled, requestedItemID == item.id else { return }
                     frame = image
@@ -347,8 +345,8 @@ struct VideoDetailsView: View {
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil,
                VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
-               let imageURL = tmdbDetails?.imageURL,
-               let (data, _) = try? await AppNetworkSession.shared.data(from: imageURL),
+               let imageURL = isMovieDetailsPage ? tmdbDetails?.posterURL : tmdbDetails?.imageURL,
+               let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 frame = image
@@ -392,35 +390,374 @@ struct VideoDetailsView: View {
         }
     }
 
-    private func closeDetails() {
-        // Always dismiss the presentation that owns this screen. Unified
-        // Content also supplies onClose to clear its selected item, but relying
-        // on that state mutation alone from inside fullScreenCover can leave the
-        // presented controller on screen.
-        dismiss()
-        onClose?()
+    private var isMovieDetailsPage: Bool {
+        item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil
     }
 
-    private var detailsCloseButton: some View {
-        Button(action: closeDetails) {
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.backward")
-                    .font(.system(size: 15, weight: .bold))
-                Text("Back")
-                    .font(.system(size: 15, weight: .semibold))
+    private var movieDetailsScreen: some View {
+        ZStack(alignment: .top) {
+            GeometryReader { proxy in
+                ZStack {
+                    Color.black
+                    if let displayedFrame {
+                        // A blurred full-bleed layer extends the poster's own colors
+                        // into empty edges without stretching/cropping the artwork.
+                        Image(uiImage: displayedFrame)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .clipped()
+                            .blur(radius: 34)
+                            .scaleEffect(1.16)
+                            .saturation(1.12)
+                            .opacity(0.82)
+
+                        VStack(spacing: 0) {
+                            Image(uiImage: displayedFrame)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: proxy.size.width)
+                                .mask(
+                                    LinearGradient(
+                                        stops: [
+                                            .init(color: .white.opacity(0.96), location: 0),
+                                            .init(color: .white, location: 0.68),
+                                            .init(color: .white.opacity(0.55), location: 0.86),
+                                            .init(color: .clear, location: 1)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                            Spacer(minLength: 0)
+                        }
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                    }
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black.opacity(0.03), location: 0),
+                            .init(color: .black.opacity(0.10), location: 0.34),
+                            .init(color: .black.opacity(0.52), location: 0.62),
+                            .init(color: .black.opacity(0.92), location: 0.84),
+                            .init(color: .black, location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
             }
-            .foregroundColor(.white)
+            .ignoresSafeArea()
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: max(300, UIScreen.main.bounds.height * 0.39))
+
+                    VStack(spacing: 16) {
+                        movieTitleTreatment
+                        movieDataRow
+
+                        Label(
+                            resolvedMovieDetails.map { String(format: "%.1f", $0.voteAverage) } ?? "-",
+                            systemImage: "star.fill"
+                        )
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.yellow)
+                        .monospacedDigit()
+
+                        moviePlayButton
+                        movieActionRow
+
+                        if let details = resolvedMovieDetails, !details.overview.isEmpty {
+                            Text("\(details.title) — \(details.overview)")
+                                .font(.system(size: 12.5, weight: .regular))
+                                .foregroundStyle(.white.opacity(0.82))
+                                .lineSpacing(3)
+                                .lineLimit(3)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let details = resolvedMovieDetails, details.director != nil || !details.cast.isEmpty {
+                            movieCastAndCrew(details)
+                        }
+
+                        if !recentMovieLinks.isEmpty {
+                            movieRecentlyAddedSection
+                        }
+
+                        VStack(spacing: 3) {
+                            Text("\(item.source) · \(item.fileExtension.uppercased())")
+                            Text("My Library · Movies")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.34))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 8)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 42)
+                }
+            }
+
+            HStack {
+                movieTopButton(icon: "chevron.left") { dismiss() }
+                Spacer()
+                Menu {
+                    Button(action: startDownload) { Label("Download", systemImage: "arrow.down.circle") }
+                    Button { showPlaylistPicker = true } label: { Label("Add to Playlist", systemImage: "text.badge.plus") }
+                    if onDelete != nil {
+                        Button(role: .destructive) { showDeleteConfirmation = true } label: { Label("Delete", systemImage: "trash") }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(Color.white.opacity(0.18)))
+                }
+            }
             .padding(.horizontal, 16)
-            .frame(height: 46)
-            .background(Color.black.opacity(0.72), in: Capsule())
-            .overlay(
-                Capsule().stroke(Color.white.opacity(0.24), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-            .contentShape(Capsule())
+            .padding(.top, topSafeAreaInset + 8)
+        }
+    }
+
+    private var movieTitleTreatment: some View {
+        Group {
+            if let logoURL = resolvedMovieDetails?.logoURL {
+                CachedTMDBImage(url: logoURL, contentMode: .fit)
+                .frame(maxWidth: 270, minHeight: 72, maxHeight: 122)
+            } else {
+                fallbackMovieTitle
+            }
+        }
+        .shadow(color: .black.opacity(0.92), radius: 5, x: 0, y: 3)
+        .shadow(color: .black.opacity(0.6), radius: 14)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var fallbackMovieTitle: some View {
+        Text(resolvedMovieDetails?.title.uppercased() ?? item.displayTitle.uppercased())
+            .font(.system(size: 38, weight: .black, design: .rounded))
+            .italic()
+            .tracking(-1.6)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .minimumScaleFactor(0.55)
+            .foregroundStyle(.white)
+    }
+
+    private var movieDataRow: some View {
+        HStack(spacing: 8) {
+            Text(movieReleaseDateLabel)
+            movieDataDivider
+            Text(resolvedMovieDetails?.productionCountries?.first ?? "-")
+            movieDataDivider
+            Text(resolvedMovieDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
+            movieDataDivider
+            Text("[\(movieCertificationLabel)]")
+        }
+        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+        .foregroundStyle(.white.opacity(0.88))
+        .lineLimit(1)
+        .minimumScaleFactor(0.65)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var movieDataDivider: some View {
+        Rectangle().fill(Color.white.opacity(0.34)).frame(width: 1, height: 12)
+    }
+
+    private var movieReleaseDateLabel: String {
+        guard let raw = resolvedMovieDetails?.releaseDate else { return movieYearLabel }
+        let input = DateFormatter()
+        input.locale = Locale(identifier: "en_US_POSIX")
+        input.dateFormat = "yyyy-MM-dd"
+        guard let date = input.date(from: raw) else { return raw }
+        let output = DateFormatter()
+        output.locale = Locale(identifier: "en_US_POSIX")
+        output.dateFormat = "MM/dd/yyyy"
+        return output.string(from: date)
+    }
+
+    private var movieCertificationLabel: String {
+        guard let value = resolvedMovieDetails?.certification, !value.isEmpty else { return "NR" }
+        return value
+    }
+
+    private var moviePlayButton: some View {
+        Button(action: playAndClose) {
+            VStack(spacing: 2) {
+                Label(hasMovieProgress ? "Resume" : "Play", systemImage: "play.fill")
+                    .font(.system(size: 15, weight: .bold))
+                if hasMovieProgress {
+                    Text("Played: \(movieProgressPercent)%")
+                        .font(.system(size: 9, weight: .semibold))
+                        .opacity(0.65)
+                }
+            }
+            .foregroundStyle(Color.black.opacity(0.86))
+            .frame(maxWidth: .infinity)
+            .frame(height: hasMovieProgress ? 52 : 46)
+            .background(Color.white.opacity(0.92), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+    }
+
+    private var hasMovieProgress: Bool {
+        (item.resumePositionSeconds ?? 0) > 3
+    }
+
+    private var movieProgressPercent: Int {
+        guard let current = item.resumePositionSeconds, current > 0,
+              let duration = item.durationSeconds, duration > 0 else { return 1 }
+        return min(99, max(1, Int((current / duration) * 100)))
+    }
+
+    private var movieActionRow: some View {
+        HStack {
+            movieActionButton(icon: "arrow.down.circle", action: startDownload)
+            Spacer()
+            movieActionButton(icon: vm.isFavorite(item) ? "heart.fill" : "heart") { _ = vm.toggleFavorite(item) }
+            Spacer()
+            movieActionButton(icon: "text.badge.plus") { showPlaylistPicker = true }
+            Spacer()
+            movieActionButton(icon: "flag") {
+                if onDelete != nil { showDeleteConfirmation = true }
+                else { showDeleteUnavailable = true }
+            }
+        }
+        .padding(.horizontal, 22)
+    }
+
+    private func movieActionButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 42, height: 36)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Close video details")
+    }
+
+    private func movieTopButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 42, height: 42)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func movieCastAndCrew(_ details: TMDBTitleDetails) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Cast & Crew")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    if let director = details.director {
+                        moviePersonCard(name: director.name, role: "Director", imageURL: director.imageURL)
+                    }
+                    ForEach(details.cast.prefix(12)) { member in
+                        moviePersonCard(name: member.name, role: member.character, imageURL: member.imageURL)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func moviePersonCard(name: String, role: String, imageURL: URL?) -> some View {
+        VStack(spacing: 5) {
+            CachedTMDBImage(url: imageURL, contentMode: .fill, placeholderSystemName: "person.fill")
+            .frame(width: 66, height: 76)
+            .background(Color.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            Text(name).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+            Text(role).font(.system(size: 9)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+        }
+        .frame(width: 78)
+    }
+
+    private var recentMovieLinks: [SavedVideoLink] {
+        vm.savedLinks
+            .filter { link in
+                link.id.uuidString != item.id &&
+                VideoTitleFormatter.seasonEpisode(from: link.title) == nil &&
+                link.displayTitle.caseInsensitiveCompare(item.displayTitle) != .orderedSame
+            }
+            .sorted { $0.dateAdded > $1.dateAdded }
+            .prefix(12)
+            .map { $0 }
+    }
+
+    private var movieRecentlyAddedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recently Added")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 12) {
+                    ForEach(recentMovieLinks) { link in
+                        Button {
+                            dismiss()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                vm.playSavedLink(link)
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ZStack(alignment: .bottomTrailing) {
+                                    PosterThumbnailView(
+                                        url: link.url,
+                                        remotePosterURL: link.remotePosterURL.flatMap { URL(string: $0) },
+                                        customFileName: link.thumbnailFileName,
+                                        stableCacheKey: link.favoriteIdentity ?? "saved|\(link.id.uuidString)",
+                                        title: link.title,
+                                        badge: link.fileExtension,
+                                        preferredTier: .small
+                                    )
+                                    .frame(width: 92, height: 134)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                    Text(link.resolutionTier.badgeText ?? "HD")
+                                        .font(.system(size: 8, weight: .black, design: .rounded))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 5).padding(.vertical, 3)
+                                        .background(Color.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 5))
+                                        .padding(5)
+                                }
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.15)))
+
+                                Text(link.displayTitle)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .frame(width: 92, alignment: .leading)
+                                Text(recentDateLabel(link.dateAdded))
+                                    .font(.system(size: 8.5, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.48))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func recentDateLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     private var preview: some View {
@@ -461,6 +798,28 @@ struct VideoDetailsView: View {
                 }
                 .buttonStyle(.plain)
 
+                VStack {
+                    HStack {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, topSafeAreaInset + 8)
+
+                    Spacer()
+                }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .clipped()
@@ -483,7 +842,7 @@ struct VideoDetailsView: View {
     }
 
     private var tmdbTitleArtworkCacheKey: String {
-        "tmdb-title|" + stableMetadataCacheKey
+        (isMovieDetailsPage ? "tmdb-movie-poster-v1|" : "tmdb-title|") + stableMetadataCacheKey
     }
 
     private var topSafeAreaInset: CGFloat {
@@ -1048,7 +1407,7 @@ private struct CachedTMDBImage: View {
                 image = cached
                 return
             }
-            guard let (data, _) = try? await AppNetworkSession.shared.data(from: url),
+            guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: url),
                   let loaded = UIImage(data: data),
                   !Task.isCancelled else { return }
             VideoThumbnailLoader.cacheImage(loaded, forStableKey: key)

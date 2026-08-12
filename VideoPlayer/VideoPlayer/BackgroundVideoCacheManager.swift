@@ -28,7 +28,13 @@ final class BackgroundVideoCacheManager: NSObject, URLSessionDownloadDelegate {
         )
         configuration.sessionSendsLaunchEvents = true
         configuration.isDiscretionary = false
+        configuration.waitsForConnectivity = true
+        configuration.allowsCellularAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
+        configuration.allowsConstrainedNetworkAccess = true
         configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
+        configuration.httpMaximumConnectionsPerHost = 3
+        configuration.networkServiceType = .video // Prefetching video benefits from sustained throughput and fewer buffer stalls.
 
         let queue = OperationQueue()
         queue.name = "com.mortaza.minoz.VideoPlayer.background-cache.delegate"
@@ -65,10 +71,6 @@ final class BackgroundVideoCacheManager: NSObject, URLSessionDownloadDelegate {
     /// Stops obsolete hidden prefetches without touching user-visible downloads.
     func cancelAllPrefetches() {
         session.getAllTasks { [weak self] tasks in
-            VideoThumbnailLoader.logDiagnostic(
-                "BackgroundVideoCacheManager.cancelAllPrefetches — cancelling \(tasks.count) task(s)",
-                level: tasks.isEmpty ? .debug : .warning
-            )
             tasks.forEach { $0.cancel() }
             self?.stateQueue.async {
                 self?.activeKeys.removeAll()
@@ -168,6 +170,7 @@ final class BackgroundVideoCacheManager: NSObject, URLSessionDownloadDelegate {
 
             var request = URLRequest(url: remoteURL)
             request.timeoutInterval = 7 * 24 * 60 * 60
+            request.networkServiceType = .video // Cache payload is video; priority applies only inside iOS scheduling.
             for (field, value) in headers {
                 request.setValue(value, forHTTPHeaderField: field)
             }
@@ -176,6 +179,7 @@ final class BackgroundVideoCacheManager: NSObject, URLSessionDownloadDelegate {
 
             let task = self.session.downloadTask(with: request)
             task.taskDescription = self.encoded(descriptor)
+            task.priority = 1.0 // Highest task priority; it does not control the external router or server.
             task.resume()
         }
     }

@@ -151,15 +151,6 @@ final class PikPakAutoSyncManager: ObservableObject {
 
     private func sync() async {
         guard !isSyncing else { return }
-        // A sync walks the whole watched folder tree over WebDAV — running it
-        // while a video streams competes for the same connection/bandwidth
-        // budget as playback. Skip this run; the next scheduled one will pick
-        // up anything new once playback ends.
-        guard ActivePlaybackGuard.currentURL == nil else {
-            DiagnosticLogger.log("SYNC skipped — video is currently playing")
-            return
-        }
-        DiagnosticLogger.log("SYNC starting")
         guard let server = pikpakServer() else {
             lastError = "No PikPak server configured yet."
             return
@@ -243,14 +234,6 @@ final class PikPakAutoSyncManager: ObservableObject {
               let servers = try? JSONDecoder().decode([WebDAVServer].self, from: data) else {
             return nil
         }
-        guard var server = servers.first(where: { $0.host.lowercased().contains("dav.mypikpak.com") }) else {
-            return nil
-        }
-        if let password = SecureCredentialStore.string(
-            for: AppCredentialKeys.webDAVPassword(serverID: server.id)
-        ) {
-            server.password = password
-        }
-        return server
+        return servers.first { $0.host.lowercased().contains("dav.mypikpak.com") }
     }
 }

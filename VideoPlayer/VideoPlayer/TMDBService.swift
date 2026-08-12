@@ -3,22 +3,8 @@ import Foundation
 enum TMDBSettings {
     private static let tokenKey = "tmdb.readAccessToken"
     static var readAccessToken: String {
-        get {
-            if let stored = SecureCredentialStore.string(for: AppCredentialKeys.tmdb) { return stored }
-            // One-time migration from older builds.
-            guard let legacy = UserDefaults.standard.string(forKey: tokenKey), !legacy.isEmpty else { return "" }
-            let value = normalize(legacy)
-            if SecureCredentialStore.set(value, for: AppCredentialKeys.tmdb) {
-                UserDefaults.standard.removeObject(forKey: tokenKey)
-            }
-            return value
-        }
-        set {
-            let value = normalize(newValue)
-            if SecureCredentialStore.set(value, for: AppCredentialKeys.tmdb) {
-                UserDefaults.standard.removeObject(forKey: tokenKey)
-            }
-        }
+        get { UserDefaults.standard.string(forKey: tokenKey) ?? "" }
+        set { UserDefaults.standard.set(normalize(newValue), forKey: tokenKey) }
     }
     static var isConfigured: Bool { !readAccessToken.isEmpty }
 
@@ -354,7 +340,7 @@ actor TMDBService {
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 25
-        let (data, response) = try await AppNetworkSession.shared.data(for: request)
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         guard let http = response as? HTTPURLResponse else { throw TMDBRequestError(message: "TMDB returned no HTTP response.") }
         guard 200..<300 ~= http.statusCode else {
             let payload = try? decoder.decode(TMDBErrorPayload.self, from: data)

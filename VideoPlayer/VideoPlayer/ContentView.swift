@@ -180,15 +180,6 @@ struct ContentView: View {
         .fullScreenCover(item: $selectedPlaylistForSeeAll) { playlist in
             PlaylistAllView(vm: vm, playlist: playlist)
         }
-        .task(id: favoritesPosterPrefetchID) {
-            VideoThumbnailLoader.schedulePrefetchSavedLinks(vm.savedLinks)
-        }
-    }
-
-    private var favoritesPosterPrefetchID: [String] {
-        ["active|\(isActive)"] + vm.savedLinks.map {
-            "\($0.id.uuidString)|\($0.url?.absoluteString ?? "")|\($0.thumbnailFileName ?? "")|\($0.remotePosterURL ?? "")"
-        }
     }
 
     // MARK: - Header
@@ -1284,7 +1275,7 @@ struct CoverImageSearchView: View {
         do {
             var request = URLRequest(url: url)
             request.setValue("Mozilla/5.0 (iPhone)", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
             guard !Task.isCancelled else { return }
             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
                   let page = String(data: data, encoding: .utf8) else {
