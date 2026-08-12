@@ -399,9 +399,12 @@ struct VideoPlayerView: View {
         endCountdownTask?.cancel()
         if usesMKVPlayer { mkvControls.stop() }
         else { engine.cleanup() }
-        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
         resetNetworkAfterPlaybackIfNeeded()
         dismiss()
+        // BackgroundVideoCacheManager.shared.cancelAllPrefetches() intentionally
+        // NOT called here — dismiss() always triggers onDisappear right after,
+        // which already calls it. Calling it here too just fired the same
+        // getAllTasks()/cancel() sweep twice back-to-back on every close.
     }
 
     private func resetNetworkAfterPlaybackIfNeeded() {

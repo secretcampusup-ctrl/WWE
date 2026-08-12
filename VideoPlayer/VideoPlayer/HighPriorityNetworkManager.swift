@@ -98,12 +98,31 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
     func resetAfterPlayback() {
         sessionLock.lock()
         let oldVideo = videoSession
+        let oldResponsive = responsiveSession
         videoSession = Self.makeVideoSession()
+        responsiveSession = Self.makeResponsiveSession()
         sessionLock.unlock()
-        // Playback may leave long-lived range requests/connections behind. Reset
-        // only that pool; API/artwork requests use responsiveSession and must not
-        // be cancelled when the player closes.
+
+        // Playback can leave long-lived range requests/connections behind on
+        // videoSession — those aren't useful to any in-flight caller anymore,
+        // so cancel them outright.
         oldVideo.invalidateAndCancel()
+
+        // responsiveSession is shared by every other screen (Discover, TMDB,
+        // posters, link resolvers, file-size checks). A CDN that resets or
+        // silently drops a connection after a throttled/overlapping video
+        // request can leave that connection sitting "half-dead" in this
+        // session's reusable pool — later requests from *anywhere* in the app
+        // can then get handed that same bad connection and hang, which reads
+        // as "the whole app's network died" until the process is killed and
+        // the pool is rebuilt from scratch.
+        //
+        // Rotating this session on every playback close guarantees future
+        // requests always start from a clean connection pool. Use
+        // finishTasksAndInvalidate (not invalidateAndCancel) so any requests
+        // that are still genuinely in flight elsewhere in the app get to
+        // complete normally instead of being aborted.
+        oldResponsive.finishTasksAndInvalidate()
     }
 
     func data(for originalRequest: URLRequest, trafficClass: TrafficClass) async throws -> (Data, URLResponse) {
