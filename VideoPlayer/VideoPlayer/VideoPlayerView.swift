@@ -349,9 +349,7 @@ struct VideoPlayerView: View {
             hideTask?.cancel()
             BackgroundVideoCacheManager.shared.cancelAllPrefetches()
             if !usesMKVPlayer {
-                if engine.durationSeconds > 0 {
-                    onProgress?(engine.currentSeconds, engine.durationSeconds, engine.resolutionWidth, engine.resolutionHeight)
-                }
+                // cleanup() emits the final progress tick itself.
                 engine.cleanup()
             } else {
                 if mkvControls.durationSeconds > 0 {
@@ -396,9 +394,9 @@ struct VideoPlayerView: View {
     private func closePlayer() {
         hideTask?.cancel()
         endCountdownTask?.cancel()
-        if usesMKVPlayer { mkvControls.stop() }
-        else { engine.cleanup() }
-        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
+        // Cleanup is intentionally owned by onDisappear. Running it here as
+        // well caused AVPlayer to be torn down twice and VLC up to three times
+        // (button, onDisappear, dismantleUIView) during the dismissal animation.
         releasePlaybackResources()
         dismiss()
     }
@@ -965,6 +963,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var resetZoomToken = 0
     private var embeddedTrackRefreshAttempts = 0
     private var didLoadEmbeddedTracks = false
+    private var isStopped = true
     var onSingleTap: (() -> Void)?
     weak var controls: MKVPlaybackControls? {
         didSet { controls?.surface = self }
@@ -1029,6 +1028,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
+        isStopped = false
         currentURL = url
         currentHTTPHeaders = httpHeaders
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1158,11 +1158,14 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func stop() {
+        guard !isStopped else { return }
+        isStopped = true
+        loadingTimer?.invalidate()
+        loadingTimer = nil
+        controls?.surface = nil
         mediaPlayer.stop()
         mediaPlayer.media = nil
         mediaPlayer.drawable = nil
-        loadingTimer?.invalidate()
-        loadingTimer = nil
         currentURL = nil
         currentHTTPHeaders = nil
         controls?.isBuffering = false
