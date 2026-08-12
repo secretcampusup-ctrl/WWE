@@ -399,12 +399,9 @@ struct VideoPlayerView: View {
         endCountdownTask?.cancel()
         if usesMKVPlayer { mkvControls.stop() }
         else { engine.cleanup() }
+        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
         resetNetworkAfterPlaybackIfNeeded()
         dismiss()
-        // BackgroundVideoCacheManager.shared.cancelAllPrefetches() intentionally
-        // NOT called here — dismiss() always triggers onDisappear right after,
-        // which already calls it. Calling it here too just fired the same
-        // getAllTasks()/cancel() sweep twice back-to-back on every close.
     }
 
     private func resetNetworkAfterPlaybackIfNeeded() {
@@ -415,12 +412,9 @@ struct VideoPlayerView: View {
         if ActivePlaybackGuard.currentURL?.absoluteString == url.absoluteString {
             ActivePlaybackGuard.currentURL = nil
         }
+        VideoDownloadManager.shared.resumeAfterActivePlayback()
         guard !didResetNetworkAfterPlayback else { return }
         didResetNetworkAfterPlayback = true
-        VideoThumbnailLoader.logDiagnostic(
-            "Player closing — url=\(url.absoluteString) host=\(url.host ?? "?")",
-            level: .info
-        )
         HighPriorityNetworkManager.shared.resetAfterPlayback()
     }
 

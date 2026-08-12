@@ -250,6 +250,15 @@ struct VideoDetailsView: View {
                     frame = cachedSeriesPoster
                     return
                 }
+                if let seriesPoster = await VideoThumbnailLoader.loadSeriesPoster(named: item.displayTitle) {
+                    guard !Task.isCancelled, requestedURL == item.url else { return }
+                    VideoThumbnailLoader.cacheImage(seriesPoster, forStableKey: seriesKey)
+                    if let key = item.posterCacheKey {
+                        VideoThumbnailLoader.cacheImage(seriesPoster, forStableKey: key)
+                    }
+                    frame = seriesPoster
+                    return
+                }
             }
 
             let detailKey = "details-artwork|\(stableMetadataCacheKey)"
@@ -266,19 +275,14 @@ struct VideoDetailsView: View {
                 frame = cached
             }
 
-            // The details screen must never inspect a remote movie to build its
-            // artwork. AVAssetImageGenerator creates media range requests that
-            // can survive dismissal and starve the app's API traffic. Only local
-            // downloads may use a video frame; streams use TMDB/provider art.
-            if requestedURL.isFileURL,
-               let highResolution = await VideoThumbnailLoader.loadPoster(
-                    for: requestedURL,
-                    headers: [:],
-                    stableKey: detailKey,
-                    targetPointSize: ThumbnailPipeline.targetPointSize(for: .large)
-               ) {
-                    guard !Task.isCancelled, requestedURL == item.url else { return }
-                    frame = highResolution
+            if let highResolution = await VideoThumbnailLoader.loadPoster(
+                for: requestedURL,
+                headers: item.httpHeaders,
+                stableKey: detailKey,
+                targetPointSize: ThumbnailPipeline.targetPointSize(for: .large)
+            ) {
+                guard !Task.isCancelled, requestedURL == item.url else { return }
+                frame = highResolution
             }
             // Note: the ThePornDB cover/metadata fallback runs in its own `.task`
             // below (always on), so it isn't duplicated here.

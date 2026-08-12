@@ -55,6 +55,10 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     private var hlsTasks: [UUID: Task<Void, Never>] = [:]
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var lifecycleObservers: [NSObjectProtocol] = []
+    /// Downloads this manager paused itself because a video started streaming —
+    /// tracked separately from user-paused or background-expired downloads so
+    /// only these get auto-resumed once playback ends.
+    private var pausedForPlaybackIDs: Set<UUID> = []
 
     private struct TaskDescriptor: Codable {
         let id: UUID
@@ -239,6 +243,32 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
             content: content,
             trigger: nil
         ))
+    }
+
+    /// Downloads never yielded bandwidth to active playback before — a
+    /// download running in the background competes with the video stream for
+    /// the same connection/bandwidth budget, which is enough on its own to
+    /// stall playback regardless of what UI screen is open. Called when a
+    /// video starts.
+    func pauseAllForActivePlayback() {
+        let targets = downloads.filter { $0.isActive && !pausedForPlaybackIDs.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        for download in targets {
+            pausedForPlaybackIDs.insert(download.id)
+            pause(download)
+        }
+    }
+
+    /// Called when playback ends — resumes only the downloads this manager
+    /// paused for that playback session, leaving anything the user paused
+    /// themselves (or that iOS paused for background expiration) alone.
+    func resumeAfterActivePlayback() {
+        let ids = pausedForPlaybackIDs
+        pausedForPlaybackIDs.removeAll()
+        for id in ids {
+            guard let download = downloads.first(where: { $0.id == id }) else { continue }
+            resume(download)
+        }
     }
 
     func pause(_ download: ManagedVideoDownload, backgroundExpiration: Bool = false) {

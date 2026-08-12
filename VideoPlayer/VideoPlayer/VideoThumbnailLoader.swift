@@ -54,82 +54,24 @@ class ThumbnailDiagnosticLogger {
     private let maxEntries = 500
     private var logs: [ThumbnailLogEntry] = []
     private let lock = NSLock()
-
-    // MARK: - Disk persistence
-    // In-memory-only logging loses everything the instant the app crashes —
-    // which is exactly the moment we most need it. Every entry is appended to
-    // a small rotating file on disk immediately, so the freeze/crash sequence
-    // survives even a hard kill and can be pulled after relaunch.
-    private let diskQueue = DispatchQueue(label: "com.mortaza.minoz.diag.log.disk")
-    private let maxDiskBytes = 2 * 1024 * 1024 // 2 MB, then rotate.
-    private static var logFileURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("diagnostic_log.txt")
-    }
-    private static let isoFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withFullDate, .withTime, .withFractionalSeconds]
-        return f
-    }()
-
-    private init() {
-        loadPersistedLogsIntoMemory()
-    }
+    
+    private init() {}
     
     func log(_ message: String, level: LogLevel = .info, fileID: String? = nil) {
-        let entry = ThumbnailLogEntry(
-            timestamp: Date(),
-            message: message,
-            level: level,
-            fileID: fileID
-        )
         lock.withLock {
+            let entry = ThumbnailLogEntry(
+                timestamp: Date(),
+                message: message,
+                level: level,
+                fileID: fileID
+            )
             logs.append(entry)
+            
+            // Keep only last maxEntries
             if logs.count > maxEntries {
                 logs.removeFirst(logs.count - maxEntries)
             }
         }
-        appendToDisk(entry)
-    }
-
-    private func appendToDisk(_ entry: ThumbnailLogEntry) {
-        let timeStr = Self.isoFormatter.string(from: entry.timestamp)
-        let fileIDPart = entry.fileID.map { " [\($0)]" } ?? ""
-        let line = "[\(entry.level.rawValue)] \(timeStr)\(fileIDPart) \(entry.message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-        diskQueue.async {
-            let url = Self.logFileURL
-            let fm = FileManager.default
-            if !fm.fileExists(atPath: url.path) {
-                fm.createFile(atPath: url.path, contents: nil)
-            }
-            guard let handle = try? FileHandle(forWritingTo: url) else { return }
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            handle.write(data)
-            // Rotate once the file grows past the cap so this never becomes
-            // an unbounded write on a device that's already struggling.
-            if let size = try? fm.attributesOfItem(atPath: url.path)[.size] as? Int,
-               size > self.maxDiskBytes {
-                if let content = try? String(contentsOf: url, encoding: .utf8) {
-                    let trimmed = String(content.suffix(self.maxDiskBytes / 2))
-                    try? trimmed.write(to: url, atomically: true, encoding: .utf8)
-                }
-            }
-        }
-    }
-
-    private func loadPersistedLogsIntoMemory() {
-        guard let content = try? String(contentsOf: Self.logFileURL, encoding: .utf8) else { return }
-        let lines = content.split(separator: "\n").suffix(maxEntries)
-        for line in lines {
-            logs.append(ThumbnailLogEntry(timestamp: Date(), message: String(line), level: .info, fileID: nil))
-        }
-    }
-
-    /// Raw persisted log text — includes entries from before the last crash/kill.
-    func exportPersistedLogFile() -> String {
-        (try? String(contentsOf: Self.logFileURL, encoding: .utf8)) ?? "(no persisted log file yet)"
     }
     
     func getLogs(filter: LogLevel? = nil, searchTerm: String? = nil) -> [ThumbnailLogEntry] {
@@ -149,9 +91,6 @@ class ThumbnailDiagnosticLogger {
     func clear() {
         lock.withLock {
             logs.removeAll()
-        }
-        diskQueue.async {
-            try? FileManager.default.removeItem(at: Self.logFileURL)
         }
     }
     
@@ -663,11 +602,6 @@ enum VideoThumbnailLoader {
         if let cached = cachedImage(for: cacheIdentityURL) {
             return cached
         }
-
-        // Automatic artwork generation is local-file only. Reading a frame from
-        // a signed remote movie creates a second AVAsset range pipeline that can
-        // survive player dismissal and block unrelated API traffic.
-        guard remote.isFileURL else { return nil }
 
         // Nothing cached yet — generating a poster from here on means reading (and, for a
         // remote URL, downloading) video bytes automatically. Skip unless the caller is a
@@ -1232,7 +1166,7 @@ enum VideoThumbnailLoader {
                 maxRetries: 1,
                 targetPointSize: target
             )
-        } else if request.url.isFileURL {
+        } else {
             image = await loadPoster(
                 for: request.url,
                 headers: request.headers,
@@ -1417,12 +1351,6 @@ enum VideoThumbnailLoader {
     /// Export logs as string
     static func exportDiagnosticLogs() -> String {
         ThumbnailDiagnosticLogger.shared.exportLogs()
-    }
-
-    /// Export the disk-persisted log — survives a crash or force-quit, unlike
-    /// the in-memory list above which is lost the instant the process dies.
-    static func exportPersistedDiagnosticLog() -> String {
-        ThumbnailDiagnosticLogger.shared.exportPersistedLogFile()
     }
 
     /// Log a diagnostic message
@@ -1711,12 +1639,8 @@ struct PosterThumbnailView: View {
             }
         }
 
-        // Never extract a poster from a remote movie automatically. AVAsset's
-        // image generator opens range requests against the signed media URL;
-        // after playback closes those requests can keep the provider connection
-        // occupied and make every API screen appear offline. Remote items use
-        // TMDB/provider artwork (or the existing cache) only.
-        guard let videoURL = url, videoURL.isFileURL else {
+        // 3) Fallback: extract frame from video stream
+        guard let videoURL = url else {
             VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=fallback result=no_video_url", level: .warning, fileID: fileID)
             print("[PikPakThumbnail] file=\(fileID) stage=fallback result=no_video_url")
             return

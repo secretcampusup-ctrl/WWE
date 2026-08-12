@@ -418,12 +418,7 @@ class AppViewModel: ObservableObject {
         // every other in-flight video request too. See the matching note in
         // startPlayback about the background-cache transfer causing the same
         // CDN throttling.
-        // Do not probe signed remote media automatically. HEAD/range probes on
-        // the freshly played CDN URL can outlive the player and monopolize the
-        // provider connection. File size is populated from WebDAV metadata.
-        if link.fileSizeBytes == nil, link.url?.isFileURL == true {
-            scheduleFileSizeProbe(for: link)
-        }
+        if link.fileSizeBytes == nil { scheduleFileSizeProbe(for: link) }
         return link
     }
 
@@ -652,6 +647,7 @@ class AppViewModel: ObservableObject {
         )
         nowPlayingURL = playbackURL
         ActivePlaybackGuard.currentURL = playbackURL
+        VideoDownloadManager.shared.pauseAllForActivePlayback()
 
         // Let the player transition appear first; moving the library card before
         // the cover opens causes a visible jump in the library.
@@ -946,6 +942,7 @@ class AppViewModel: ObservableObject {
         nowPlayingLinkId = nil
         nowPlaying = nil
         ActivePlaybackGuard.currentURL = nil
+        VideoDownloadManager.shared.resumeAfterActivePlayback()
     }
 
     // MARK: - Open any link (direct / HLS / PikPak share / magnet via PikPak)
