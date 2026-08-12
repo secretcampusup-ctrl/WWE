@@ -417,6 +417,10 @@ struct VideoPlayerView: View {
         }
         guard !didResetNetworkAfterPlayback else { return }
         didResetNetworkAfterPlayback = true
+        VideoThumbnailLoader.logDiagnostic(
+            "Player closing — url=\(url.absoluteString) host=\(url.host ?? "?")",
+            level: .info
+        )
         HighPriorityNetworkManager.shared.resetAfterPlayback()
     }
 

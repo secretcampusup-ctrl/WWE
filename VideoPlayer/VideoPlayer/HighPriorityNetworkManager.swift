@@ -99,9 +99,14 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         sessionLock.lock()
         let oldVideo = videoSession
         let oldResponsive = responsiveSession
-        videoSession = Self.makeVideoSession()
-        responsiveSession = Self.makeResponsiveSession()
+        let newVideo = Self.makeVideoSession()
+        let newResponsive = Self.makeResponsiveSession()
+        videoSession = newVideo
+        responsiveSession = newResponsive
         sessionLock.unlock()
+
+        Self.logTaskCounts(oldVideo, label: "resetAfterPlayback: oldVideoSession BEFORE invalidate")
+        Self.logTaskCounts(oldResponsive, label: "resetAfterPlayback: oldResponsiveSession BEFORE finish")
 
         // Playback can leave long-lived range requests/connections behind on
         // videoSession — those aren't useful to any in-flight caller anymore,
@@ -123,6 +128,26 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         // that are still genuinely in flight elsewhere in the app get to
         // complete normally instead of being aborted.
         oldResponsive.finishTasksAndInvalidate()
+
+        // Follow-up snapshots: if the NEW sessions accumulate stuck tasks in
+        // the seconds right after a close, this is where we'll see it in the
+        // persisted log.
+        for delay in [2, 6, 12] {
+            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(delay)) {
+                Self.logTaskCounts(newVideo, label: "T+\(delay)s after close: NEW videoSession")
+                Self.logTaskCounts(newResponsive, label: "T+\(delay)s after close: NEW responsiveSession")
+            }
+        }
+    }
+
+    private static func logTaskCounts(_ session: URLSession, label: String) {
+        session.getAllTasks { tasks in
+            let states = tasks.map { "\($0.taskIdentifier):\($0.state.rawValue)" }.joined(separator: ", ")
+            VideoThumbnailLoader.logDiagnostic(
+                "\(label) — activeTasks=\(tasks.count) [\(states)]",
+                level: tasks.isEmpty ? .debug : .warning
+            )
+        }
     }
 
     func data(for originalRequest: URLRequest, trafficClass: TrafficClass) async throws -> (Data, URLResponse) {
@@ -136,19 +161,40 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         }
         sessionLock.unlock()
         let box = CancellableTaskBox()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let task = session.dataTask(with: request) { data, response, error in
-                    if let error { continuation.resume(throwing: error); return }
-                    guard let data, let response else { continuation.resume(throwing: URLError(.badServerResponse)); return }
-                    continuation.resume(returning: (data, response))
+        let startedAt = Date()
+        let host = request.url?.host ?? "?"
+        do {
+            let result = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let task = session.dataTask(with: request) { data, response, error in
+                        if let error { continuation.resume(throwing: error); return }
+                        guard let data, let response else { continuation.resume(throwing: URLError(.badServerResponse)); return }
+                        continuation.resume(returning: (data, response))
+                    }
+                    box.install(task)
+                    task.priority = trafficClass.priority
+                    task.resume()
                 }
-                box.install(task)
-                task.priority = trafficClass.priority
-                task.resume()
+            } onCancel: {
+                box.cancel()
             }
-        } onCancel: {
-            box.cancel()
+            let elapsed = Date().timeIntervalSince(startedAt)
+            if elapsed > 5 {
+                // Completed, but slow enough to be a symptom worth having in
+                // the log even though it didn't hang outright.
+                VideoThumbnailLoader.logDiagnostic(
+                    "\(trafficClass) request to \(host) took \(String(format: "%.1f", elapsed))s",
+                    level: .warning
+                )
+            }
+            return result
+        } catch {
+            let elapsed = Date().timeIntervalSince(startedAt)
+            VideoThumbnailLoader.logDiagnostic(
+                "\(trafficClass) request to \(host) FAILED after \(String(format: "%.1f", elapsed))s — \(error.localizedDescription)",
+                level: .error
+            )
+            throw error
         }
     }
 }
