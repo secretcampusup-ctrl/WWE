@@ -164,7 +164,7 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
         let startedAt = Date()
         let host = request.url?.host ?? "?"
         do {
-            let result = try await withTaskCancellationHandler {
+            let result: (Data, URLResponse) = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     let task = session.dataTask(with: request) { data, response, error in
                         if let error { continuation.resume(throwing: error); return }
