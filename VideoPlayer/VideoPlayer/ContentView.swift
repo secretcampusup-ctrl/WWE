@@ -48,8 +48,6 @@ struct ContentView: View {
                         nowPlayingCard(title: nowPlaying.name)
                     }
 
-                    recentSection
-
                     favoritesSection
 
                     ForEach(vm.playlists) { playlist in
@@ -309,31 +307,6 @@ struct ContentView: View {
 
     // MARK: - Poster library
 
-    private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "clock.fill").font(.system(size: 17)).foregroundColor(AppTheme.accent)
-                Text("Recent").font(.system(size: 20, weight: .semibold)).foregroundColor(Color(red: 0.8, green: 0.96, blue: 0.92))
-                Spacer()
-            }
-            if vm.recentLinks.isEmpty {
-                Text("No recently played videos").font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.38)).frame(maxWidth: .infinity).padding(.vertical, 22)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 14) {
-                        ForEach(Array(vm.recentLinks.prefix(12))) { link in
-                            MoviePosterCard(link: link, width: 112, height: 168) {
-                                dismissKeyboard(); detailLink = link
-                            } onSetThumbnail: { vm.setCustomThumbnail($0, for: link) }
-                            onClearThumbnail: { vm.clearCustomThumbnail(for: link) }
-                            onRename: { renameText = link.title; renameTarget = link }
-                            onDelete: { vm.deleteSavedLink(link) }
-                        }
-                    }.padding(.vertical, 2).padding(.trailing, 4)
-                }
-            }
-        }
-    }
     private var favoritesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {

@@ -40,13 +40,6 @@ class AppViewModel: ObservableObject {
     /// Library of auto-saved links (newest first).
     @Published var savedLinks: [SavedVideoLink] = []
 
-    /// Recently played (subset of library sorted by lastPlayed).
-    var recentLinks: [SavedVideoLink] {
-        savedLinks
-            .filter { $0.lastPlayed != nil }
-            .sorted { ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
-    }
-
     /// Videos explicitly pinned by the user, newest favorites first.
     var favoriteLinks: [SavedVideoLink] {
         savedLinks

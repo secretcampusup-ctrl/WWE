@@ -16,16 +16,13 @@ struct MainTabView: View {
                 .opacity(selectedTab == 0 ? 1 : 0).allowsHitTesting(selectedTab == 0)
             UnifiedContentView(vm: vm, isActive: selectedTab == 1)
                 .opacity(selectedTab == 1 ? 1 : 0).allowsHitTesting(selectedTab == 1)
-            RecentVideosView(vm: vm)
-                .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
             PirateBayView(vm: vm)
-                .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
+                .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
 
             HStack(spacing: 4) {
                 dockButton("Home", "house.fill", 0)
                 dockButton("Content", "rectangle.stack.fill", 1)
-                dockButton("Direct Links", "link", 2)
-                dockButton("Discover", "sailboat.fill", 3)
+                dockButton("Discover", "sailboat.fill", 2)
             }
             .padding(6)
             .background(.ultraThinMaterial, in: Capsule())
