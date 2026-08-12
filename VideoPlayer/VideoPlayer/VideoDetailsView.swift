@@ -388,7 +388,12 @@ struct VideoDetailsView: View {
     }
 
     private func closeDetails() {
-        if let onClose { onClose() } else { dismiss() }
+        // Always dismiss the presentation that owns this screen. Unified
+        // Content also supplies onClose to clear its selected item, but relying
+        // on that state mutation alone from inside fullScreenCover can leave the
+        // presented controller on screen.
+        dismiss()
+        onClose?()
     }
 
     private var preview: some View {
