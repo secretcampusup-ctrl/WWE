@@ -6,6 +6,9 @@ struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
     @State private var selectedTab = 0
     @Namespace private var dockSelection
+    // Always-reachable diagnostic log entry point — long-press the bottom
+    // dock for ~1.5s from any tab, regardless of PikPak login state.
+    @State private var showingDiagnosticScreen = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -30,11 +33,17 @@ struct MainTabView: View {
             .shadow(color: .black.opacity(0.38), radius: 18, y: 8)
             .padding(.horizontal, 20)
             .padding(.bottom, 1)
+            .onLongPressGesture(minimumDuration: 1.5) {
+                showingDiagnosticScreen = true
+            }
         }
         .animation(.easeOut(duration: 0.18), value: selectedTab)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
         .preferredColorScheme(.dark)
+        .fullScreenCover(isPresented: $showingDiagnosticScreen) {
+            ThumbnailDiagnosticScreen()
+        }
     }
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
