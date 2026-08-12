@@ -19,42 +19,6 @@ struct PlayerChapterMarker: Identifiable, Equatable {
     let fraction: Double
 }
 
-struct IntroMarker: Codable, Equatable {
-    let start: Double
-    let end: Double
-}
-
-enum IntroMarkerStore {
-    private static let defaultsKey = "player.detectedIntroMarkers.v1"
-
-    static func marker(for title: String) -> IntroMarker? {
-        load()[seriesKey(for: title)]
-    }
-
-    static func save(_ marker: IntroMarker, for title: String) {
-        guard marker.end > marker.start, marker.end <= 600 else { return }
-        var values = load()
-        values[seriesKey(for: title)] = marker
-        if let data = try? JSONEncoder().encode(values) {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
-        }
-    }
-
-    private static func load() -> [String: IntroMarker] {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
-              let values = try? JSONDecoder().decode([String: IntroMarker].self, from: data) else { return [:] }
-        return values
-    }
-
-    private static func seriesKey(for raw: String) -> String {
-        var value = raw.removingPercentEncoding ?? raw
-        value = value.replacingOccurrences(of: #"(?i)[\s._-]*S\d{1,3}[\s._-]*E\d{1,3}.*$"#, with: "", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"(?i)\b(2160p|1080p|720p|4k|hdr|web[- .]?dl|bluray|x26[45]|hevc)\b.*$"#, with: "", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"[._-]+"#, with: " ", options: .regularExpression)
-        return value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
 /// High-performance 4K-capable playback core.
 /// Uses AVFoundation hardware decode (VideoToolbox), async asset loading,
 /// adaptive buffering, and careful main-thread usage for smooth 60fps UI.
@@ -78,10 +42,8 @@ final class VideoPlaybackEngine: ObservableObject {
     @Published private(set) var didReachEnd = false
     @Published private(set) var audioTracks: [PlayerAudioTrackOption] = []
     @Published private(set) var selectedAudioTrackID: String?
-    @Published private(set) var introMarker: IntroMarker?
     @Published private(set) var subtitleTracks: [PlayerSubtitleTrackOption] = []
     @Published private(set) var selectedSubtitleTrackID: String?
-    @Published private(set) var chapters: [PlayerChapterMarker] = []
     @Published var resetZoomToken = 0
 
     /// Shared player — AVPlayerLayer attaches to this for GPU composition.
@@ -109,10 +71,6 @@ final class VideoPlaybackEngine: ObservableObject {
     private var pendingResumeSeconds: Double = 0
     private var didApplyResume = false
     private var loadedAsset: AVURLAsset?
-    private var pendingMetadataAsset: AVURLAsset?
-    private var pendingMetadataURL: URL?
-    private var pendingMetadataTitle = ""
-    private var pendingMetadataGeneration: UInt64 = 0
     private var progressSaveCounter: Int = 0
     private var isCleanedUp = true
     /// Keeps the scrubber at the requested spot while AVPlayer buffers the seek.
@@ -122,8 +80,6 @@ final class VideoPlaybackEngine: ObservableObject {
     /// True for the duration of a pinch/pan gesture on the video surface.
     /// See setInteracting(_:).
     private var isInteracting = false
-    private var audioOptionsByID: [String: AVMediaSelectionOption] = [:]
-    private var subtitleOptionsByID: [String: AVMediaSelectionOption] = [:]
 
     /// Background queue for asset I/O and non-UI work (not main thread).
     private let assetQueue = DispatchQueue(
@@ -167,10 +123,8 @@ final class VideoPlaybackEngine: ObservableObject {
         isCleanedUp = false
         errorMessage = nil
         didReachEnd = false
-        introMarker = title.isEmpty ? nil : IntroMarkerStore.marker(for: title)
         subtitleTracks = []
         selectedSubtitleTrackID = nil
-        chapters = []
         isBuffering = true
         pendingResumeSeconds = max(0, resumeAt)
         didApplyResume = false
@@ -179,7 +133,6 @@ final class VideoPlaybackEngine: ObservableObject {
         currentSeconds = 0
         durationSeconds = 0
         loadGeneration &+= 1
-        let generation = loadGeneration
 
         tearDownItemObservers()
         removeTimeObserver()
@@ -216,15 +169,6 @@ final class VideoPlaybackEngine: ObservableObject {
         // metadata/Range scans before AVPlayerItem exists, which is especially
         // slow for large non-fast-start cloud files. AVPlayerItem reports failure
         // through its status observer without blocking the first-frame pipeline.
-        // Register deferred track/metadata discovery before playImmediately.
-        // AVPlayer can publish a positive rate synchronously for an already warm
-        // asset; registering afterwards loses that only trigger and leaves the
-        // embedded audio/subtitle lists empty.
-        pendingMetadataAsset = asset
-        pendingMetadataURL = url
-        pendingMetadataTitle = title
-        pendingMetadataGeneration = generation
-
         let item = makePlayerItem(asset: asset)
         attach(item: item)
         player.automaticallyWaitsToMinimizeStalling = false
@@ -252,19 +196,12 @@ final class VideoPlaybackEngine: ObservableObject {
         player.currentItem?.videoComposition = nil
         player.currentItem?.asset.cancelLoading()
         loadedAsset?.cancelLoading()
-        pendingMetadataAsset?.cancelLoading()
         player.replaceCurrentItem(with: nil)
         loadedAsset = nil
-        pendingMetadataAsset = nil
-        pendingMetadataURL = nil
-        pendingMetadataTitle = ""
         audioTracks = []
-        audioOptionsByID = [:]
         selectedAudioTrackID = nil
         subtitleTracks = []
-        subtitleOptionsByID = [:]
         selectedSubtitleTrackID = nil
-        chapters = []
         onProgressTick = nil
         UIApplication.shared.isIdleTimerDisabled = false
         player.automaticallyWaitsToMinimizeStalling = true
@@ -308,70 +245,11 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     func selectAudioTrack(id: String) {
-        guard let item = player.currentItem,
-              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible),
-              let option = audioOptionsByID[id] else { return }
-        item.select(option, in: group)
-        selectedAudioTrackID = id
-    }
-
-    private func startDeferredMetadataAfterPlayback(item: AVPlayerItem?) {
-        guard let asset = pendingMetadataAsset,
-              pendingMetadataURL != nil,
-              pendingMetadataGeneration == loadGeneration else { return }
-        let title = pendingMetadataTitle
-        let generation = pendingMetadataGeneration
-        pendingMetadataAsset = nil
-        pendingMetadataURL = nil
-        pendingMetadataTitle = ""
-
-        if let item {
-            refreshAudioTracks(for: item)
-            refreshSubtitleTracks(for: item)
-        }
-        // Do not start a second AVAsset read for thumbnail extraction while the
-        // movie is playing. That detached request survived player dismissal and
-        // kept the remote connection saturated after returning to the app.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard let self, generation == self.loadGeneration else { return }
-            self.detectIntroChapter(in: asset, title: title)
-        }
-    }
-
-    private func refreshAudioTracks(for item: AVPlayerItem) {
-        guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible) else {
-            audioTracks = []
-            audioOptionsByID = [:]
-            selectedAudioTrackID = nil
-            return
-        }
-        var map: [String: AVMediaSelectionOption] = [:]
-        let tracks = group.options.enumerated().map { index, option in
-            let id = "audio-\(index)"
-            map[id] = option
-            return PlayerAudioTrackOption(id: id, title: option.displayName)
-        }
-        audioOptionsByID = map
-        audioTracks = tracks
-        if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
-           let entry = map.first(where: { $0.value === selected }) {
-            selectedAudioTrackID = entry.key
-        } else {
-            selectedAudioTrackID = tracks.first?.id
-        }
+        // Disabled: inspecting embedded tracks can trigger extra remote reads.
     }
 
     func selectSubtitleTrack(id: String?) {
-        guard let item = player.currentItem,
-              let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
-        if let id, let option = subtitleOptionsByID[id] {
-            item.select(option, in: group)
-            selectedSubtitleTrackID = id
-        } else {
-            item.select(nil, in: group)
-            selectedSubtitleTrackID = nil
-        }
+        // Disabled: inspecting embedded tracks can trigger extra remote reads.
     }
 
     /// Applies styling to AVFoundation-rendered embedded captions immediately.
@@ -393,20 +271,6 @@ final class VideoPlaybackEngine: ObservableObject {
         if let rule = AVTextStyleRule(textMarkupAttributes: attributes) {
             item.textStyleRules = [rule]
         }
-    }
-
-    private func refreshSubtitleTracks(for item: AVPlayerItem) {
-        guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
-            subtitleTracks = []; subtitleOptionsByID = [:]; selectedSubtitleTrackID = nil; return
-        }
-        var map: [String: AVMediaSelectionOption] = [:]
-        subtitleTracks = group.options.enumerated().map { index, option in
-            let id = "subtitle-\(index)"; map[id] = option
-            return PlayerSubtitleTrackOption(id: id, title: option.displayName)
-        }
-        subtitleOptionsByID = map
-        if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
-           let entry = map.first(where: { $0.value === selected }) { selectedSubtitleTrackID = entry.key }
     }
 
     func setRate(_ rate: Float) {
@@ -441,57 +305,7 @@ final class VideoPlaybackEngine: ObservableObject {
         seek(toSeconds: duration * fraction)
     }
 
-    /// Returns a small frame for the timeline preview without moving playback.
-    func previewImage(at fraction: Double) async -> UIImage? {
-        guard let asset = player.currentItem?.asset else { return nil }
-        let duration = CMTimeGetSeconds(asset.duration)
-        guard duration.isFinite, duration > 0 else { return nil }
-
-        let time = CMTime(
-            seconds: duration * min(1, max(0, fraction)),
-            preferredTimescale: 600
-        )
-
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let generator = AVAssetImageGenerator(asset: asset)
-                generator.appliesPreferredTrackTransform = true
-                generator.maximumSize = CGSize(width: 240, height: 135)
-                let frame = try? generator.copyCGImage(at: time, actualTime: nil)
-                continuation.resume(returning: frame.map(UIImage.init(cgImage:)))
-            }
-        }
-    }
-
     // MARK: - Player configuration (hardware path)
-
-    private func detectIntroChapter(in asset: AVAsset, title: String) {
-        guard !title.isEmpty else { return }
-        let groups = asset.chapterMetadataGroups(bestMatchingPreferredLanguages: Locale.preferredLanguages + ["en"])
-        let assetDuration = CMTimeGetSeconds(asset.duration)
-        if assetDuration.isFinite, assetDuration > 0 {
-            chapters = groups.enumerated().compactMap { index, group in
-                let start = CMTimeGetSeconds(group.timeRange.start)
-                guard start.isFinite, start > 0, start < assetDuration else { return nil }
-                let label = group.items.compactMap { $0.stringValue }.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-                return PlayerChapterMarker(id: "chapter-\(index)", title: (label?.isEmpty == false ? label! : "Chapter \(index + 1)"), fraction: start / assetDuration)
-            }
-        }
-        for group in groups {
-            let labels = group.items.compactMap { $0.stringValue }.joined(separator: " ").lowercased()
-            let isIntro = ["intro", "opening", "opening credits", "theme", "op"].contains { token in
-                labels == token || labels.contains("\(token) ") || labels.contains(" \(token)")
-            }
-            guard isIntro else { continue }
-            let start = CMTimeGetSeconds(group.timeRange.start)
-            let duration = CMTimeGetSeconds(group.timeRange.duration)
-            let end = start + duration
-            guard start.isFinite, end.isFinite, duration >= 5, end <= 600 else { continue }
-            let marker = IntroMarker(start: max(0, start), end: end)
-            introMarker = marker; IntroMarkerStore.save(marker, for: title); break
-        }
-    }
-
     private func configurePlayer() {
         // Hardware-accelerated pipeline (VideoToolbox decode + GPU layer composition).
         player.automaticallyWaitsToMinimizeStalling = true
@@ -521,7 +335,6 @@ final class VideoPlaybackEngine: ObservableObject {
                         ? self.highResForwardBufferSeconds
                         : self.forwardBufferSeconds
                     player.automaticallyWaitsToMinimizeStalling = true
-                    self.startDeferredMetadataAfterPlayback(item: player.currentItem)
                 }
             }
         }
@@ -557,8 +370,9 @@ final class VideoPlaybackEngine: ObservableObject {
             item.preferredMaximumResolution = .zero
         }
 
-        // Continue filling the transient buffer while playback is paused.
-        item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+        // A paused/dismissing player must never keep consuming the stream.
+        // Normal buffering while the player is actively playing is unaffected.
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
 
         // Prefer precise video composition off unless needed (saves GPU/CPU).
         item.videoComposition = nil
@@ -668,7 +482,6 @@ final class VideoPlaybackEngine: ObservableObject {
                     // actual playback and defer media-selection discovery.
                     self.errorMessage = nil
                     if self.player.rate > 0 {
-                        self.startDeferredMetadataAfterPlayback(item: item)
                     }
                     // Apply saved resume position once
                     if !self.didApplyResume, self.pendingResumeSeconds > 1 {

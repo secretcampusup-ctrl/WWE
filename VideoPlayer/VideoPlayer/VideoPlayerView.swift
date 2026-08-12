@@ -170,7 +170,7 @@ struct VideoPlayerView: View {
                                 ? mkvControls.formattedTime(forFraction: scrubProgress)
                                 : mkvControls.currentTimeFormatted,
                             durationLabel: negativeRemaining(current: isScrubbing ? scrubProgress * mkvControls.durationSeconds : mkvControls.currentSeconds, duration: mkvControls.durationSeconds),
-                            chapters: playbackChapters,
+                            chapters: [],
                             onSeek: { value in
                                 mkvControls.seek(to: value)
                                 isScrubbing = false
@@ -209,27 +209,6 @@ struct VideoPlayerView: View {
                     }
                 )
                 .transition(.scale(scale: 0.9).combined(with: .opacity))
-            }
-
-            if shouldShowSkipIntro && !playbackDidEnd {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        Button(action: skipIntro) {
-                            Label("Skip Intro", systemImage: "forward.end.fill")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 18)
-                                .frame(height: 44)
-                                .background(.ultraThinMaterial, in: Capsule())
-                                .overlay(Capsule().stroke(Color.white.opacity(0.32), lineWidth: 1))
-                        }
-                    }
-                    .padding(.trailing, 26)
-                    .padding(.bottom, showControls ? 205 : 34)
-                }
-                .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
 
             if let cue = activeExternalSubtitle, !playbackDidEnd {
@@ -471,7 +450,7 @@ struct VideoPlayerView: View {
                     ? engine.formattedTime(forFraction: scrubProgress)
                     : engine.currentTimeFormatted,
                 durationLabel: negativeRemaining(current: isScrubbing ? scrubProgress * engine.durationSeconds : engine.currentSeconds, duration: engine.durationSeconds),
-                chapters: playbackChapters,
+                chapters: [],
                 onSeek: { value in
                     scrubProgress = value
                     isScrubbing = false
@@ -693,10 +672,6 @@ struct VideoPlayerView: View {
         usesMKVPlayer ? mkvControls.currentSeconds : engine.currentSeconds
     }
 
-    private var playbackDurationSeconds: Double {
-        usesMKVPlayer ? mkvControls.durationSeconds : engine.durationSeconds
-    }
-
     private var playbackDidEnd: Bool {
         usesMKVPlayer ? mkvControls.didReachEnd : engine.didReachEnd
     }
@@ -705,30 +680,11 @@ struct VideoPlayerView: View {
         VideoTitleFormatter.episodeComponents(from: title) != nil
     }
 
-    private var detectedIntroMarker: IntroMarker? {
-        engine.introMarker ?? IntroMarkerStore.marker(for: title)
-    }
-
-    private var shouldShowSkipIntro: Bool {
-        guard let marker = detectedIntroMarker else { return false }
-        return currentPlaybackSeconds >= marker.start && currentPlaybackSeconds < marker.end
-    }
-
     private var mkvQualityLabel: String {
         if mkvControls.videoWidth >= 3840 || mkvControls.videoHeight >= 2160 { return "4K" }
         if mkvControls.videoWidth >= 1920 || mkvControls.videoHeight >= 1080 { return "1080P" }
         if mkvControls.videoWidth >= 1280 || mkvControls.videoHeight >= 720 { return "720P" }
         return "HD"
-    }
-
-    private var playbackChapters: [PlayerChapterMarker] {
-        usesMKVPlayer ? [] : engine.chapters
-    }
-
-    private func skipIntro() {
-        guard let marker = detectedIntroMarker, playbackDurationSeconds > 0 else { return }
-        let fraction = min(1, max(0, marker.end / playbackDurationSeconds))
-        if usesMKVPlayer { mkvControls.seek(to: fraction) } else { engine.seek(to: fraction) }
     }
 
     private func replayCurrentVideo() {
@@ -963,8 +919,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var sourceFormat = "Video"
     private var isFillMode = false
     private var resetZoomToken = 0
-    private var embeddedTrackRefreshAttempts = 0
-    private var didLoadEmbeddedTracks = false
     private var isStopped = true
     var onSingleTap: (() -> Void)?
     weak var controls: MKVPlaybackControls? {
@@ -1036,8 +990,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
         controls?.isBuffering = true
-        embeddedTrackRefreshAttempts = 0
-        didLoadEmbeddedTracks = false
         controls?.updateEmbeddedTracks(audio: [], subtitles: [], selectedAudio: nil, selectedSubtitle: nil)
         let media = VLCMedia(url: url)
         if let authorization = httpHeaders?["Authorization"], authorization.lowercased().hasPrefix("basic ") {
@@ -1094,64 +1046,21 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             if self.mediaPlayer.isPlaying || currentTime > 0 || (size.width > 1 && size.height > 1) {
                 self.controls?.isBuffering = false
                 self.loadingIndicator.stopAnimating()
-                if !self.didLoadEmbeddedTracks && self.embeddedTrackRefreshAttempts < 30 {
-                    self.embeddedTrackRefreshAttempts += 1
-                    self.refreshEmbeddedTracks()
-                }
             }
         }
     }
 
-    private func refreshEmbeddedTracks() {
-        let audioNames = mediaPlayer.audioTrackNames.compactMap { $0 as? String }
-        let audioIndexes = mediaPlayer.audioTrackIndexes.compactMap { ($0 as? NSNumber)?.int32Value }
-        let subtitleNames = mediaPlayer.videoSubTitlesNames.compactMap { $0 as? String }
-        let subtitleIndexes = mediaPlayer.videoSubTitlesIndexes.compactMap { ($0 as? NSNumber)?.int32Value }
-
-        let audio = zip(audioIndexes, audioNames).map {
-            PlayerAudioTrackOption(id: String($0.0), title: $0.1)
-        }
-        let subtitles = zip(subtitleIndexes, subtitleNames)
-            .filter { $0.0 >= 0 }
-            .map { PlayerSubtitleTrackOption(id: String($0.0), title: $0.1) }
-        guard !audio.isEmpty || !subtitles.isEmpty else { return }
-        didLoadEmbeddedTracks = true
-        controls?.updateEmbeddedTracks(
-            audio: audio,
-            subtitles: subtitles,
-            selectedAudio: String(mediaPlayer.currentAudioTrackIndex),
-            selectedSubtitle: mediaPlayer.currentVideoSubTitleIndex >= 0
-                ? String(mediaPlayer.currentVideoSubTitleIndex)
-                : nil
-        )
-    }
-
     func selectAudioTrack(id: String) {
-        guard let index = Int32(id) else { return }
-        mediaPlayer.currentAudioTrackIndex = index
-        controls?.selectedAudioTrackID = id
+        // Embedded track inspection is disabled to avoid extra stream reads.
     }
 
     func selectSubtitleTrack(id: String?) {
-        let index = id.flatMap(Int32.init) ?? -1
-        mediaPlayer.currentVideoSubTitleIndex = index
-        controls?.selectedSubtitleTrackID = index >= 0 ? String(index) : nil
+        // Embedded track inspection is disabled to avoid extra stream reads.
     }
 
     func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
         subtitleStyle = (fontSize: fontSize, fontName: fontName, color: color, background: background, shadow: shadow, margin: margin, delay: delay)
-        guard let url = currentURL else { return }
-        let resumeAt = Double(mediaPlayer.time.intValue) / 1000
-        let selectedAudio = controls?.selectedAudioTrackID
-        let selectedSubtitle = controls?.selectedSubtitleTrackID
-        let wasPlaying = mediaPlayer.isPlaying
-        play(url: url, resumeAt: resumeAt, httpHeaders: currentHTTPHeaders)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self else { return }
-            if let selectedAudio { self.selectAudioTrack(id: selectedAudio) }
-            self.selectSubtitleTrack(id: selectedSubtitle)
-            if !wasPlaying { self.mediaPlayer.pause() }
-        }
+        // Apply on the next play only; never reopen the active remote stream.
     }
 
     func playIfNeeded(url: URL, httpHeaders: [String: String]? = nil) {
