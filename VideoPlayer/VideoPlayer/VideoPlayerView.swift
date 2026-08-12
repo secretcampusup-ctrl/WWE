@@ -54,6 +54,7 @@ struct VideoPlayerView: View {
     @State private var subtitleFont: PlayerSubtitleFont = PlayerSubtitleFont(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.font") ?? "") ?? .rounded
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
+    @State private var didTearDownPlayback = false
     @State private var didResetNetworkAfterPlayback = false
 
     // Temporary test mode: every file uses the main Apple player only.
@@ -324,6 +325,8 @@ struct VideoPlayerView: View {
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
+            didTearDownPlayback = false
+            didResetNetworkAfterPlayback = false
             screenBrightness = Double(UIScreen.main.brightness)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Defensive reset: guarantees a clean VR state for this video even
@@ -347,23 +350,7 @@ struct VideoPlayerView: View {
             scheduleAutoHide()
         }
         .onDisappear {
-            hideTask?.cancel()
-            BackgroundVideoCacheManager.shared.cancelAllPrefetches()
-            if !usesMKVPlayer {
-                if engine.durationSeconds > 0 {
-                    onProgress?(engine.currentSeconds, engine.durationSeconds, engine.resolutionWidth, engine.resolutionHeight)
-                }
-                engine.cleanup()
-            } else {
-                if mkvControls.durationSeconds > 0 {
-                    onProgress?(mkvControls.currentSeconds, mkvControls.durationSeconds, mkvControls.videoWidth, mkvControls.videoHeight)
-                }
-                mkvControls.stop()
-            }
-            // Tear the media asset down first, then rotate only the video request
-            // pool. Doing this in the opposite order can leave AVPlayer's range
-            // request alive while unrelated API calls resume.
-            resetNetworkAfterPlaybackIfNeeded()
+            tearDownPlayback()
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
         .onChange(of: engine.errorMessage) { error in
@@ -395,13 +382,36 @@ struct VideoPlayerView: View {
     // MARK: - Top chrome
 
     private func closePlayer() {
-        hideTask?.cancel()
-        endCountdownTask?.cancel()
-        if usesMKVPlayer { mkvControls.stop() }
-        else { engine.cleanup() }
-        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
-        resetNetworkAfterPlaybackIfNeeded()
+        tearDownPlayback()
         dismiss()
+    }
+
+    /// Both the close button and SwiftUI's dismissal callback reach this path.
+    /// Keep teardown strictly one-shot: MobileVLCKit in particular is not safe
+    /// when `stop`, `media = nil`, and `drawable = nil` race or run repeatedly.
+    private func tearDownPlayback() {
+        guard !didTearDownPlayback else { return }
+        didTearDownPlayback = true
+        hideTask?.cancel()
+        hideTask = nil
+        endCountdownTask?.cancel()
+        endCountdownTask = nil
+
+        if usesMKVPlayer {
+            if mkvControls.durationSeconds > 0 {
+                onProgress?(mkvControls.currentSeconds, mkvControls.durationSeconds, mkvControls.videoWidth, mkvControls.videoHeight)
+            }
+            mkvControls.stop()
+        } else {
+            // VideoPlaybackEngine sends its final progress tick before releasing
+            // AVPlayerItem, observers, pending seeks, and asset loading.
+            engine.cleanup()
+        }
+
+        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
+        // Tear the media asset down first, then rotate only the video request
+        // pool. Doing this in the opposite order can leave a range request alive.
+        resetNetworkAfterPlaybackIfNeeded()
     }
 
     private func resetNetworkAfterPlaybackIfNeeded() {
@@ -966,6 +976,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var resetZoomToken = 0
     private var embeddedTrackRefreshAttempts = 0
     private var didLoadEmbeddedTracks = false
+    private var isStopped = true
+    private var playbackGeneration: UInt64 = 0
     var onSingleTap: (() -> Void)?
     weak var controls: MKVPlaybackControls? {
         didSet { controls?.surface = self }
@@ -1030,6 +1042,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
+        playbackGeneration &+= 1
+        let generation = playbackGeneration
+        isStopped = false
         currentURL = url
         currentHTTPHeaders = httpHeaders
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1066,7 +1081,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         mediaPlayer.play()
         if resumeAt > 3 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.mediaPlayer.time = VLCTime(int: Int32(resumeAt * 1000))
+                guard let self, !self.isStopped, self.playbackGeneration == generation else { return }
+                self.mediaPlayer.time = VLCTime(int: Int32(resumeAt * 1000))
             }
         }
         loadingTimer?.invalidate()
@@ -1145,8 +1161,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let selectedSubtitle = controls?.selectedSubtitleTrackID
         let wasPlaying = mediaPlayer.isPlaying
         play(url: url, resumeAt: resumeAt, httpHeaders: currentHTTPHeaders)
+        let generation = playbackGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isStopped, self.playbackGeneration == generation else { return }
             if let selectedAudio { self.selectAudioTrack(id: selectedAudio) }
             self.selectSubtitleTrack(id: selectedSubtitle)
             if !wasPlaying { self.mediaPlayer.pause() }
@@ -1159,14 +1176,23 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func stop() {
+        guard !isStopped else { return }
+        isStopped = true
+        playbackGeneration &+= 1
+        loadingTimer?.invalidate()
+        loadingTimer = nil
+        onSingleTap = nil
+        controls?.isBuffering = false
+        controls?.isPlaying = false
+        if controls?.surface === self {
+            controls?.surface = nil
+        }
+        controls = nil
         mediaPlayer.stop()
         mediaPlayer.media = nil
         mediaPlayer.drawable = nil
-        loadingTimer?.invalidate()
-        loadingTimer = nil
         currentURL = nil
         currentHTTPHeaders = nil
-        controls?.isBuffering = false
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? {

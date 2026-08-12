@@ -114,6 +114,7 @@ final class VideoPlaybackEngine: ObservableObject {
     private var pendingMetadataTitle = ""
     private var pendingMetadataGeneration: UInt64 = 0
     private var progressSaveCounter: Int = 0
+    private var hasActivePlayback = false
     /// Keeps the scrubber at the requested spot while AVPlayer buffers the seek.
     private var pendingSeekSeconds: Double?
     /// Prevents a cancelled older seek completion from clearing a newer request.
@@ -163,6 +164,7 @@ final class VideoPlaybackEngine: ObservableObject {
     // MARK: - Public API
 
     func load(url: URL, title: String = "", resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
+        hasActivePlayback = true
         errorMessage = nil
         didReachEnd = false
         introMarker = title.isEmpty ? nil : IntroMarkerStore.marker(for: title)
@@ -231,6 +233,8 @@ final class VideoPlaybackEngine: ObservableObject {
     }
 
     func cleanup() {
+        guard hasActivePlayback else { return }
+        hasActivePlayback = false
         // Final progress tick before teardown
         if durationSeconds > 0 {
             onProgressTick?(currentSeconds, durationSeconds, resolutionWidth, resolutionHeight)
