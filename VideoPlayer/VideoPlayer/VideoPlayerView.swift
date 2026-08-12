@@ -394,9 +394,11 @@ struct VideoPlayerView: View {
     private func closePlayer() {
         hideTask?.cancel()
         endCountdownTask?.cancel()
-        // Cleanup is intentionally owned by onDisappear. Running it here as
-        // well caused AVPlayer to be torn down twice and VLC up to three times
-        // (button, onDisappear, dismantleUIView) during the dismissal animation.
+        // Stop the network request before the dismissal animation. Both cleanup
+        // paths are idempotent, so onDisappear/dismantleUIView are safe no-ops.
+        if usesMKVPlayer { mkvControls.stop() }
+        else { engine.cleanup() }
+        BackgroundVideoCacheManager.shared.cancelAllPrefetches()
         releasePlaybackResources()
         dismiss()
     }

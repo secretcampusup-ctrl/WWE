@@ -446,7 +446,6 @@ class AppViewModel: ObservableObject {
         // every other in-flight video request too. See the matching note in
         // startPlayback about the background-cache transfer causing the same
         // CDN throttling.
-        if link.fileSizeBytes == nil { scheduleFileSizeProbe(for: link) }
         return link
     }
 
@@ -455,60 +454,6 @@ class AppViewModel: ObservableObject {
         guard let providerKey,
               let poster = VideoThumbnailLoader.cachedImage(forStableKey: providerKey) else { return }
         VideoThumbnailLoader.cacheImage(poster, forStableKey: "saved|\(savedID.uuidString)")
-    }
-    private func refreshMissingFileSizes() {
-        for link in savedLinks where link.fileSizeBytes == nil {
-            scheduleFileSizeProbe(for: link)
-        }
-    }
-
-    /// Waits until this link's URL is no longer the one actively streaming
-    /// before probing its size, and uses the low-priority responsive session
-    /// (not the video session) so it never competes with a real playback
-    /// connection for the same host/URL.
-    private func scheduleFileSizeProbe(for link: SavedVideoLink) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // Give playback (if this is the link that was just opened) time to
-            // establish its own connection first, then keep waiting as long as
-            // this exact URL is still the one on screen.
-            try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
-            var guardTicks = 0
-            while self.nowPlayingURL?.absoluteString == link.url?.absoluteString, guardTicks < 30 {
-                try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
-                guardTicks += 1
-            }
-            self.fetchFileSize(for: link)
-        }
-    }
-
-    private func fetchFileSize(for link: SavedVideoLink) {
-        guard link.fileSizeBytes == nil, let url = link.url else { return }
-        DiagnosticLogger.log("FILESIZE probe firing for \(url.lastPathComponent)")
-        Task {
-            func size(from response: URLResponse) -> Int64? {
-                guard let http = response as? HTTPURLResponse else { return nil }
-                if let length = http.value(forHTTPHeaderField: "Content-Length"), let bytes = Int64(length), bytes > 0 { return bytes }
-                if let range = http.value(forHTTPHeaderField: "Content-Range"), let total = range.split(separator: "/").last, let bytes = Int64(total), bytes > 0 { return bytes }
-                return nil
-            }
-            // Uses the responsive session (not the video session) so this
-            // throwaway probe never occupies one of the few connection slots
-            // that real video streaming needs.
-            var head = URLRequest(url: url)
-            head.httpMethod = "HEAD"
-            head.timeoutInterval = 12
-            var discovered = (try? await URLSession.shared.data(for: head)).flatMap { size(from: $0.1) }
-            if discovered == nil {
-                var range = URLRequest(url: url)
-                range.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-                range.timeoutInterval = 12
-                discovered = (try? await URLSession.shared.data(for: range)).flatMap { size(from: $0.1) }
-            }
-            guard let bytes = discovered, let index = savedLinks.firstIndex(where: { $0.id == link.id }) else { return }
-            savedLinks[index].fileSizeBytes = bytes
-            persistSavedLinksImmediately()
-        }
     }
     func deleteSavedLink(_ link: SavedVideoLink) {
         BackgroundVideoCacheManager.shared.removeCachedVideo(

@@ -447,7 +447,13 @@ struct UnifiedContentView: View {
         case let .webDAV(server, file): vm.play(file: file, server: server)
         case let .offcloud(_, file):
             guard let url = file.streamURL else { return }
-            if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
+            if let saved = vm.saveDirectLink(
+                url.absoluteString,
+                resolvedStream: url,
+                source: .offcloud,
+                title: file.name,
+                fileSizeBytes: file.size
+            ) {
                 vm.playSavedLink(saved)
             } else {
                 _ = vm.playOnlineURL(url.absoluteString)
@@ -527,7 +533,13 @@ private struct UnifiedMediaDetailsHost: View {
         case let .webDAV(server, file): vm.play(file: file, server: server)
         case let .offcloud(_, file):
             guard let url = file.streamURL else { return }
-            if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
+            if let saved = vm.saveDirectLink(
+                url.absoluteString,
+                resolvedStream: url,
+                source: .offcloud,
+                title: file.name,
+                fileSizeBytes: file.size
+            ) {
                 vm.playSavedLink(saved)
             } else { _ = vm.playOnlineURL(url.absoluteString) }
         }

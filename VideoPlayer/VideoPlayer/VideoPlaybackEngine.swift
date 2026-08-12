@@ -244,6 +244,8 @@ final class VideoPlaybackEngine: ObservableObject {
         player.pause()
         isPlaying = false
         isBuffering = false
+        player.currentItem?.preferredForwardBufferDuration = 0
+        player.currentItem?.canUseNetworkResourcesForLiveStreamingWhilePaused = false
         tearDownItemObservers()
         removeTimeObserver()
         player.currentItem?.cancelPendingSeeks()

@@ -227,6 +227,11 @@ struct VideoDetailsView: View {
             .background(AppTheme.bg.ignoresSafeArea())
             .ignoresSafeArea(edges: .top)
             .toolbar(.hidden, for: .navigationBar)
+            .overlay(alignment: .topLeading) {
+                detailsCloseButton
+                    .padding(.leading, 16)
+                    .padding(.top, topSafeAreaInset + 8)
+            }
         }
         .preferredColorScheme(.dark)
         .task(id: detailsLoadingIdentity) {
@@ -396,6 +401,28 @@ struct VideoDetailsView: View {
         onClose?()
     }
 
+    private var detailsCloseButton: some View {
+        Button(action: closeDetails) {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.backward")
+                    .font(.system(size: 15, weight: .bold))
+                Text("Back")
+                    .font(.system(size: 15, weight: .semibold))
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 46)
+            .background(Color.black.opacity(0.72), in: Capsule())
+            .overlay(
+                Capsule().stroke(Color.white.opacity(0.24), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Close video details")
+    }
+
     private var preview: some View {
         GeometryReader { proxy in
             ZStack {
@@ -434,30 +461,6 @@ struct VideoDetailsView: View {
                 }
                 .buttonStyle(.plain)
 
-                VStack {
-                    HStack {
-                        Button(action: closeDetails) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.ultraThinMaterial, in: Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .contentShape(Circle())
-                        .zIndex(100)
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, topSafeAreaInset + 8)
-
-                    Spacer()
-                }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .clipped()
