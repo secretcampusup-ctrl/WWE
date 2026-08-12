@@ -1357,6 +1357,11 @@ enum VideoThumbnailLoader {
         ThumbnailDiagnosticLogger.shared.exportLogs()
     }
 
+    /// Export the disk-persisted diagnostic log that survives app restarts.
+    static func exportPersistedDiagnosticLog() -> String {
+        DiagnosticLogger.readAll()
+    }
+
     /// Log a diagnostic message
     static func logDiagnostic(_ message: String, level: LogLevel = .info, fileID: String? = nil) {
         ThumbnailDiagnosticLogger.shared.log(message, level: level, fileID: fileID)

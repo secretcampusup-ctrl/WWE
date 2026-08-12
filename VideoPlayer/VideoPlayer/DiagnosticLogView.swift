@@ -55,7 +55,7 @@ struct DiagnosticLogView: View {
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showShareSheet) {
-            ActivityShareSheet(items: [text])
+            DiagnosticActivityShareSheet(items: [text])
         }
         .alert("Copied", isPresented: $showCopiedConfirmation) {
             Button("OK", role: .cancel) {}
@@ -63,7 +63,7 @@ struct DiagnosticLogView: View {
     }
 }
 
-private struct ActivityShareSheet: UIViewControllerRepresentable {
+private struct DiagnosticActivityShareSheet: UIViewControllerRepresentable {
     let items: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
