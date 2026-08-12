@@ -664,6 +664,11 @@ enum VideoThumbnailLoader {
             return cached
         }
 
+        // Automatic artwork generation is local-file only. Reading a frame from
+        // a signed remote movie creates a second AVAsset range pipeline that can
+        // survive player dismissal and block unrelated API traffic.
+        guard remote.isFileURL else { return nil }
+
         // Nothing cached yet — generating a poster from here on means reading (and, for a
         // remote URL, downloading) video bytes automatically. Skip unless the caller is a
         // manual, user-initiated action.
