@@ -1617,7 +1617,7 @@ struct PosterThumbnailView: View {
             let details = await TMDBService.shared.details(for: title)
             var tmdbPoster: UIImage?
             if let posterURL = details?.posterURL,
-               let (data, _) = try? await URLSession.shared.data(from: posterURL) {
+               let (data, _) = try? await AppNetworkSession.shared.data(from: posterURL) {
                 tmdbPoster = UIImage(data: data)
             }
             await ThumbnailLoadGate.shared.release()
