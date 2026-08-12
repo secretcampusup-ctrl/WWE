@@ -252,7 +252,11 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     /// video starts.
     func pauseAllForActivePlayback() {
         let targets = downloads.filter { $0.isActive && !pausedForPlaybackIDs.contains($0.id) }
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty else {
+            DiagnosticLogger.log("DOWNLOADS none active — nothing to pause for playback")
+            return
+        }
+        DiagnosticLogger.log("DOWNLOADS pausing \(targets.count) active download(s) for playback: \(targets.map(\.title))")
         for download in targets {
             pausedForPlaybackIDs.insert(download.id)
             pause(download)
@@ -265,6 +269,8 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     func resumeAfterActivePlayback() {
         let ids = pausedForPlaybackIDs
         pausedForPlaybackIDs.removeAll()
+        guard !ids.isEmpty else { return }
+        DiagnosticLogger.log("DOWNLOADS resuming \(ids.count) download(s) after playback ended")
         for id in ids {
             guard let download = downloads.first(where: { $0.id == id }) else { continue }
             resume(download)

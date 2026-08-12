@@ -155,7 +155,11 @@ final class PikPakAutoSyncManager: ObservableObject {
         // while a video streams competes for the same connection/bandwidth
         // budget as playback. Skip this run; the next scheduled one will pick
         // up anything new once playback ends.
-        guard ActivePlaybackGuard.currentURL == nil else { return }
+        guard ActivePlaybackGuard.currentURL == nil else {
+            DiagnosticLogger.log("SYNC skipped — video is currently playing")
+            return
+        }
+        DiagnosticLogger.log("SYNC starting")
         guard let server = pikpakServer() else {
             lastError = "No PikPak server configured yet."
             return

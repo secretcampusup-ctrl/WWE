@@ -135,6 +135,7 @@ class AppViewModel: ObservableObject {
     /// deliberately not called — it forces a synchronous disk flush and is
     /// unnecessary; `UserDefaults.set` already persists in the background.
     private func persistSavedLinksAsync() {
+        DiagnosticLogger.log("PERSIST savedLinks (\(savedLinks.count) items) — off-main")
         let snapshot = savedLinks
         persistQueue.async {
             guard let data = try? JSONEncoder().encode(snapshot) else { return }
@@ -456,6 +457,7 @@ class AppViewModel: ObservableObject {
 
     private func fetchFileSize(for link: SavedVideoLink) {
         guard link.fileSizeBytes == nil, let url = link.url else { return }
+        DiagnosticLogger.log("FILESIZE probe firing for \(url.lastPathComponent)")
         Task {
             func size(from response: URLResponse) -> Int64? {
                 guard let http = response as? HTTPURLResponse else { return nil }
@@ -647,6 +649,7 @@ class AppViewModel: ObservableObject {
         )
         nowPlayingURL = playbackURL
         ActivePlaybackGuard.currentURL = playbackURL
+        DiagnosticLogger.log("PLAYBACK START url=\(playbackURL.lastPathComponent)")
         VideoDownloadManager.shared.pauseAllForActivePlayback()
 
         // Let the player transition appear first; moving the library card before
@@ -936,6 +939,7 @@ class AppViewModel: ObservableObject {
     /// Releases the presented playback state without touching metadata/API work.
     /// This prevents a dismissed player from being reconstructed with its stale URL.
     func endPlaybackPresentation() {
+        DiagnosticLogger.log("PLAYBACK END")
         nowPlayingURL = nil
         nowPlayingHeaders = nil
         nowPlayingResumeAt = 0

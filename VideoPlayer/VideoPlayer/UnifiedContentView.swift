@@ -538,7 +538,7 @@ struct UnifiedSettingsView: View {
     @State private var destination: SettingsDestination?
 
     private enum SettingsDestination: String, Identifiable {
-        case webdav, offcloud, tmdb, adult
+        case webdav, offcloud, tmdb, adult, diagnostics
         var id: String { rawValue }
     }
 
@@ -552,6 +552,9 @@ struct UnifiedSettingsView: View {
                 Section("Metadata") {
                     settingsRow("TMDB", "Movies and TV metadata — first priority", "film.stack.fill", .tmdb)
                     settingsRow("ThePornDB", "Temporarily paused — TMDB only mode", "pause.circle.fill", .adult)
+                }
+                Section("Troubleshooting") {
+                    settingsRow("Diagnostics Log", "See exactly what happens when playback stalls", "doc.text.magnifyingglass", .diagnostics)
                 }
                 Section {
                     Text("TMDB is currently the only active metadata provider. Original file names are sent without release-keyword filtering. Unmatched files remain in Unknown.")
@@ -580,6 +583,7 @@ struct UnifiedSettingsView: View {
         case .webdav: WebDAVSettingsView(vm: vm)
         case .tmdb: TMDBSettingsView()
         case .adult: ThePornDBSettingsView()
+        case .diagnostics: DiagnosticLogView()
         case .offcloud:
             NavigationStack {
                 Form {

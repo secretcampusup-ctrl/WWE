@@ -612,7 +612,11 @@ enum VideoThumbnailLoader {
         // see ActivePlaybackGuard. The Recent list re-renders this item's cell the
         // instant playback starts, and without this check it would race the real
         // player connection for the same signed CDN URL.
-        guard !ActivePlaybackGuard.isActive(remote) else { return nil }
+        guard !ActivePlaybackGuard.isActive(remote) else {
+            DiagnosticLogger.log("POSTER blocked — \(remote.lastPathComponent) is actively playing")
+            return nil
+        }
+        DiagnosticLogger.log("POSTER extracting frame from \(remote.lastPathComponent)")
 
         return await requestCoordinator.image(for: "\(cacheKeyStr)|\(Int(targetPixelSize.width))x\(Int(targetPixelSize.height))") { [remote, headers] in
             let image: UIImage?
