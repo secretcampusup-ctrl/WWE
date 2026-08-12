@@ -418,7 +418,12 @@ class AppViewModel: ObservableObject {
         // every other in-flight video request too. See the matching note in
         // startPlayback about the background-cache transfer causing the same
         // CDN throttling.
-        if link.fileSizeBytes == nil { scheduleFileSizeProbe(for: link) }
+        // Do not probe signed remote media automatically. HEAD/range probes on
+        // the freshly played CDN URL can outlive the player and monopolize the
+        // provider connection. File size is populated from WebDAV metadata.
+        if link.fileSizeBytes == nil, link.url?.isFileURL == true {
+            scheduleFileSizeProbe(for: link)
+        }
         return link
     }
 

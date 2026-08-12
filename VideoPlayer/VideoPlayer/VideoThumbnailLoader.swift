@@ -1227,7 +1227,7 @@ enum VideoThumbnailLoader {
                 maxRetries: 1,
                 targetPointSize: target
             )
-        } else {
+        } else if request.url.isFileURL {
             image = await loadPoster(
                 for: request.url,
                 headers: request.headers,
@@ -1706,8 +1706,12 @@ struct PosterThumbnailView: View {
             }
         }
 
-        // 3) Fallback: extract frame from video stream
-        guard let videoURL = url else {
+        // Never extract a poster from a remote movie automatically. AVAsset's
+        // image generator opens range requests against the signed media URL;
+        // after playback closes those requests can keep the provider connection
+        // occupied and make every API screen appear offline. Remote items use
+        // TMDB/provider artwork (or the existing cache) only.
+        guard let videoURL = url, videoURL.isFileURL else {
             VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=fallback result=no_video_url", level: .warning, fileID: fileID)
             print("[PikPakThumbnail] file=\(fileID) stage=fallback result=no_video_url")
             return
