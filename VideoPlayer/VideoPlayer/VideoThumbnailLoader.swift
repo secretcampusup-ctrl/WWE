@@ -1124,7 +1124,8 @@ enum VideoThumbnailLoader {
                 stableKey: link.favoriteIdentity ?? "saved|\(link.id.uuidString)",
                 headers: [:],
                 fileExtension: link.fileExtension,
-                searchQuery: VideoTitleFormatter.title(from: link.title)
+                searchQuery: VideoTitleFormatter.title(from: link.title),
+                allowsVideoFrameExtraction: false
             )
         }
         schedulePrefetchPosters(requests)
@@ -1170,11 +1171,27 @@ enum VideoThumbnailLoader {
                 maxRetries: 1,
                 targetPointSize: target
             )
-        } else {
+        } else if request.allowsVideoFrameExtraction {
             image = await loadPoster(
                 for: request.url,
                 headers: request.headers,
                 stableKey: request.stableKey,
+                targetPointSize: target
+            )
+        }
+
+        // Saved/Recent items use metadata artwork only. Reopening the remote
+        // movie as an AVAsset here can leave a hidden range request alive after
+        // playback and starve every API request in the app.
+        if image == nil, !request.allowsVideoFrameExtraction,
+           let query = request.searchQuery, !query.isEmpty,
+           let details = await TMDBService.shared.details(for: query),
+           let posterURL = details.posterURL {
+            image = await downloadRemoteImage(
+                from: posterURL,
+                headers: [:],
+                stableKey: request.stableKey,
+                maxRetries: 1,
                 targetPointSize: target
             )
         }
@@ -1376,6 +1393,7 @@ enum VideoThumbnailLoader {
         let stableKey: String
         let headers: [String: String]
         let fileExtension: String
+        var allowsVideoFrameExtraction: Bool = true
         /// عنوان نصي اختياري يُستخدم كخطوة أخيرة لجلب غلاف تلقائيًا من ThePornDB
         /// إن فشلت الصورة البعيدة واستخراج إطار الفيديو معًا.
         let searchQuery: String?
@@ -1386,7 +1404,8 @@ enum VideoThumbnailLoader {
             stableKey: String,
             headers: [String: String],
             fileExtension: String,
-            searchQuery: String? = nil
+            searchQuery: String? = nil,
+            allowsVideoFrameExtraction: Bool = true
         ) {
             self.url = url
             self.remotePosterURL = remotePosterURL
@@ -1394,6 +1413,7 @@ enum VideoThumbnailLoader {
             self.headers = headers
             self.fileExtension = fileExtension
             self.searchQuery = searchQuery
+            self.allowsVideoFrameExtraction = allowsVideoFrameExtraction
         }
     }
 }

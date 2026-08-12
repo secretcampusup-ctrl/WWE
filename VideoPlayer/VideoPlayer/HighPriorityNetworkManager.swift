@@ -98,38 +98,26 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
     func resetAfterPlayback() {
         sessionLock.lock()
         let oldVideo = videoSession
+        let oldResponsive = responsiveSession
         let newVideo = Self.makeVideoSession()
+        let newResponsive = Self.makeResponsiveSession()
         videoSession = newVideo
+        responsiveSession = newResponsive
         sessionLock.unlock()
 
-        Self.logTaskCounts(oldVideo, label: "resetAfterPlayback: oldVideoSession BEFORE invalidate")
+        Self.logTaskCounts(oldVideo, label: "resetAfterPlayback: old video pool")
+        Self.logTaskCounts(oldResponsive, label: "resetAfterPlayback: old API pool")
 
-        // Playback can leave long-lived range requests/connections behind on
-        // videoSession — those aren't useful to any in-flight caller anymore,
-        // so cancel them outright.
+        // Cancel abandoned range, metadata and poster tasks only after the new
+        // sessions are installed. New TMDB/Discover calls can therefore start
+        // immediately on clean connections while stale playback work is torn down.
         oldVideo.invalidateAndCancel()
+        oldResponsive.invalidateAndCancel()
 
-        // responsiveSession is shared by every other screen (Discover, TMDB,
-        // posters, link resolvers, file-size checks). A CDN that resets or
-        // silently drops a connection after a throttled/overlapping video
-        // request can leave that connection sitting "half-dead" in this
-        // session's reusable pool — later requests from *anywhere* in the app
-        // can then get handed that same bad connection and hang, which reads
-        // as "the whole app's network died" until the process is killed and
-        // the pool is rebuilt from scratch.
-        //
-        // Rotating this session on every playback close guarantees future
-        // requests always start from a clean connection pool. Use
-        // finishTasksAndInvalidate (not invalidateAndCancel) so any requests
-        // that are still genuinely in flight elsewhere in the app get to
-        // complete normally instead of being aborted.
-
-        // Follow-up snapshots: if the NEW sessions accumulate stuck tasks in
-        // the seconds right after a close, this is where we'll see it in the
-        // persisted log.
-        for delay in [2, 6, 12] {
+        for delay in [2, 6] {
             DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(delay)) {
-                Self.logTaskCounts(newVideo, label: "T+\(delay)s after close: NEW videoSession")
+                Self.logTaskCounts(newVideo, label: "T+\(delay)s: new video pool")
+                Self.logTaskCounts(newResponsive, label: "T+\(delay)s: new API pool")
             }
         }
     }
