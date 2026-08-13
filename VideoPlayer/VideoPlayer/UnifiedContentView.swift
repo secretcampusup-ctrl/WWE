@@ -12,7 +12,7 @@ enum UnifiedMediaSection: String, CaseIterable, Identifiable {
     }
 }
 
-private enum UnifiedSource: Codable {
+enum UnifiedSource: Codable {
     case webDAV(server: WebDAVServer, file: WebDAVFile)
     case offcloud(transfer: OffcloudTransfer, file: OffcloudFile)
     case torBox(torrent: TorBoxTorrent, file: TorBoxFile)
@@ -26,7 +26,7 @@ private enum UnifiedSource: Codable {
     }
 }
 
-private struct UnifiedMediaEntry: Identifiable, Codable {
+struct UnifiedMediaEntry: Identifiable, Codable {
     let id: String
     let rawTitle: String
     var title: String
@@ -47,7 +47,7 @@ private struct UnifiedMediaEntry: Identifiable, Codable {
     }
 }
 
-private struct UnifiedEpisode: Identifiable, Codable {
+struct UnifiedEpisode: Identifiable, Codable {
     let id: String
     let title: String
     let season: Int
@@ -64,7 +64,7 @@ private struct UnifiedContentSnapshot: Codable {
 }
 
 @MainActor
-private final class UnifiedContentModel: ObservableObject {
+final class UnifiedContentModel: ObservableObject {
     @Published var movies: [UnifiedMediaEntry] = []
     @Published var shows: [UnifiedMediaEntry] = []
     @Published var unknown: [UnifiedMediaEntry] = []
@@ -533,8 +533,8 @@ private struct UnifiedManualSearchRequest: Identifiable {
 
 struct UnifiedContentView: View {
     @ObservedObject var vm: AppViewModel
+    @ObservedObject var model: UnifiedContentModel
     var isActive: Bool
-    @StateObject private var model = UnifiedContentModel()
     @State private var section: UnifiedMediaSection = .movies
     @State private var selected: UnifiedMediaEntry?
     @State private var showPlayer = false
@@ -727,7 +727,7 @@ struct UnifiedContentView: View {
 /// Unknown posters can arrive either from the background ThePornDB refresh or
 /// from VideoDetailsView. This view observes the shared stable-poster event so
 /// the visible grid updates immediately without requiring a tab/page reload.
-private struct UnifiedPosterArtwork: View {
+struct UnifiedPosterArtwork: View {
     let entry: UnifiedMediaEntry
     let section: UnifiedMediaSection
     @State private var cachedImage: UIImage?
@@ -956,7 +956,7 @@ private struct UnifiedTMDBManualSearchView: View {
     init(id: String? = nil) { self.id = id }
 }
 
-private struct UnifiedMediaDetailsHost: View {
+struct UnifiedMediaDetailsHost: View {
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
     @StateObject private var selection: UnifiedEpisodeSelection

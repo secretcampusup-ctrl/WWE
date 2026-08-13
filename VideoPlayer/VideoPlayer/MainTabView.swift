@@ -4,14 +4,15 @@ import Kingfisher
 
 struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
+    @StateObject private var catalog = UnifiedContentModel()
     @State private var selectedTab = 0
     @Namespace private var dockSelection
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            ContentView(vm: vm, isActive: selectedTab == 0)
+            HomeLibraryView(vm: vm, catalog: catalog, isActive: selectedTab == 0)
                 .opacity(selectedTab == 0 ? 1 : 0).allowsHitTesting(selectedTab == 0)
-            UnifiedContentView(vm: vm, isActive: selectedTab == 1)
+            UnifiedContentView(vm: vm, model: catalog, isActive: selectedTab == 1)
                 .opacity(selectedTab == 1 ? 1 : 0).allowsHitTesting(selectedTab == 1)
             PirateBayView(vm: vm)
                 .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
@@ -51,6 +52,628 @@ struct MainTabView: View {
                 }
             }
         }.buttonStyle(.plain)
+    }
+}
+
+// MARK: - Home library dashboard
+
+private struct HomeMediaItem: Identifiable {
+    let entry: UnifiedMediaEntry
+    let history: PlaybackHistoryEntry?
+    var id: String { entry.id }
+}
+
+private struct HomeCategoryCardModel: Identifiable {
+    let id: String
+    let title: String
+    let items: [UnifiedMediaEntry]
+    let tint: Color
+}
+
+private struct HomeCollection: Identifiable {
+    let id = UUID()
+    let title: String
+    let items: [UnifiedMediaEntry]
+}
+
+struct HomeLibraryView: View {
+    @ObservedObject var vm: AppViewModel
+    @ObservedObject var catalog: UnifiedContentModel
+    let isActive: Bool
+
+    @State private var selectedEntry: UnifiedMediaEntry?
+    @State private var selectedSavedLink: SavedVideoLink?
+    @State private var showSavedPlayer = false
+    @State private var selectedCollection: HomeCollection?
+    @State private var showFavorites = false
+    @State private var showSettings = false
+    @State private var showDownloads = false
+
+    private let posterWidth: CGFloat = 112
+    private let posterHeight: CGFloat = 168
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                LinearGradient(
+                    colors: [AppTheme.bg, Color(red: 0.12, green: 0.095, blue: 0.08), AppTheme.bg],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 28) {
+                        homeHeader
+                        resumeSection
+                        posterSection("Recently Added", items: recentlyAdded)
+                        posterSection("Movies", items: catalog.movies)
+                        posterSection("TV Shows", items: catalog.shows)
+                        posterSection("Anime", items: animeItems)
+                        posterSection("Others", items: otherItems)
+                        posterSection("Unwatched", items: unwatchedItems)
+                        posterSection("Watched", items: watchedItems)
+                        favoritesSection
+                        categorySection("By Genre", categories: genreCategories)
+                        categorySection("By Rating", categories: ratingCategories)
+                        categorySection("By Release Date", categories: releaseCategories)
+                        categorySection("By Age Rating", categories: ageRatingCategories)
+                    }
+                    .padding(.top, 12)
+                    .padding(.bottom, 110)
+                }
+                .scrollIndicators(.hidden)
+                .refreshable { await catalog.load(vm: vm, force: true) }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .task(id: isActive) {
+                guard isActive else { return }
+                await catalog.load(vm: vm, force: false)
+            }
+            .fullScreenCover(item: $selectedEntry) { entry in
+                UnifiedMediaDetailsHost(vm: vm, entry: entry)
+            }
+            .fullScreenCover(item: $selectedSavedLink) { link in
+                if let url = link.url {
+                    VideoDetailsView(
+                        vm: vm,
+                        item: VideoDetailsItem(
+                            id: link.id.uuidString,
+                            title: link.title,
+                            url: url,
+                            posterCacheKey: link.favoriteIdentity ?? "saved|\(link.id.uuidString)",
+                            customPosterFileName: link.thumbnailFileName,
+                            fileSizeBytes: link.fileSizeBytes,
+                            durationSeconds: link.durationSeconds,
+                            videoWidth: link.videoWidth,
+                            videoHeight: link.videoHeight,
+                            fileExtension: link.fileExtension,
+                            source: link.hostLabel,
+                            resumePositionSeconds: link.resumePositionSeconds
+                        ),
+                        onPlay: { playSaved(link) },
+                        dismissOnPlay: false
+                    )
+                    .fullScreenCover(isPresented: $showSavedPlayer) {
+                        ResolvedPlayerScreen(vm: vm)
+                    }
+                }
+            }
+            .fullScreenCover(item: $selectedCollection) { collection in
+                HomeCollectionView(vm: vm, catalog: catalog, collection: collection)
+            }
+            .fullScreenCover(isPresented: $showFavorites) {
+                FavoritesAllView(vm: vm)
+            }
+            .sheet(isPresented: $showSettings) { UnifiedSettingsView(vm: vm) }
+            .sheet(isPresented: $showDownloads) { DownloadManagerView() }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var homeHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("HOME")
+                    .font(.system(size: 11, weight: .black, design: .rounded))
+                    .tracking(2.2)
+                    .foregroundStyle(AppPalette.accent)
+                Text("My Library")
+                    .font(.system(size: 29, weight: .bold, design: .rounded))
+                    .foregroundStyle(AppTheme.titleGradient)
+            }
+            Spacer()
+            homeHeaderButton("arrow.down.circle.fill") { showDownloads = true }
+            homeHeaderButton("gearshape.fill") { showSettings = true }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func homeHeaderButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(AppPalette.accent)
+                .frame(width: 42, height: 42)
+                .background(Color.white.opacity(0.065), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var resumeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("Resume Playback", items: resumeItems.map(\.entry))
+            if resumeItems.isEmpty {
+                emptyRow("Nothing to resume")
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 14) {
+                        ForEach(resumeItems) { item in resumeCard(item) }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    private func resumeCard(_ item: HomeMediaItem) -> some View {
+        Button { selectedEntry = item.entry } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14).fill(AppTheme.card)
+                    if let url = item.entry.details?.detailsBackdropURL ?? item.entry.posterURL {
+                        KFImage(url)
+                            .placeholder { ProgressView().tint(AppPalette.accent) }
+                            .cacheOriginalImage()
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        UnifiedPosterArtwork(entry: item.entry, section: section(for: item.entry))
+                    }
+                    LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .center, endPoint: .bottom)
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 42, height: 42)
+                        .background(Color.white.opacity(0.92), in: Circle())
+                    VStack {
+                        Spacer()
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.white.opacity(0.25))
+                                Capsule().fill(AppPalette.gradient)
+                                    .frame(width: proxy.size.width * progress(for: item.history))
+                            }
+                        }
+                        .frame(height: 4)
+                        .padding(.horizontal, 9)
+                        .padding(.bottom, 8)
+                    }
+                }
+                .frame(width: 250, height: 140)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                HStack(spacing: 6) {
+                    Text(item.entry.title).lineLimit(1).truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Text(releaseYear(item.entry))
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 250)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func posterSection(_ title: String, items: [UnifiedMediaEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(title, items: items)
+            if items.isEmpty {
+                emptyRow("No content")
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: 14) {
+                        ForEach(items.prefix(20)) { entry in posterCard(entry) }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    private func posterCard(_ entry: UnifiedMediaEntry) -> some View {
+        Button { selectedEntry = entry } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                ZStack(alignment: .bottomTrailing) {
+                    RoundedRectangle(cornerRadius: 12).fill(AppTheme.card)
+                    UnifiedPosterArtwork(entry: entry, section: section(for: entry))
+                        .frame(width: posterWidth, height: posterHeight)
+                        .clipped()
+                    if let rating = ratingLabel(entry) {
+                        Text(rating)
+                            .font(.system(size: 9, weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 4)
+                            .background(Color.black.opacity(0.78), in: Capsule())
+                            .padding(7)
+                    }
+                }
+                .frame(width: posterWidth, height: posterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.08)))
+
+                Text(entry.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: posterWidth, alignment: .leading)
+                Text(subtitle(entry))
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.43))
+                    .lineLimit(1)
+                    .frame(width: posterWidth, alignment: .leading)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var favoritesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HomeSectionHeader(title: "Favorites", hasItems: !vm.favoriteLinks.isEmpty) {
+                showFavorites = true
+            }
+            if vm.favoriteLinks.isEmpty {
+                emptyRow("No favorites")
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: 14) {
+                        ForEach(vm.favoriteLinks.prefix(20)) { link in
+                            MoviePosterCard(link: link, width: posterWidth, height: posterHeight) {
+                                if let entry = entry(matching: link) { selectedEntry = entry }
+                                else { selectedSavedLink = link }
+                            } onDelete: {
+                                vm.deleteSavedLink(link)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func categorySection(_ title: String, categories: [HomeCategoryCardModel]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HomeSectionHeader(title: title, hasItems: !categories.isEmpty) {
+                var seen = Set<String>()
+                let items = categories.flatMap(\.items).filter { seen.insert($0.id).inserted }
+                selectedCollection = HomeCollection(title: title, items: items)
+            }
+            if categories.isEmpty {
+                emptyRow("Metadata will appear after the library finishes scanning")
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHGrid(
+                        rows: [GridItem(.fixed(142), spacing: 12), GridItem(.fixed(142), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(categories) { category in categoryCard(category) }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .frame(height: 296)
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    private func categoryCard(_ category: HomeCategoryCardModel) -> some View {
+        Button {
+            selectedCollection = HomeCollection(title: category.title, items: category.items)
+        } label: {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .bottom, spacing: -17) {
+                    ForEach(Array(category.items.prefix(3).enumerated()), id: \.offset) { index, entry in
+                        UnifiedPosterArtwork(entry: entry, section: section(for: entry))
+                            .frame(width: 54, height: 79)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.16)))
+                            .rotationEffect(.degrees(Double(index - 1) * 3.5))
+                            .zIndex(Double(index))
+                    }
+                    Spacer(minLength: 0)
+                }
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(category.title).font(.system(size: 13, weight: .bold)).lineLimit(1)
+                        Text("\(category.items.count) items").font(.system(size: 9.5, weight: .medium)).opacity(0.5)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption.bold()).opacity(0.55)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(12)
+            .frame(width: 205, height: 142, alignment: .leading)
+            .background(
+                LinearGradient(colors: [category.tint.opacity(0.35), AppTheme.card], startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sectionHeader(_ title: String, items: [UnifiedMediaEntry]) -> some View {
+        HomeSectionHeader(title: title, hasItems: !items.isEmpty) {
+            selectedCollection = HomeCollection(title: title, items: items)
+        }
+    }
+
+    private func emptyRow(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.white.opacity(0.35))
+            .padding(.horizontal, 16)
+            .frame(height: 54)
+    }
+
+    private var allItems: [UnifiedMediaEntry] {
+        var seen = Set<String>()
+        return (catalog.movies + catalog.shows + catalog.unknown).filter { seen.insert($0.id).inserted }
+    }
+
+    private var historyByID: [String: PlaybackHistoryEntry] {
+        Dictionary(uniqueKeysWithValues: vm.recentPlaybackHistory.map { ($0.id, $0) })
+    }
+
+    private func history(for entry: UnifiedMediaEntry) -> PlaybackHistoryEntry? {
+        if let direct = historyByID[entry.id] { return direct }
+        return entry.episodes.compactMap { historyByID[$0.id] }.max { $0.watchedAt < $1.watchedAt }
+    }
+
+    private var resumeItems: [HomeMediaItem] {
+        allItems.compactMap { entry in
+            guard let history = history(for: entry), history.hasResumePoint else { return nil }
+            return HomeMediaItem(entry: entry, history: history)
+        }
+        .sorted { ($0.history?.watchedAt ?? .distantPast) > ($1.history?.watchedAt ?? .distantPast) }
+    }
+
+    private var recentlyAdded: [UnifiedMediaEntry] {
+        allItems.sorted { sourceDate($0) > sourceDate($1) }
+    }
+
+    private var watchedItems: [UnifiedMediaEntry] {
+        allItems.filter { history(for: $0) != nil }
+            .sorted { (history(for: $0)?.watchedAt ?? .distantPast) > (history(for: $1)?.watchedAt ?? .distantPast) }
+    }
+
+    private var unwatchedItems: [UnifiedMediaEntry] {
+        allItems.filter { history(for: $0) == nil }
+    }
+
+    private var animeItems: [UnifiedMediaEntry] {
+        allItems.filter {
+            $0.details?.genres.contains(where: { $0.name.localizedCaseInsensitiveContains("animation") }) == true
+                || $0.title.localizedCaseInsensitiveContains("anime")
+        }
+    }
+
+    private var otherItems: [UnifiedMediaEntry] {
+        catalog.unknown.filter { entry in !animeItems.contains(where: { $0.id == entry.id }) }
+    }
+
+    private var genreCategories: [HomeCategoryCardModel] {
+        let pairs = allItems.flatMap { entry in (entry.details?.genres ?? []).map { ($0.name, entry) } }
+        return groupedCategories(pairs, tint: AppPalette.accent)
+    }
+
+    private var ratingCategories: [HomeCategoryCardModel] {
+        let pairs = allItems.compactMap { entry -> (String, UnifiedMediaEntry)? in
+            guard let value = entry.details?.voteAverage, value > 0 else { return nil }
+            return ("\(Int(value.rounded(.down))) Score", entry)
+        }
+        return groupedCategories(pairs, tint: .yellow)
+            .sorted { $0.title > $1.title }
+    }
+
+    private var releaseCategories: [HomeCategoryCardModel] {
+        let yearPairs = allItems.compactMap { entry -> (String, UnifiedMediaEntry)? in
+            guard let date = entry.details?.releaseDate, date.count >= 4 else { return nil }
+            return (String(date.prefix(4)), entry)
+        }
+        let decadePairs = yearPairs.compactMap { year, entry -> (String, UnifiedMediaEntry)? in
+            guard let value = Int(year) else { return nil }
+            return ("\((value / 10) * 10)s", entry)
+        }
+        let years = groupedCategories(yearPairs, tint: .cyan).sorted { $0.title > $1.title }.prefix(8)
+        let decades = groupedCategories(decadePairs, tint: .blue).sorted { $0.title > $1.title }
+        return Array(years) + decades
+    }
+
+    private var ageRatingCategories: [HomeCategoryCardModel] {
+        let pairs = allItems.compactMap { entry -> (String, UnifiedMediaEntry)? in
+            guard let value = entry.details?.certification?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else { return nil }
+            return (value, entry)
+        }
+        return groupedCategories(pairs, tint: .orange)
+    }
+
+    private func groupedCategories(
+        _ pairs: [(String, UnifiedMediaEntry)],
+        tint: Color
+    ) -> [HomeCategoryCardModel] {
+        Dictionary(grouping: pairs, by: { $0.0 })
+            .map { title, values in
+                HomeCategoryCardModel(
+                    id: title,
+                    title: title,
+                    items: values.map { $0.1 },
+                    tint: tint
+                )
+            }
+            .filter { !$0.items.isEmpty }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    private func entry(matching link: SavedVideoLink) -> UnifiedMediaEntry? {
+        allItems.first {
+            link.favoriteIdentity == $0.id
+                || $0.episodes.contains(where: { $0.id == link.favoriteIdentity })
+                || $0.streamURL.absoluteString == link.urlString
+        }
+    }
+
+    private func section(for entry: UnifiedMediaEntry) -> UnifiedMediaSection {
+        if catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
+        if catalog.unknown.contains(where: { $0.id == entry.id }) { return .unknown }
+        return .movies
+    }
+
+    private func subtitle(_ entry: UnifiedMediaEntry) -> String {
+        if entry.details?.isSeries == true || !entry.episodes.isEmpty {
+            let seasons = Set(entry.episodes.map(\.season)).count
+            return seasons == 1 ? "1 Season" : "\(max(seasons, 1)) Seasons"
+        }
+        return releaseYear(entry)
+    }
+
+    private func releaseYear(_ entry: UnifiedMediaEntry) -> String {
+        if let date = entry.details?.releaseDate, date.count >= 4 { return String(date.prefix(4)) }
+        if let range = entry.rawTitle.range(of: #"(?<!\d)(?:19|20)\d{2}(?!\d)"#, options: .regularExpression) {
+            return String(entry.rawTitle[range])
+        }
+        return "—"
+    }
+
+    private func ratingLabel(_ entry: UnifiedMediaEntry) -> String? {
+        guard let rating = entry.details?.voteAverage, rating > 0 else { return nil }
+        return String(format: "%.1f", rating)
+    }
+
+    private func sourceDate(_ entry: UnifiedMediaEntry) -> Date {
+        switch entry.source {
+        case let .webDAV(_, file): return file.lastModified ?? .distantPast
+        case let .offcloud(transfer, _):
+            guard let raw = transfer.createdOn else { return .distantPast }
+            return ISO8601DateFormatter().date(from: raw) ?? .distantPast
+        case .torBox: return .distantPast
+        }
+    }
+
+    private func progress(for history: PlaybackHistoryEntry?) -> CGFloat {
+        guard let history, history.durationSeconds > 0 else { return 0 }
+        return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
+    }
+
+    @MainActor
+    private func playSaved(_ link: SavedVideoLink) {
+        vm.nowPlaying = nil
+        vm.nowPlayingURL = nil
+        vm.nowPlayingHeaders = nil
+        showSavedPlayer = true
+        Task { @MainActor in
+            await vm.playSavedLinkAsync(link)
+            if vm.nowPlayingURL == nil { showSavedPlayer = false }
+        }
+    }
+}
+
+private struct HomeSectionHeader: View {
+    let title: String
+    let hasItems: Bool
+    let action: (() -> Void)?
+
+    init(title: String, hasItems: Bool, action: (() -> Void)?) {
+        self.title = title
+        self.hasItems = hasItems
+        self.action = action
+    }
+
+    init(title: String, hasItems: Bool, action: @escaping () -> Void) {
+        self.init(title: title, hasItems: hasItems, action: Optional(action))
+    }
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+            Spacer()
+            if let action, hasItems {
+                Button(action: action) {
+                    HStack(spacing: 3) {
+                        Text("View All")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AppPalette.accent)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct HomeCollectionView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: AppViewModel
+    @ObservedObject var catalog: UnifiedContentModel
+    let collection: HomeCollection
+    @State private var selected: UnifiedMediaEntry?
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 18) {
+                    ForEach(collection.items) { entry in
+                        Button { selected = entry } label: {
+                            VStack(alignment: .leading, spacing: 7) {
+                                UnifiedPosterArtwork(entry: entry, section: section(for: entry))
+                                    .aspectRatio(2 / 3, contentMode: .fit)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                Text(entry.title)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(14)
+            }
+            .scrollIndicators(.hidden)
+            .background(AppTheme.bg.ignoresSafeArea())
+            .navigationTitle(collection.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Close") { dismiss() } }
+            }
+            .fullScreenCover(item: $selected) { entry in
+                UnifiedMediaDetailsHost(vm: vm, entry: entry)
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func section(for entry: UnifiedMediaEntry) -> UnifiedMediaSection {
+        if catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
+        if catalog.unknown.contains(where: { $0.id == entry.id }) { return .unknown }
+        return .movies
     }
 }
 // MARK: - Shared visual tokens
