@@ -2,6 +2,8 @@ import SwiftUI
 import Foundation
 import UIKit
 import Combine
+import Vision
+import ImageIO
 
 struct VideoEpisodeItem: Identifiable {
     let id: String
@@ -261,6 +263,17 @@ struct VideoDetailsView: View {
                 }
             }
 
+            // Metadata artwork is already persisted on disk under these stable
+            // keys. On subsequent opens, use it and do not probe the remote
+            // video again merely to regenerate a background frame.
+            let cachedMetadataArtwork = VideoThumbnailLoader.cachedImage(
+                forStableKey: "tmdb-episode|\(stableMetadataCacheKey)"
+            ) ?? VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
+            if let cachedMetadataArtwork {
+                frame = cachedMetadataArtwork
+                return
+            }
+
             let detailKey = "details-artwork|\(stableMetadataCacheKey)"
             if let highResolution = VideoThumbnailLoader.cachedImage(forStableKey: detailKey) {
                 frame = highResolution
@@ -345,12 +358,20 @@ struct VideoDetailsView: View {
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil,
                VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
-               let imageURL = isMovieDetailsPage ? tmdbDetails?.posterURL : tmdbDetails?.imageURL,
+               let imageURL = isMovieDetailsPage ? tmdbDetails?.detailsBackdropURL : tmdbDetails?.imageURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 frame = image
-                VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
+                if isMovieDetailsPage {
+                    VideoThumbnailLoader.cacheHighQualityImage(
+                        image,
+                        forStableKey: titleArtworkKey,
+                        maximumBytes: ThumbnailPipeline.largeMaximumBytes
+                    )
+                } else {
+                    VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
+                }
                 VideoThumbnailLoader.cacheImage(image, forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
                 if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
             }
@@ -394,56 +415,54 @@ struct VideoDetailsView: View {
         item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil
     }
 
+    /// Warm solid background used by the movie artwork fade (#211A13).
+    private var movieDetailsBaseColor: Color {
+        Color(red: 33.0 / 255.0, green: 26.0 / 255.0, blue: 19.0 / 255.0)
+    }
+
     private var movieDetailsScreen: some View {
         ZStack(alignment: .top) {
             GeometryReader { proxy in
+                // Keep artwork underneath the complete blend. The final opaque
+                // stop lands exactly where this hero ends, so no hard image edge
+                // can appear on tall or short displays.
+                let heroHeight = max(320, proxy.size.height * 0.54)
                 ZStack {
-                    Color.black
-                    if let displayedFrame {
-                        // A blurred full-bleed layer extends the poster's own colors
-                        // into empty edges without stretching/cropping the artwork.
+                    movieDetailsBaseColor
+                    if let backdrop = movieBackdropFrame {
+                        SmartCinematicBackdrop(
+                            image: backdrop,
+                            cacheKey: tmdbTitleArtworkCacheKey,
+                            size: CGSize(width: proxy.size.width, height: heroHeight)
+                        )
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                    } else if let displayedFrame {
                         Image(uiImage: displayedFrame)
                             .resizable()
                             .scaledToFill()
-                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .frame(width: proxy.size.width, height: heroHeight)
                             .clipped()
-                            .blur(radius: 34)
-                            .scaleEffect(1.16)
-                            .saturation(1.12)
-                            .opacity(0.82)
-
-                        VStack(spacing: 0) {
-                            Image(uiImage: displayedFrame)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: proxy.size.width)
-                                .mask(
-                                    LinearGradient(
-                                        stops: [
-                                            .init(color: .white.opacity(0.96), location: 0),
-                                            .init(color: .white, location: 0.68),
-                                            .init(color: .white.opacity(0.55), location: 0.86),
-                                            .init(color: .clear, location: 1)
-                                        ],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                            Spacer(minLength: 0)
-                        }
-                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                     }
                     LinearGradient(
                         stops: [
-                            .init(color: .black.opacity(0.03), location: 0),
-                            .init(color: .black.opacity(0.10), location: 0.34),
-                            .init(color: .black.opacity(0.52), location: 0.62),
-                            .init(color: .black.opacity(0.92), location: 0.84),
-                            .init(color: .black, location: 1)
+                            // Keep status and navigation controls legible over
+                            // bright artwork while retaining the poster detail.
+                            .init(color: .black.opacity(0.50), location: 0.00),
+                            .init(color: .black.opacity(0.38), location: 0.18),
+
+                            // Blend into the warm details background around the
+                            // middle of the display, then hide artwork entirely.
+                            .init(color: movieDetailsBaseColor.opacity(0.20), location: 0.30),
+                            .init(color: movieDetailsBaseColor.opacity(0.72), location: 0.41),
+                            .init(color: movieDetailsBaseColor.opacity(0.96), location: 0.49),
+                            .init(color: movieDetailsBaseColor, location: 0.54),
+                            .init(color: movieDetailsBaseColor, location: 1.00)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
                     )
+                    .allowsHitTesting(false)
                 }
             }
             .ignoresSafeArea()
@@ -762,8 +781,13 @@ struct VideoDetailsView: View {
             ?? VideoThumbnailLoader.cachedImage(for: item.url)
     }
 
+    private var movieBackdropFrame: UIImage? {
+        guard isMovieDetailsPage else { return nil }
+        return VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
+    }
+
     private var tmdbTitleArtworkCacheKey: String {
-        (isMovieDetailsPage ? "tmdb-movie-poster-v1|" : "tmdb-title|") + stableMetadataCacheKey
+        (isMovieDetailsPage ? "tmdb-movie-backdrop-nolang-original-v1|" : "tmdb-title|") + stableMetadataCacheKey
     }
 
     private var topSafeAreaInset: CGFloat {
@@ -1056,7 +1080,7 @@ struct VideoDetailsView: View {
             Text(details.isSeries ? "Series · TMDB" : "Movie · TMDB").font(.caption).foregroundColor(.secondary)
             if !details.overview.isEmpty { Text(details.overview).font(.subheadline).foregroundColor(.white.opacity(0.82)) }
             if let key = details.trailerKey, let url = URL(string: "https://www.youtube.com/watch?v=\(key)") { Button { openURL(url) } label: { Label("Watch Trailer", systemImage: "play.rectangle.fill").font(.subheadline.bold()).frame(maxWidth: .infinity).padding(.vertical, 11).background(Color.red.opacity(0.85), in: Capsule()) }.buttonStyle(.plain) }
-            if !details.cast.isEmpty { Text("Cast").font(.headline); ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) { ForEach(details.cast) { member in VStack(spacing: 6) { AsyncImage(url: member.imageURL) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle.fill").resizable().foregroundColor(.secondary) }.frame(width: 68, height: 68).clipShape(Circle()); Text(member.name).font(.caption.bold()).lineLimit(1).frame(width: 88); Text(member.character).font(.caption2).foregroundColor(.secondary).lineLimit(1).frame(width: 88) } } } } }
+            if !details.cast.isEmpty { Text("Cast").font(.headline); ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) { ForEach(details.cast) { member in VStack(spacing: 6) { CachedTMDBImage(url: member.imageURL, contentMode: .fill, placeholderSystemName: "person.crop.circle.fill").frame(width: 68, height: 68).clipShape(Circle()); Text(member.name).font(.caption.bold()).lineLimit(1).frame(width: 88); Text(member.character).font(.caption2).foregroundColor(.secondary).lineLimit(1).frame(width: 88) } } } } }
             if details.isSeries, !details.seasons.isEmpty { Text("Seasons & Episodes").font(.headline); ForEach(details.seasons) { season in HStack { Image(systemName: "rectangle.stack.fill").foregroundColor(AppTheme.accent); Text(season.name).font(.subheadline.bold()); Spacer(); Text("\(season.episodeCount) episodes").font(.caption).foregroundColor(.secondary) }.padding(10).background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12)) } }
         }.padding(16).background(AppTheme.card, in: RoundedRectangle(cornerRadius: 18))
     }
@@ -1290,6 +1314,118 @@ struct VideoDetailsView: View {
 }
 
 // MARK: - إضافة الفيديو لقائمة تشغيل
+
+private struct SmartCinematicBackdrop: View {
+    let image: UIImage
+    let cacheKey: String
+    let size: CGSize
+    @State private var focalPoint: UnitPoint
+
+    init(image: UIImage, cacheKey: String, size: CGSize) {
+        self.image = image
+        self.cacheKey = cacheKey
+        self.size = size
+        _focalPoint = State(initialValue: SmartBackdropFocalStore.point(for: cacheKey) ?? .center)
+    }
+
+    var body: some View {
+        let placement = aspectFillPlacement
+        Image(uiImage: image)
+            .resizable()
+            .frame(width: placement.rendered.width, height: placement.rendered.height)
+            .position(x: placement.center.x, y: placement.center.y)
+            .frame(width: size.width, height: size.height)
+            .clipped()
+            .task(id: ObjectIdentifier(image)) {
+                if let cached = SmartBackdropFocalStore.point(for: cacheKey) {
+                    focalPoint = cached
+                    return
+                }
+                let detected = await SmartBackdropAnalyzer.focalPoint(in: image)
+                guard !Task.isCancelled else { return }
+                focalPoint = detected
+                SmartBackdropFocalStore.save(detected, for: cacheKey)
+            }
+    }
+
+    private var aspectFillPlacement: (rendered: CGSize, center: CGPoint) {
+        let source = image.size
+        guard source.width > 0, source.height > 0, size.width > 0, size.height > 0 else {
+            return (size, CGPoint(x: size.width / 2, y: size.height / 2))
+        }
+        let scale = max(size.width / source.width, size.height / source.height)
+        let rendered = CGSize(width: source.width * scale, height: source.height * scale)
+        let idealX = size.width / 2 - focalPoint.x * rendered.width
+        let idealY = size.height / 2 - focalPoint.y * rendered.height
+        let originX = min(0, max(size.width - rendered.width, idealX))
+        let originY = min(0, max(size.height - rendered.height, idealY))
+        return (rendered, CGPoint(x: originX + rendered.width / 2, y: originY + rendered.height / 2))
+    }
+}
+
+private enum SmartBackdropAnalyzer {
+    static func focalPoint(in image: UIImage) async -> UnitPoint {
+        guard let cgImage = image.cgImage else { return .center }
+        let orientation = image.visionOrientation
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let faceRequest = VNDetectFaceRectanglesRequest()
+                let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation)
+                try? handler.perform([faceRequest])
+                let faceRects = (faceRequest.results ?? []).map(\.boundingBox)
+                if let point = focalPoint(for: faceRects) {
+                    continuation.resume(returning: point)
+                    return
+                }
+
+                let saliencyRequest = VNGenerateAttentionBasedSaliencyImageRequest()
+                try? handler.perform([saliencyRequest])
+                let salientRects = saliencyRequest.results?.first?.salientObjects?.map(\.boundingBox) ?? []
+                continuation.resume(returning: focalPoint(for: salientRects) ?? .center)
+            }
+        }
+    }
+
+    private static func focalPoint(for rects: [CGRect]) -> UnitPoint? {
+        guard var union = rects.first else { return nil }
+        for rect in rects.dropFirst() { union = union.union(rect) }
+        let x = min(0.88, max(0.12, union.midX))
+        let y = min(0.68, max(0.18, 1 - union.midY))
+        return UnitPoint(x: x, y: y)
+    }
+}
+
+private enum SmartBackdropFocalStore {
+    private static let defaultsKey = "tmdb.smartBackdropFocal.v1"
+
+    static func point(for key: String) -> UnitPoint? {
+        guard let value = UserDefaults.standard.dictionary(forKey: defaultsKey)?[key] as? [Double],
+              value.count == 2 else { return nil }
+        return UnitPoint(x: value[0], y: value[1])
+    }
+
+    static func save(_ point: UnitPoint, for key: String) {
+        var values = UserDefaults.standard.dictionary(forKey: defaultsKey) ?? [:]
+        values[key] = [point.x, point.y]
+        UserDefaults.standard.set(values, forKey: defaultsKey)
+    }
+}
+
+private extension UIImage {
+    var visionOrientation: CGImagePropertyOrientation {
+        switch imageOrientation {
+        case .up: return .up
+        case .upMirrored: return .upMirrored
+        case .down: return .down
+        case .downMirrored: return .downMirrored
+        case .left: return .left
+        case .leftMirrored: return .leftMirrored
+        case .right: return .right
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
+    }
+}
 
 private struct CachedTMDBImage: View {
     let url: URL?

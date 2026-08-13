@@ -42,6 +42,7 @@ struct TMDBTitleDetails: Identifiable, Codable {
     let certification: String?
     let director: TMDBCrewMember?
     let logoPath: String?
+    let noLanguageBackdropPath: String?
 
     var isSeries: Bool { mediaType == "tv" }
     var posterURL: URL? {
@@ -52,6 +53,10 @@ struct TMDBTitleDetails: Identifiable, Codable {
     var imageURL: URL? {
         guard let path = backdropPath ?? posterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/w1280\(path)")
+    }
+    var detailsBackdropURL: URL? {
+        guard let path = noLanguageBackdropPath ?? backdropPath else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var logoURL: URL? {
         guard let logoPath else { return nil }
@@ -104,7 +109,7 @@ actor TMDBService {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TMDBMetadata", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        cacheURL = directory.appendingPathComponent("metadata-v4.json")
+        cacheURL = directory.appendingPathComponent("metadata-v5.json")
         if let data = try? Data(contentsOf: cacheURL),
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
@@ -165,8 +170,7 @@ actor TMDBService {
         for query in [filtered, canonical, original] where !query.isEmpty {
             let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard attempted.insert(normalized.lowercased()).inserted else { continue }
-            let key = normalized.lowercased() + "|" + (preferredMediaType ?? "any")
-            if let cached = detailsCache[key] { return cached }
+            if let cached = cachedDetails(for: normalized, preferredMediaType: preferredMediaType) { return cached }
         }
         return nil
     }
@@ -176,7 +180,14 @@ actor TMDBService {
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else { return nil }
         let cacheKey = normalizedQuery.lowercased() + "|" + (preferredMediaType ?? "any")
-        if let cached = detailsCache[cacheKey] { return cached }
+        if let cached = cachedDetails(for: normalizedQuery, preferredMediaType: preferredMediaType) {
+            // Save the alias so subsequent reads are a direct dictionary hit.
+            if detailsCache[cacheKey] == nil {
+                detailsCache[cacheKey] = cached
+                persistCache()
+            }
+            return cached
+        }
         let candidates = await searchCandidates(for: normalizedQuery)
         guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else { return nil }
         do {
@@ -206,12 +217,33 @@ actor TMDBService {
                 certification: certification,
                 director: payload.credits?.crew.first(where: { $0.job == "Director" }),
                 logoPath: payload.images?.logos.first(where: { $0.iso6391 == "en" })?.filePath
-                    ?? payload.images?.logos.first?.filePath
+                    ?? payload.images?.logos.first?.filePath,
+                // TMDB's No Language section is represented by iso_639_1 = null.
+                // Preserve API order and use its first backdrop exactly.
+                noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath
             )
+            // One successful response is shared by the Content scan and Details
+            // screen even when one requested `movie`/`tv` and the other `any`.
+            let base = normalizedQuery.lowercased()
             detailsCache[cacheKey] = details
+            detailsCache[base + "|" + details.mediaType] = details
+            detailsCache[base + "|any"] = details
             persistCache()
             return details
         } catch { return nil }
+    }
+
+    private func cachedDetails(for query: String, preferredMediaType: String?) -> TMDBTitleDetails? {
+        let base = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !base.isEmpty else { return nil }
+        if let preferredMediaType {
+            if let exact = detailsCache[base + "|" + preferredMediaType] { return exact }
+            if let any = detailsCache[base + "|any"], any.mediaType == preferredMediaType { return any }
+            return nil
+        }
+        return detailsCache[base + "|any"]
+            ?? detailsCache[base + "|movie"]
+            ?? detailsCache[base + "|tv"]
     }
 
     private func searchCandidates(for rawQuery: String) async -> [SearchResult] {
@@ -394,8 +426,12 @@ private struct ProductionCountry: Decodable { let name: String }
 private struct ReleaseDatesResponse: Decodable { let results: [ReleaseDatesCountry] }
 private struct ReleaseDatesCountry: Decodable { let iso31661: String; let releaseDates: [ReleaseDateEntry] }
 private struct ReleaseDateEntry: Decodable { let certification: String }
-private struct TMDBImagesPayload: Decodable { let logos: [TMDBLogoPayload] }
+private struct TMDBImagesPayload: Decodable {
+    let logos: [TMDBLogoPayload]
+    let backdrops: [TMDBBackdropPayload]?
+}
 private struct TMDBLogoPayload: Decodable { let filePath: String; let iso6391: String? }
+private struct TMDBBackdropPayload: Decodable { let filePath: String; let iso6391: String? }
 private struct Videos: Decodable { let results: [Video] }
 private struct Video: Decodable { let key: String; let site: String; let type: String; let official: Bool? }
 
