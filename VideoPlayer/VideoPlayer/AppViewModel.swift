@@ -18,6 +18,21 @@ struct VideoPlaylist: Identifiable, Codable, Equatable {
     }
 }
 
+struct PlaybackHistoryEntry: Identifiable, Codable, Equatable {
+    let id: String
+    var title: String
+    var source: String
+    var positionSeconds: Double
+    var durationSeconds: Double
+    var watchedAt: Date
+
+    var hasResumePoint: Bool {
+        positionSeconds > 3
+            && (durationSeconds <= 0
+                || (positionSeconds < durationSeconds * 0.95 && durationSeconds - positionSeconds > 5))
+    }
+}
+
 @MainActor
 class AppViewModel: ObservableObject {
     @Published var servers: [WebDAVServer] = []
@@ -35,6 +50,9 @@ class AppViewModel: ObservableObject {
     @Published var nowPlayingResumeAt: Double = 0
     /// Library of auto-saved links (newest first).
     @Published var savedLinks: [SavedVideoLink] = []
+    /// Small local-only resume history. It never stores stream URLs and never
+    /// starts metadata, artwork, or provider requests.
+    @Published private(set) var playbackHistory: [String: PlaybackHistoryEntry] = [:]
 
     /// Videos explicitly pinned by the user, newest favorites first.
     var favoriteLinks: [SavedVideoLink] {
@@ -57,12 +75,62 @@ class AppViewModel: ObservableObject {
     private let linksKey = "saved_video_links_v2"
     private let playlistsKey = "video_playlists_v1"
     private let pikPakCachePrefix = "pikpak_webdav_cache_v1_"
+    private let playbackHistoryKey = "playback_history_v1"
+    private var pendingHistoryItem: (id: String, title: String, source: String)?
+    private var pendingHistoryProgress: (position: Double, duration: Double)?
 
     init() {
         loadServers()
         loadSavedLinks()
         loadPlaylists()
+        loadPlaybackHistory()
         pikpakAccount = PikPakClient.shared.loadAccount()
+    }
+
+    private func loadPlaybackHistory() {
+        guard let data = UserDefaults.standard.data(forKey: playbackHistoryKey),
+              let values = try? JSONDecoder().decode([PlaybackHistoryEntry].self, from: data) else { return }
+        playbackHistory = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
+    }
+
+    private func persistPlaybackHistory() {
+        let values = playbackHistory.values
+            .sorted { $0.watchedAt > $1.watchedAt }
+            .prefix(100)
+        guard let data = try? JSONEncoder().encode(Array(values)) else { return }
+        UserDefaults.standard.set(data, forKey: playbackHistoryKey)
+    }
+
+    func preparePlaybackHistory(for item: VideoDetailsItem) {
+        pendingHistoryItem = (item.id, item.title, item.source)
+        pendingHistoryProgress = nil
+    }
+
+    func playbackHistoryEntry(for item: VideoDetailsItem) -> PlaybackHistoryEntry? {
+        playbackHistory[item.id]
+    }
+
+    /// Commits once when the player closes. Calling it again is harmless.
+    func finishPlaybackHistory() {
+        guard let item = pendingHistoryItem else { return }
+        defer {
+            pendingHistoryItem = nil
+            pendingHistoryProgress = nil
+        }
+        guard let progress = pendingHistoryProgress, progress.position > 3 else { return }
+
+        let nearEnd = progress.duration > 0
+            && (progress.position >= progress.duration * 0.95 || progress.duration - progress.position < 5)
+        let entry = PlaybackHistoryEntry(
+            id: item.id,
+            title: item.title,
+            source: item.source,
+            positionSeconds: nearEnd ? 0 : progress.position,
+            durationSeconds: progress.duration,
+            watchedAt: Date()
+        )
+        playbackHistory[item.id] = entry
+        persistPlaybackHistory()
     }
 
     // MARK: - Persistence: servers
@@ -552,6 +620,11 @@ class AppViewModel: ObservableObject {
         if let matchedId, let link = savedLinks.first(where: { $0.id == matchedId }), link.hasResumePoint {
             resume = link.resumePositionSeconds ?? 0
         }
+        if resume <= 3,
+           let historyID = pendingHistoryItem?.id,
+           let history = playbackHistory[historyID], history.hasResumePoint {
+            resume = history.positionSeconds
+        }
 
         // Playback must own the only active network request. Starting the hidden
         // full-file background cache here created a second priority-1 transfer for
@@ -573,18 +646,6 @@ class AppViewModel: ObservableObject {
         )
         nowPlayingURL = playbackURL
 
-        // Let the player transition appear first; moving the library card before
-        // the cover opens causes a visible jump in the library.
-        if let matchedId {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                guard let self, self.nowPlayingLinkId == matchedId,
-                      let idx = self.savedLinks.firstIndex(where: { $0.id == matchedId }) else { return }
-                self.savedLinks[idx].lastPlayed = Date()
-                let updated = self.savedLinks.remove(at: idx)
-                self.savedLinks.insert(updated, at: 0)
-                self.persistSavedLinksImmediately()
-            }
-        }
     }
 
     /// Persist exact playback position + detected resolution for resume / badges.
@@ -596,6 +657,11 @@ class AppViewModel: ObservableObject {
         linkId: UUID? = nil,
         streamURL: URL? = nil
     ) {
+        if pendingHistoryItem != nil, seconds.isFinite, duration.isFinite, seconds >= 0 {
+            // Memory only while playback is active. The disk write happens once
+            // in finishPlaybackHistory(), after the final AVPlayer/VLC tick.
+            pendingHistoryProgress = (seconds, max(0, duration))
+        }
         let id = linkId ?? nowPlayingLinkId
         var idx = id.flatMap { lid in savedLinks.firstIndex(where: { $0.id == lid }) }
         if idx == nil, let streamURL {
@@ -859,6 +925,7 @@ class AppViewModel: ObservableObject {
     /// Releases the presented playback state without touching metadata/API work.
     /// This prevents a dismissed player from being reconstructed with its stale URL.
     func endPlaybackPresentation() {
+        finishPlaybackHistory()
         nowPlayingURL = nil
         nowPlayingHeaders = nil
         nowPlayingResumeAt = 0

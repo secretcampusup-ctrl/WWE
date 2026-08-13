@@ -1531,6 +1531,9 @@ private struct OffcloudVideoDetailsHost: View {
                             streamURL: playbackURL
                         )
                     }
+                    .onDisappear {
+                        vm.finishPlaybackHistory()
+                    }
                 } else {
                     ImmediatePlayerLoadingView()
                 }

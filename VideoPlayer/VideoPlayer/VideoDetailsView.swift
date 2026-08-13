@@ -218,6 +218,9 @@ struct VideoDetailsView: View {
                         } else if ThePornDBSettings.isEnabled, let thePornDBMetadata {
                             thePornDBInfoCard(thePornDBMetadata)
                         }
+                        if let history = vm.playbackHistoryEntry(for: item) {
+                            lastWatchedCard(history)
+                        }
                     }
                         .padding(.horizontal, 16)
                         .padding(.top, 18)
@@ -500,6 +503,10 @@ struct VideoDetailsView: View {
                             movieCastAndCrew(details)
                         }
 
+                        if let history = vm.playbackHistoryEntry(for: item) {
+                            lastWatchedCard(history)
+                        }
+
                         VStack(spacing: 3) {
                             Text("\(item.source) · \(item.fileExtension.uppercased())")
                             Text("My Library · Movies")
@@ -620,13 +627,21 @@ struct VideoDetailsView: View {
     }
 
     private var hasMovieProgress: Bool {
-        (item.resumePositionSeconds ?? 0) > 3
+        effectiveResumePosition > 3
     }
 
     private var movieProgressPercent: Int {
-        guard let current = item.resumePositionSeconds, current > 0,
-              let duration = item.durationSeconds, duration > 0 else { return 1 }
+        let current = effectiveResumePosition
+        let duration = vm.playbackHistoryEntry(for: item)?.durationSeconds ?? item.durationSeconds ?? 0
+        guard current > 0, duration > 0 else { return 1 }
         return min(99, max(1, Int((current / duration) * 100)))
+    }
+
+    private var effectiveResumePosition: Double {
+        if let history = vm.playbackHistoryEntry(for: item), history.hasResumePoint {
+            return history.positionSeconds
+        }
+        return item.resumePositionSeconds ?? 0
     }
 
     private var movieActionRow: some View {
@@ -698,6 +713,86 @@ struct VideoDetailsView: View {
             Text(role).font(.system(size: 9)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
         }
         .frame(width: 78)
+    }
+
+    private func lastWatchedCard(_ history: PlaybackHistoryEntry) -> some View {
+        Button(action: playAndClose) {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(spacing: 10) {
+                    Image(systemName: history.hasResumePoint ? "clock.arrow.circlepath" : "checkmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(history.hasResumePoint ? AppPalette.accent : Color.green)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Last Watched")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                        Text(lastWatchedDateLabel(history.watchedAt))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.52))
+                    }
+
+                    Spacer()
+
+                    Text(history.hasResumePoint ? "Resume" : "Play Again")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.90))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.42))
+                }
+
+                if history.durationSeconds > 0 {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.12))
+                            Capsule()
+                                .fill(AppPalette.gradient)
+                                .frame(width: proxy.size.width * lastWatchedFraction(history))
+                        }
+                    }
+                    .frame(height: 4)
+
+                    HStack {
+                        Text(formatPlaybackTime(history.positionSeconds))
+                        Spacer()
+                        Text("\(lastWatchedPercent(history))%")
+                        Spacer()
+                        Text(formatPlaybackTime(history.durationSeconds))
+                    }
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .monospacedDigit()
+                }
+            }
+            .padding(14)
+            .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func lastWatchedFraction(_ history: PlaybackHistoryEntry) -> CGFloat {
+        guard history.durationSeconds > 0 else { return 0 }
+        return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
+    }
+
+    private func lastWatchedPercent(_ history: PlaybackHistoryEntry) -> Int {
+        Int((lastWatchedFraction(history) * 100).rounded())
+    }
+
+    private func formatPlaybackTime(_ seconds: Double) -> String {
+        let value = max(0, Int(seconds.rounded()))
+        if value >= 3_600 {
+            return String(format: "%d:%02d:%02d", value / 3_600, (value % 3_600) / 60, value % 60)
+        }
+        return String(format: "%d:%02d", value / 60, value % 60)
+    }
+
+    private func lastWatchedDateLabel(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var preview: some View {
@@ -1167,8 +1262,9 @@ struct VideoDetailsView: View {
     }
     /// زر التشغيل الرئيسي — يأخذ العرض الكامل بتصميم بارز فوق باقي الأزرار
     private var playButtonTitle: String {
-        guard let value = VideoTitleFormatter.episodeComponents(from: item.title) else { return "Play" }
-        return String(format: "Play E%02d", value.episode)
+        let action = effectiveResumePosition > 3 ? "Resume" : "Play"
+        guard let value = VideoTitleFormatter.episodeComponents(from: item.title) else { return action }
+        return String(format: "%@ E%02d", action, value.episode)
     }
 
     private var primaryPlayButton: some View {
@@ -1229,6 +1325,7 @@ struct VideoDetailsView: View {
     }
 
     private func playAndClose() {
+        vm.preparePlaybackHistory(for: item)
         onPlay()
         if dismissOnPlay { dismiss() }
     }
