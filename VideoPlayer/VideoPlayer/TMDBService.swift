@@ -139,7 +139,11 @@ actor TMDBService {
         return await detailsForQuery(Self.searchTitle(from: rawTitle), preferredMediaType: preferred)
     }
 
-    func detailsOriginalFirst(for rawTitle: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
+    func detailsOriginalFirst(
+        for rawTitle: String,
+        preferredMediaType: String? = nil,
+        persistImmediately: Bool = true
+    ) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
         let original = Self.originalSearchTitle(from: rawTitle)
         let filtered = Self.searchTitle(from: rawTitle)
@@ -151,7 +155,11 @@ actor TMDBService {
         for query in [filtered, canonical, original] where !query.isEmpty {
             let key = query.lowercased()
             guard attempted.insert(key).inserted else { continue }
-            if let result = await detailsForQuery(query, preferredMediaType: preferredMediaType) { return result }
+            if let result = await detailsForQuery(
+                query,
+                preferredMediaType: preferredMediaType,
+                persistImmediately: persistImmediately
+            ) { return result }
         }
         return nil
     }
@@ -171,13 +179,17 @@ actor TMDBService {
         return nil
     }
 
-    private func detailsForQuery(_ query: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
+    private func detailsForQuery(
+        _ query: String,
+        preferredMediaType: String? = nil,
+        persistImmediately: Bool = true
+    ) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else { return nil }
         let cacheKey = normalizedQuery.lowercased() + "|" + (preferredMediaType ?? "any")
         if let cached = detailsCache[cacheKey] { return cached }
-        let candidates = await searchCandidates(for: normalizedQuery)
+        let candidates = await searchCandidates(for: normalizedQuery, preferredMediaType: preferredMediaType)
         guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else { return nil }
         do {
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
@@ -209,45 +221,54 @@ actor TMDBService {
                     ?? payload.images?.logos.first?.filePath
             )
             detailsCache[cacheKey] = details
-            persistCache()
+            if persistImmediately { persistCache() }
             return details
         } catch { return nil }
     }
 
-    private func searchCandidates(for rawQuery: String) async -> [SearchResult] {
-        var values: [SearchResult] = []
-
-        // Multi-search is fastest when TMDB accepts the release-style query.
-        if let response: SearchResponse = try? await request(
-            "/3/search/multi",
-            query: ["query": rawQuery, "include_adult": "false"]
-        ) {
-            values.append(contentsOf: response.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" })
-        }
-
-        // Dedicated movie/TV searches are the reliable fallback. They receive a
-        // clean title and the year separately, which resolves filenames such as
-        // `Gran Torino - 2008.mkv` and `Sinners (2025) (2160p...).mkv`.
+    private func searchCandidates(for rawQuery: String, preferredMediaType: String?) async -> [SearchResult] {
         let parsed = Self.canonicalTitleAndYear(from: rawQuery)
-        guard !parsed.title.isEmpty else { return values }
+        guard !parsed.title.isEmpty else { return [] }
         var movieQuery = ["query": parsed.title, "include_adult": "false"]
         var tvQuery = ["query": parsed.title, "include_adult": "false"]
         if let year = parsed.year {
             movieQuery["year"] = year
             tvQuery["first_air_date_year"] = year
         }
-        if let response: TypedTitleSearchResponse = try? await request("/3/search/movie", query: movieQuery) {
-            values.append(contentsOf: response.results.map {
+        // Most filenames already tell us whether they are an episode or movie.
+        // Use that single typed endpoint first instead of issuing multi + movie +
+        // TV searches for every library item.
+        if preferredMediaType == "movie",
+           let response: TypedTitleSearchResponse = try? await request("/3/search/movie", query: movieQuery),
+           !response.results.isEmpty {
+            return response.results.map {
                 SearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: $0.name)
-            })
+            }
         }
-        if let response: TypedTitleSearchResponse = try? await request("/3/search/tv", query: tvQuery) {
-            values.append(contentsOf: response.results.map {
+        if preferredMediaType == "tv",
+           let response: TypedTitleSearchResponse = try? await request("/3/search/tv", query: tvQuery),
+           !response.results.isEmpty {
+            return response.results.map {
                 SearchResult(id: $0.id, mediaType: "tv", title: $0.title, name: $0.name)
-            })
+            }
+        }
+
+        // Unknown or failed typed matches get one broad fallback request.
+        var values: [SearchResult] = []
+        if let response: SearchResponse = try? await request(
+            "/3/search/multi",
+            query: ["query": parsed.title, "include_adult": "false"]
+        ) {
+            values = response.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
         }
         var seen = Set<String>()
         return values.filter { seen.insert("\($0.mediaType)|\($0.id)").inserted }
+    }
+
+    /// Flushes a metadata batch with one atomic write instead of rewriting the
+    /// complete cache after every title in a large library scan.
+    func flushPersistentCache() {
+        persistCache()
     }
 
     private static func canonicalTitleAndYear(from raw: String) -> (title: String, year: String?) {

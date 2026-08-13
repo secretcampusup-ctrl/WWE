@@ -192,14 +192,18 @@ private final class UnifiedContentModel: ObservableObject {
         var metadataByQuery: [String: TMDBTitleDetails] = [:]
         await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
             var iterator = representatives.makeIterator()
-            for _ in 0..<min(8, representatives.count) {
+            for _ in 0..<min(12, representatives.count) {
                 guard let (key, entry) = iterator.next() else { break }
                 let lookupTitle = metadataLookupTitle(for: entry)
                 let preferredType = preferredMediaType(for: entry)
                 group.addTask {
                     let details: TMDBTitleDetails?
                     if shouldFetchMetadata {
-                        details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
+                        details = await TMDBService.shared.detailsOriginalFirst(
+                            for: lookupTitle,
+                            preferredMediaType: preferredType,
+                            persistImmediately: false
+                        )
                     } else {
                         details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                     }
@@ -215,7 +219,11 @@ private final class UnifiedContentModel: ObservableObject {
                     group.addTask {
                         let details: TMDBTitleDetails?
                         if shouldFetchMetadata {
-                            details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
+                            details = await TMDBService.shared.detailsOriginalFirst(
+                                for: lookupTitle,
+                                preferredMediaType: preferredType,
+                                persistImmediately: false
+                            )
                         } else {
                             details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                         }
@@ -223,6 +231,9 @@ private final class UnifiedContentModel: ObservableObject {
                     }
                 }
             }
+        }
+        if shouldFetchMetadata {
+            await TMDBService.shared.flushPersistentCache()
         }
 
         var movieItems: [UnifiedMediaEntry] = []
