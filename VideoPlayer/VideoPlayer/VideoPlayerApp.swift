@@ -107,6 +107,7 @@ struct VideoPlayerApp: App {
         WindowGroup {
             RootView()
                 .preferredColorScheme(.dark)
+                .scrollIndicators(.hidden)
         }
     }
 }

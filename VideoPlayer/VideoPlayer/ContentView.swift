@@ -58,6 +58,7 @@ struct ContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
+            .scrollIndicators(.hidden)
             .background(AppTheme.bg.ignoresSafeArea())
             .navigationBarHidden(true)
             .fullScreenCover(isPresented: $showPlayer, onDismiss: {

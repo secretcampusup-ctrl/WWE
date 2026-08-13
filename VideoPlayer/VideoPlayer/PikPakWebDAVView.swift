@@ -856,7 +856,8 @@ private struct PikPakFilePoster: View {
                 Text(file.displayName)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.white)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -381,7 +381,11 @@ struct VideoDetailsView: View {
                     VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
                 }
                 VideoThumbnailLoader.cacheImage(image, forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
-                if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
+                // Wide movie backdrops belong only to Details. Sharing this key
+                // with the grid was what replaced vertical posters after opening.
+                if !isMovieDetailsPage, let key = item.posterCacheKey {
+                    VideoThumbnailLoader.cacheImage(image, forStableKey: key)
+                }
             }
             guard tmdbDetails == nil else { return }
             if ThePornDBSettings.isEnabled, thePornDBMetadata == nil {
@@ -391,7 +395,9 @@ struct VideoDetailsView: View {
                 VideoDetailsMemoryCache.adultMetadata[metadataKey] = thePornDBMetadata
             }
             if ThePornDBSettings.isEnabled, let cover = thePornDBMetadata?.coverImage {
-                if frame == nil { frame = cover }
+                if frame == nil || item.suppliedAdultMetadata != nil || item.manualMetadataProvider == "theporndb" {
+                    frame = cover
+                }
                 VideoThumbnailLoader.cacheImage(
                     cover,
                     forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
@@ -428,7 +434,9 @@ struct VideoDetailsView: View {
     }
 
     private var isMovieDetailsPage: Bool {
-        item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil
+        item.suppliedAdultMetadata != nil
+            || item.manualMetadataProvider == "theporndb"
+            || (item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil)
     }
 
     /// Warm solid background used by the movie artwork fade (#211A13).
@@ -453,12 +461,12 @@ struct VideoDetailsView: View {
                         )
                         .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                     } else if let displayedFrame {
-                        Image(uiImage: displayedFrame)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: proxy.size.width, height: heroHeight)
-                            .clipped()
-                            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                        SmartCinematicBackdrop(
+                            image: displayedFrame,
+                            cacheKey: "details-focal|\(stableMetadataCacheKey)",
+                            size: CGSize(width: proxy.size.width, height: heroHeight)
+                        )
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                     }
                     LinearGradient(
                         stops: [
@@ -519,6 +527,9 @@ struct VideoDetailsView: View {
                         if resolvedMovieDetails == nil,
                            ThePornDBSettings.isEnabled,
                            let thePornDBMetadata {
+                            if !thePornDBMetadata.performers.isEmpty {
+                                adultCastAndCrew(thePornDBMetadata)
+                            }
                             thePornDBInfoCard(thePornDBMetadata)
                         }
 
@@ -578,7 +589,7 @@ struct VideoDetailsView: View {
     }
 
     private var fallbackMovieTitle: some View {
-        Text(resolvedMovieDetails?.title.uppercased() ?? item.displayTitle.uppercased())
+        Text((resolvedMovieDetails?.title ?? thePornDBMetadata?.title ?? item.displayTitle).uppercased())
             .font(.system(size: 38, weight: .black, design: .rounded))
             .italic()
             .tracking(-1.6)
@@ -590,13 +601,13 @@ struct VideoDetailsView: View {
 
     private var movieDataRow: some View {
         HStack(spacing: 8) {
-            Text(movieReleaseDateLabel)
+            Text(adultMovieDateLabel ?? movieReleaseDateLabel)
             movieDataDivider
-            Text(resolvedMovieDetails?.productionCountries?.first ?? "-")
+            Text(adultMovieSiteLabel ?? resolvedMovieDetails?.productionCountries?.first ?? "-")
             movieDataDivider
-            Text(resolvedMovieDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
+            Text(adultMovieTagsLabel ?? resolvedMovieDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
             movieDataDivider
-            Text("[\(movieCertificationLabel)]")
+            Text(resolvedMovieDetails == nil && thePornDBMetadata != nil ? "[TPDB]" : "[\(movieCertificationLabel)]")
         }
         .font(.system(size: 10.5, weight: .semibold, design: .rounded))
         .foregroundStyle(.white.opacity(0.88))
@@ -624,6 +635,22 @@ struct VideoDetailsView: View {
     private var movieCertificationLabel: String {
         guard let value = resolvedMovieDetails?.certification, !value.isEmpty else { return "NR" }
         return value
+    }
+
+    private var adultMovieDateLabel: String? {
+        guard resolvedMovieDetails == nil else { return nil }
+        return thePornDBMetadata?.date
+    }
+
+    private var adultMovieSiteLabel: String? {
+        guard resolvedMovieDetails == nil else { return nil }
+        return thePornDBMetadata?.siteName
+    }
+
+    private var adultMovieTagsLabel: String? {
+        guard resolvedMovieDetails == nil else { return nil }
+        let value = thePornDBMetadata?.tags.prefix(2).joined(separator: ", ") ?? ""
+        return value.isEmpty ? nil : value
     }
 
     private var moviePlayButton: some View {
@@ -717,6 +744,23 @@ struct VideoDetailsView: View {
                     }
                 }
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func adultCastAndCrew(_ metadata: VideoThumbnailLoader.ThePornDBMetadata) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Cast & Crew")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    ForEach(Array(metadata.performers.prefix(12).enumerated()), id: \.offset) { _, name in
+                        moviePersonCard(name: name, role: "Performer", imageURL: nil)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -883,6 +927,10 @@ struct VideoDetailsView: View {
 
     private var movieBackdropFrame: UIImage? {
         guard isMovieDetailsPage else { return nil }
+        if resolvedMovieDetails == nil,
+           let adultCover = thePornDBMetadata?.coverImage {
+            return adultCover
+        }
         return VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
     }
 
@@ -1423,23 +1471,31 @@ private struct SmartCinematicBackdrop: View {
     let image: UIImage
     let cacheKey: String
     let size: CGSize
-    @State private var focalPoint: UnitPoint
+    @State private var focalPoint: UnitPoint?
 
     init(image: UIImage, cacheKey: String, size: CGSize) {
         self.image = image
         self.cacheKey = cacheKey
         self.size = size
-        _focalPoint = State(initialValue: SmartBackdropFocalStore.point(for: cacheKey) ?? .center)
+        _focalPoint = State(initialValue: SmartBackdropFocalStore.point(for: cacheKey))
     }
 
     var body: some View {
-        let placement = aspectFillPlacement
-        Image(uiImage: image)
-            .resizable()
-            .frame(width: placement.rendered.width, height: placement.rendered.height)
-            .position(x: placement.center.x, y: placement.center.y)
-            .frame(width: size.width, height: size.height)
-            .clipped()
+        Group {
+            if focalPoint != nil {
+                let placement = aspectFillPlacement
+                Image(uiImage: image)
+                    .resizable()
+                    .frame(width: placement.rendered.width, height: placement.rendered.height)
+                    .position(x: placement.center.x, y: placement.center.y)
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+            } else {
+                // Do not flash the centered image and move it a moment later.
+                Color.clear.frame(width: size.width, height: size.height)
+            }
+        }
+        .transaction { $0.animation = nil }
             .task(id: ObjectIdentifier(image)) {
                 if let cached = SmartBackdropFocalStore.point(for: cacheKey) {
                     focalPoint = cached
@@ -1459,8 +1515,9 @@ private struct SmartCinematicBackdrop: View {
         }
         let scale = max(size.width / source.width, size.height / source.height)
         let rendered = CGSize(width: source.width * scale, height: source.height * scale)
-        let idealX = size.width / 2 - focalPoint.x * rendered.width
-        let idealY = size.height / 2 - focalPoint.y * rendered.height
+        let point = focalPoint ?? .center
+        let idealX = size.width / 2 - point.x * rendered.width
+        let idealY = size.height / 2 - point.y * rendered.height
         let originX = min(0, max(size.width - rendered.width, idealX))
         let originY = min(0, max(size.height - rendered.height, idealY))
         return (rendered, CGPoint(x: originX + rendered.width / 2, y: originY + rendered.height / 2))

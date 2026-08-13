@@ -541,7 +541,10 @@ struct UnifiedContentView: View {
     @State private var manualSearch: UnifiedManualSearchRequest?
     @Namespace private var selectionAnimation
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
+    private let columns = Array(
+        repeating: GridItem(.flexible(), spacing: 12, alignment: .top),
+        count: 3
+    )
 
     var body: some View {
         NavigationStack {
@@ -561,7 +564,9 @@ struct UnifiedContentView: View {
                             LazyVGrid(columns: columns, spacing: 18) { ForEach(currentEntries) { posterCard($0) } }
                         }
                     }.padding(.horizontal, 14).padding(.bottom, 110)
-                }.refreshable { await model.load(vm: vm, force: true) }
+                }
+                .scrollIndicators(.hidden)
+                .refreshable { await model.load(vm: vm, force: true) }
             }
             .navigationTitle("Content")
             .toolbar {
@@ -614,10 +619,20 @@ struct UnifiedContentView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
                     UnifiedPosterArtwork(entry: entry, section: section)
-                }.aspectRatio(2/3, contentMode: .fit).clipShape(RoundedRectangle(cornerRadius: 14))
-                Text(entry.title).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                }
+                .aspectRatio(2/3, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                Text(entry.title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if !entry.episodes.isEmpty { Text("\(entry.episodes.count) episodes").font(.caption2).foregroundStyle(AppPalette.accent) }
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -769,7 +784,9 @@ private struct UnifiedPosterArtwork: View {
            let adult = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultCacheKey) {
             return adult
         }
-        return await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
+        // `unified|…` was previously shared with the wide details backdrop.
+        // Grid cards must use only a manual/adult cover or the vertical API poster.
+        return nil
     }
 
     private func loadVisiblePosterIfNeeded() async {
@@ -781,7 +798,6 @@ private struct UnifiedPosterArtwork: View {
         let query = VideoTitleFormatter.title(from: entry.title)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, ThePornDBSettings.hasValidAPIKey else {
-            cachedImage = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
             return
         }
 
@@ -807,7 +823,7 @@ private struct UnifiedPosterArtwork: View {
             )
             cachedImage = cover
         } else {
-            cachedImage = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
+            cachedImage = nil
         }
     }
 }
