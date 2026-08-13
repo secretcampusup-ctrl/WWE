@@ -755,7 +755,12 @@ struct UnifiedContentView: View {
     }
 
     @ViewBuilder private func detailsHost(_ entry: UnifiedMediaEntry) -> some View {
-        UnifiedMediaDetailsHost(vm: vm, entry: entry)
+        UnifiedMediaDetailsHost(
+            vm: vm,
+            entry: entry,
+            section: section,
+            categoryEntries: currentEntries
+        )
     }
 
     private func play(_ source: UnifiedSource) {
@@ -1013,19 +1018,28 @@ private struct UnifiedTMDBManualSearchView: View {
 
 struct UnifiedMediaDetailsHost: View {
     @ObservedObject var vm: AppViewModel
-    let entry: UnifiedMediaEntry
+    let section: UnifiedMediaSection
+    let categoryEntries: [UnifiedMediaEntry]
     @StateObject private var selection: UnifiedEpisodeSelection
+    @State private var activeEntry: UnifiedMediaEntry
     @State private var showPlayer = false
 
-    init(vm: AppViewModel, entry: UnifiedMediaEntry) {
+    init(
+        vm: AppViewModel,
+        entry: UnifiedMediaEntry,
+        section: UnifiedMediaSection,
+        categoryEntries: [UnifiedMediaEntry]
+    ) {
         self.vm = vm
-        self.entry = entry
+        self.section = section
+        self.categoryEntries = categoryEntries
+        _activeEntry = State(initialValue: entry)
         _selection = StateObject(wrappedValue: UnifiedEpisodeSelection(id: entry.episodes.first?.id))
     }
 
     private var selectedEpisode: UnifiedEpisode? {
         guard let selectedEpisodeID = selection.id else { return nil }
-        return entry.episodes.first { $0.id == selectedEpisodeID }
+        return activeEntry.episodes.first { $0.id == selectedEpisodeID }
     }
 
     var body: some View {
@@ -1037,13 +1051,17 @@ struct UnifiedMediaDetailsHost: View {
             onSelectEpisode: { episodeID in
                 guard selection.id != episodeID else { return }
                 selection.id = episodeID
-            }
+            },
+            suggestionsTitle: suggestionsTitle,
+            suggestions: suggestions,
+            onSelectSuggestion: selectSuggestion
         )
+        .id(activeEntry.id)
         .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
     }
 
     private var relatedEpisodes: [VideoEpisodeItem] {
-        entry.episodes.map {
+        activeEntry.episodes.map {
             VideoEpisodeItem(id: $0.id, title: $0.title, season: $0.season, episode: $0.episode)
         }
     }
@@ -1055,23 +1073,23 @@ struct UnifiedMediaDetailsHost: View {
                 httpHeaders: playbackHeaders(for: episode.source),
                 // Every episode shares the series artwork/metadata identity. The
                 // selected file and S/E label change, but story/rating/cast do not.
-                posterCacheKey: "unified|\(entry.id)",
+                posterCacheKey: "unified|\(activeEntry.id)",
                 fileExtension: (episode.title as NSString).pathExtension.uppercased(),
-                source: entry.sourceLabel, relatedEpisodes: relatedEpisodes,
-                suppliedTMDBDetails: entry.details,
+                source: activeEntry.sourceLabel, relatedEpisodes: relatedEpisodes,
+                suppliedTMDBDetails: activeEntry.details,
                 suppliedAdultMetadata: suppliedAdultMetadata,
-                manualMetadataProvider: entry.manualMetadataProvider
+                manualMetadataProvider: activeEntry.manualMetadataProvider
             )
         }
         return VideoDetailsItem(
-            id: entry.id, title: entry.title, url: entry.streamURL,
-            httpHeaders: playbackHeaders(for: entry.source),
-            posterCacheKey: "unified|\(entry.id)",
-            fileExtension: (entry.rawTitle as NSString).pathExtension.uppercased(),
-            source: entry.sourceLabel, relatedEpisodes: relatedEpisodes,
-            suppliedTMDBDetails: entry.details,
+            id: activeEntry.id, title: activeEntry.title, url: activeEntry.streamURL,
+            httpHeaders: playbackHeaders(for: activeEntry.source),
+            posterCacheKey: "unified|\(activeEntry.id)",
+            fileExtension: (activeEntry.rawTitle as NSString).pathExtension.uppercased(),
+            source: activeEntry.sourceLabel, relatedEpisodes: relatedEpisodes,
+            suppliedTMDBDetails: activeEntry.details,
             suppliedAdultMetadata: suppliedAdultMetadata,
-            manualMetadataProvider: entry.manualMetadataProvider
+            manualMetadataProvider: activeEntry.manualMetadataProvider
         )
     }
 
@@ -1081,10 +1099,10 @@ struct UnifiedMediaDetailsHost: View {
     }
 
     private var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? {
-        guard let scene = entry.adultScene else { return nil }
-        let cover = VideoThumbnailLoader.cachedImage(forStableKey: "unified-manual|\(entry.id)")
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(entry.id)")
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)")
+        guard let scene = activeEntry.adultScene else { return nil }
+        let cover = VideoThumbnailLoader.cachedImage(forStableKey: "unified-manual|\(activeEntry.id)")
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(activeEntry.id)")
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(activeEntry.id)")
         return VideoThumbnailLoader.ThePornDBMetadata(
             source: .scene,
             title: scene.title,
@@ -1097,7 +1115,7 @@ struct UnifiedMediaDetailsHost: View {
     }
 
     private func playCurrent() {
-        let source = selectedEpisode?.source ?? entry.source
+        let source = selectedEpisode?.source ?? activeEntry.source
         switch source {
         case let .webDAV(server, file): vm.play(file: file, server: server)
         case let .offcloud(_, file):
@@ -1113,6 +1131,39 @@ struct UnifiedMediaDetailsHost: View {
             return
         }
         showPlayer = true
+    }
+
+    private var suggestionsTitle: String {
+        switch section {
+        case .movies: return "Unwatched Movies"
+        case .shows: return "Unwatched TV Shows"
+        case .unknown: return "Unwatched Unknown"
+        }
+    }
+
+    private var suggestions: [VideoDetailsSuggestion] {
+        Array(categoryEntries.lazy
+            .filter { $0.id != activeEntry.id && !hasBeenWatched($0) }
+            .prefix(14))
+            .map { entry in
+                return VideoDetailsSuggestion(
+                    id: entry.id,
+                    title: entry.title,
+                    posterCacheKey: "unified|\(entry.id)",
+                    imageURL: entry.posterURL
+                )
+            }
+    }
+
+    private func hasBeenWatched(_ entry: UnifiedMediaEntry) -> Bool {
+        if vm.playbackHistory[entry.id] != nil { return true }
+        return entry.episodes.contains { vm.playbackHistory[$0.id] != nil }
+    }
+
+    private func selectSuggestion(_ id: String) {
+        guard let next = categoryEntries.first(where: { $0.id == id }) else { return }
+        activeEntry = next
+        selection.id = next.episodes.first?.id
     }
 }
 

@@ -14,6 +14,21 @@ struct VideoEpisodeItem: Identifiable {
     var numberLabel: String { String(format: "S%02d · E%02d", season, episode) }
     var episodeTitle: String { VideoTitleFormatter.episodeTitle(from: title) }
 }
+
+struct VideoDetailsSuggestion: Identifiable {
+    let id: String
+    let title: String
+    let posterCacheKey: String
+    let imageURL: URL?
+}
+
+private struct MovieHeaderScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct VideoDetailsItem: Identifiable {
     let id: String
     let title: String
@@ -142,6 +157,9 @@ struct VideoDetailsView: View {
     var onDelete: (() -> Void)? = nil
     var dismissOnPlay: Bool = true
     var onSelectEpisode: ((String) -> Void)? = nil
+    var suggestionsTitle: String = "Unwatched"
+    var suggestions: [VideoDetailsSuggestion] = []
+    var onSelectSuggestion: ((String) -> Void)? = nil
 
     @State private var frame: UIImage?
     @State private var showDownloadManager = false
@@ -152,6 +170,7 @@ struct VideoDetailsView: View {
     @State private var tmdbDetails: TMDBTitleDetails?
     @State private var tmdbEpisode: TMDBEpisodeDetails?
     @State private var isPreparingPlayback = false
+    @State private var movieHeaderScrollOffset: CGFloat = 0
 
     var body: some View {
         NavigationStack {
@@ -222,8 +241,8 @@ struct VideoDetailsView: View {
                         } else if ThePornDBSettings.isEnabled, let thePornDBMetadata {
                             thePornDBInfoCard(thePornDBMetadata)
                         }
-                        if !vm.recentPlaybackHistory.isEmpty {
-                            recentWatchedSection
+                        if !suggestions.isEmpty {
+                            unwatchedSuggestionsSection
                         }
                     }
                         .padding(.horizontal, 16)
@@ -457,26 +476,36 @@ struct VideoDetailsView: View {
                 // stop lands exactly where this hero ends, so no hard image edge
                 // can appear on tall or short displays.
                 let heroHeight = max(320, proxy.size.height * 0.54)
+                let pullDistance = max(0, movieHeaderScrollOffset)
+                let upwardDistance = max(0, -movieHeaderScrollOffset)
+                let headerScale = 1 + min(pullDistance / max(heroHeight, 1), 0.18)
+                let parallaxOffset = movieHeaderScrollOffset < 0
+                    ? movieHeaderScrollOffset * 0.22
+                    : 0
+                let fadeAmount = min(1.0, Double(upwardDistance / 210))
                 ZStack {
                     movieDetailsBaseColor
-                    if let backdrop = movieBackdropFrame {
-                        SmartCinematicBackdrop(
-                            image: backdrop,
-                            cacheKey: tmdbTitleArtworkCacheKey,
-                            size: CGSize(width: proxy.size.width, height: heroHeight)
-                        )
-                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-                    } else if let displayedFrame {
-                        SmartCinematicBackdrop(
-                            image: displayedFrame,
-                            cacheKey: "details-focal|\(stableMetadataCacheKey)",
-                            size: CGSize(width: proxy.size.width, height: heroHeight)
-                        )
-                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-                    } else {
-                        DetailsLoadingSpinner(size: 38, lineWidth: 3.2)
-                            .frame(width: proxy.size.width, height: heroHeight)
+                    Group {
+                        if let backdrop = movieBackdropFrame {
+                            SmartCinematicBackdrop(
+                                image: backdrop,
+                                cacheKey: tmdbTitleArtworkCacheKey,
+                                size: CGSize(width: proxy.size.width, height: heroHeight)
+                            )
+                        } else if let displayedFrame {
+                            SmartCinematicBackdrop(
+                                image: displayedFrame,
+                                cacheKey: "details-focal|\(stableMetadataCacheKey)",
+                                size: CGSize(width: proxy.size.width, height: heroHeight)
+                            )
+                        } else {
+                            DetailsLoadingSpinner(size: 38, lineWidth: 3.2)
+                        }
                     }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                    .scaleEffect(headerScale, anchor: .top)
+                    .offset(y: parallaxOffset)
+
                     LinearGradient(
                         stops: [
                             // Keep status and navigation controls legible over
@@ -496,12 +525,37 @@ struct VideoDetailsView: View {
                         endPoint: .bottom
                     )
                     .allowsHitTesting(false)
+
+                    // This extra layer is driven only by upward scrolling. It
+                    // leaves the artwork open initially, then darkens it smoothly
+                    // as content approaches the top controls.
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.48 * fadeAmount),
+                            Color.black.opacity(0.30 * fadeAmount),
+                            Color.clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: heroHeight)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
                 }
+                .clipped()
             }
             .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
+                    GeometryReader { marker in
+                        Color.clear.preference(
+                            key: MovieHeaderScrollOffsetKey.self,
+                            value: marker.frame(in: .named("movie-details-scroll")).minY
+                        )
+                    }
+                    .frame(height: 0)
+
                     Color.clear.frame(height: max(300, UIScreen.main.bounds.height * 0.39))
 
                     VStack(spacing: 16) {
@@ -542,8 +596,8 @@ struct VideoDetailsView: View {
                             thePornDBInfoCard(thePornDBMetadata)
                         }
 
-                        if !vm.recentPlaybackHistory.isEmpty {
-                            recentWatchedSection
+                        if !suggestions.isEmpty {
+                            unwatchedSuggestionsSection
                         }
 
                         VStack(spacing: 3) {
@@ -558,6 +612,10 @@ struct VideoDetailsView: View {
                     .padding(.horizontal, 18)
                     .padding(.bottom, 42)
                 }
+            }
+            .coordinateSpace(name: "movie-details-scroll")
+            .onPreferenceChange(MovieHeaderScrollOffsetKey.self) { value in
+                movieHeaderScrollOffset = value
             }
 
             HStack {
@@ -797,16 +855,16 @@ struct VideoDetailsView: View {
         .frame(width: 78)
     }
 
-    private var recentWatchedSection: some View {
+    private var unwatchedSuggestionsSection: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text("Recent Watched")
+            Text(suggestionsTitle)
                 .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(.white)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 12) {
-                    ForEach(vm.recentPlaybackHistory) { history in
-                        recentWatchedPoster(history)
+                    ForEach(suggestions) { suggestion in
+                        suggestionPoster(suggestion)
                     }
                 }
                 .padding(.horizontal, 1)
@@ -815,52 +873,39 @@ struct VideoDetailsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func recentWatchedPoster(_ history: PlaybackHistoryEntry) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ZStack(alignment: .bottom) {
-                Group {
-                    if let key = history.posterCacheKey,
-                       let poster = VideoThumbnailLoader.cachedImage(forStableKey: key) {
+    private func suggestionPoster(_ suggestion: VideoDetailsSuggestion) -> some View {
+        Button {
+            onSelectSuggestion?(suggestion.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack {
+                    Color.white.opacity(0.07)
+                    if let poster = VideoThumbnailLoader.cachedImage(forStableKey: suggestion.posterCacheKey) {
                         Image(uiImage: poster)
                             .resizable()
                             .scaledToFill()
                     } else {
-                        ZStack {
-                            Color.white.opacity(0.07)
-                            Image(systemName: "film.fill")
-                                .font(.system(size: 28, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.30))
-                        }
+                        CachedTMDBImage(
+                            url: suggestion.imageURL,
+                            contentMode: .fill,
+                            placeholderSystemName: "film.fill"
+                        )
                     }
                 }
                 .frame(width: 112, height: 154)
                 .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.10)))
 
-                if history.durationSeconds > 0 {
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Color.black.opacity(0.45)
-                            AppPalette.gradient
-                                .frame(width: proxy.size.width * recentWatchedFraction(history))
-                        }
-                    }
-                    .frame(height: 4)
-                }
+                Text(suggestion.title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 112, alignment: .leading)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.10)))
-
-            Text(VideoTitleFormatter.title(from: history.title))
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.88))
-                .lineLimit(2)
-                .frame(width: 112, alignment: .leading)
         }
-    }
-
-    private func recentWatchedFraction(_ history: PlaybackHistoryEntry) -> CGFloat {
-        guard history.durationSeconds > 0 else { return 0 }
-        return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
+        .buttonStyle(PremiumPressButtonStyle())
     }
 
     private var preview: some View {

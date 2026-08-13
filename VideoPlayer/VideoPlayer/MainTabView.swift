@@ -143,7 +143,12 @@ struct HomeLibraryView: View {
                 await catalog.load(vm: vm, force: false)
             }
             .fullScreenCover(item: $selectedEntry) { entry in
-                UnifiedMediaDetailsHost(vm: vm, entry: entry)
+                UnifiedMediaDetailsHost(
+                    vm: vm,
+                    entry: entry,
+                    section: section(for: entry),
+                    categoryEntries: categoryEntries(for: entry)
+                )
             }
             .fullScreenCover(item: $selectedSavedLink) { link in
                 if let url = link.url {
@@ -589,6 +594,14 @@ struct HomeLibraryView: View {
         return .movies
     }
 
+    private func categoryEntries(for entry: UnifiedMediaEntry) -> [UnifiedMediaEntry] {
+        switch section(for: entry) {
+        case .movies: return catalog.movies
+        case .shows: return catalog.shows
+        case .unknown: return catalog.unknown
+        }
+    }
+
     private func subtitle(_ entry: UnifiedMediaEntry) -> String {
         if entry.details?.isSeries == true || !entry.episodes.isEmpty {
             let seasons = Set(entry.episodes.map(\.season)).count
@@ -778,7 +791,12 @@ private struct HomeCollectionView: View {
                 ToolbarItem(placement: .topBarLeading) { Button("Close") { dismiss() } }
             }
             .fullScreenCover(item: $selected) { entry in
-                UnifiedMediaDetailsHost(vm: vm, entry: entry)
+                UnifiedMediaDetailsHost(
+                    vm: vm,
+                    entry: entry,
+                    section: section(for: entry),
+                    categoryEntries: categoryEntries(for: entry)
+                )
             }
         }
         .preferredColorScheme(.dark)
@@ -788,6 +806,14 @@ private struct HomeCollectionView: View {
         if catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
         if catalog.unknown.contains(where: { $0.id == entry.id }) { return .unknown }
         return .movies
+    }
+
+    private func categoryEntries(for entry: UnifiedMediaEntry) -> [UnifiedMediaEntry] {
+        switch section(for: entry) {
+        case .movies: return catalog.movies
+        case .shows: return catalog.shows
+        case .unknown: return catalog.unknown
+        }
     }
 }
 // MARK: - Shared visual tokens
