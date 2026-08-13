@@ -103,6 +103,7 @@ actor TMDBService {
     static let shared = TMDBService()
     private var detailsCache: [String: TMDBTitleDetails]
     private var episodeCache: [String: TMDBEpisodeDetails]
+    private var completedSeasonCache: Set<String>
     private let cacheURL: URL
     private let decoder: JSONDecoder = {
         let value = JSONDecoder()
@@ -119,14 +120,20 @@ actor TMDBService {
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
             episodeCache = payload.episodes
+            completedSeasonCache = payload.completedSeasons ?? []
         } else {
             detailsCache = [:]
             episodeCache = [:]
+            completedSeasonCache = []
         }
     }
 
     private func persistCache() {
-        let payload = TMDBPersistentCache(details: detailsCache, episodes: episodeCache)
+        let payload = TMDBPersistentCache(
+            details: detailsCache,
+            episodes: episodeCache,
+            completedSeasons: completedSeasonCache
+        )
         guard let data = try? JSONEncoder().encode(payload) else { return }
         try? data.write(to: cacheURL, options: .atomic)
     }
@@ -390,6 +397,52 @@ actor TMDBService {
             return details
         } catch { return nil }
     }
+
+    /// Loads the complete season with one TMDB request instead of issuing one
+    /// request per visible episode card. Existing disk-cached entries are reused.
+    func seasonEpisodeDetails(
+        seriesID: Int,
+        season: Int,
+        episodeNumbers: [Int]
+    ) async -> [Int: TMDBEpisodeDetails] {
+        let requestedNumbers = Set(episodeNumbers)
+        guard !requestedNumbers.isEmpty else { return [:] }
+        let seasonKey = "\(seriesID)|s\(season)"
+
+        func cachedResults() -> [Int: TMDBEpisodeDetails] {
+            Dictionary(uniqueKeysWithValues: requestedNumbers.compactMap { episode in
+                let key = "\(seriesID)|s\(season)|e\(episode)"
+                return episodeCache[key].map { (episode, $0) }
+            })
+        }
+
+        let cached = cachedResults()
+        if completedSeasonCache.contains(seasonKey),
+           requestedNumbers.allSatisfy({ cached[$0] != nil }) {
+            return cached
+        }
+
+        do {
+            let payload: SeasonEpisodesPayload = try await request(
+                "/3/tv/\(seriesID)/season/\(season)",
+                query: [:]
+            )
+            for episode in payload.episodes where requestedNumbers.contains(episode.episodeNumber) {
+                let details = TMDBEpisodeDetails(
+                    name: episode.name ?? "Episode \(episode.episodeNumber)",
+                    overview: episode.overview ?? "",
+                    stillPath: episode.stillPath
+                )
+                episodeCache["\(seriesID)|s\(season)|e\(episode.episodeNumber)"] = details
+            }
+            completedSeasonCache.insert(seasonKey)
+            persistCache()
+            return cachedResults()
+        } catch {
+            return cached
+        }
+    }
+
     private func request<T: Decodable>(_ path: String, query: [String: String]) async throws -> T {
         var parts = URLComponents(string: "https://api.themoviedb.org\(path)")!
         var requestQuery = query
@@ -414,6 +467,7 @@ actor TMDBService {
 private struct TMDBPersistentCache: Codable {
     let details: [String: TMDBTitleDetails]
     let episodes: [String: TMDBEpisodeDetails]
+    let completedSeasons: Set<String>?
 }
 
 private struct SearchResponse: Decodable { let results: [SearchResult] }
@@ -451,6 +505,13 @@ private struct Videos: Decodable { let results: [Video] }
 private struct Video: Decodable { let key: String; let site: String; let type: String; let official: Bool? }
 
 private struct EpisodePayload: Decodable { let name: String?; let overview: String?; let stillPath: String? }
+private struct SeasonEpisodesPayload: Decodable { let episodes: [SeasonEpisodePayload] }
+private struct SeasonEpisodePayload: Decodable {
+    let episodeNumber: Int
+    let name: String?
+    let overview: String?
+    let stillPath: String?
+}
 
 
 private struct AuthenticationPayload: Decodable { let success: Bool }

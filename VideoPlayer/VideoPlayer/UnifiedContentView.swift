@@ -64,6 +64,17 @@ private struct UnifiedContentSnapshot: Codable {
     let metadataSignature: String?
 }
 
+private struct EpisodeMetadataBatch {
+    let seriesEntryID: String
+    let tmdbSeriesID: Int
+    let season: Int
+    let episodeNumbers: [Int]
+
+    var identity: String {
+        "\(tmdbSeriesID)|s\(season)|" + episodeNumbers.map(String.init).joined(separator: ",")
+    }
+}
+
 @MainActor
 final class UnifiedContentModel: ObservableObject {
     @Published var movies: [UnifiedMediaEntry] = []
@@ -75,6 +86,8 @@ final class UnifiedContentModel: ObservableObject {
     private var lastSourceSignature = ""
     private var lastMetadataSignature = ""
     private var adultEnrichmentTask: Task<Void, Never>?
+    private var episodeEnrichmentTask: Task<Void, Never>?
+    private var prioritizedEpisodeSeries: Set<String> = []
     private var pendingForcedRefresh = false
     private let cloud = OffcloudViewModel()
     private static var snapshotURL: URL {
@@ -94,12 +107,6 @@ final class UnifiedContentModel: ObservableObject {
             movies = Self.removingUndersizedFiles(from: snapshot.movies)
             shows = Self.removingUndersizedFiles(from: snapshot.shows)
             unknown = Self.removingUndersizedFiles(from: snapshot.unknown)
-            // Older snapshots could mark metadata complete before a stable
-            // poster was actually stored. Requeue only those blank cards.
-            for index in unknown.indices where
-                VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(unknown[index].id)") == nil {
-                unknown[index].adultLookupCompleted = nil
-            }
             lastSourceSignature = snapshot.sourceSignature ?? ""
             lastMetadataSignature = snapshot.metadataSignature ?? Self.currentMetadataSignature()
             loaded = true
@@ -118,17 +125,18 @@ final class UnifiedContentModel: ObservableObject {
             // enrichment pass continue mutating the same array in parallel.
             adultEnrichmentTask?.cancel()
             adultEnrichmentTask = nil
+            episodeEnrichmentTask?.cancel()
+            episodeEnrichmentTask = nil
         }
         let metadataSignature = Self.currentMetadataSignature()
-        let metadataSettingsChanged = metadataSignature != lastMetadataSignature
         let baseSourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
         }.joined(separator: "|") + "|metadata:" + metadataSignature
         var sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
-        let shouldFetchMetadata = force || sourceSignature != lastSourceSignature
         // A cached library is immutable until the user explicitly refreshes.
         if loaded && !force && sourceSignature == lastSourceSignature {
-            if ThePornDBSettings.hasValidAPIKey,
+            if !startEpisodeEnrichmentIfNeeded(),
+               ThePornDBSettings.hasValidAPIKey,
                unknown.contains(where: { $0.adultLookupCompleted != true }) {
                 startAdultEnrichmentIfNeeded()
             }
@@ -235,56 +243,38 @@ final class UnifiedContentModel: ObservableObject {
         // Content screen appear to load forever.
         var representativeByKey: [String: UnifiedMediaEntry] = [:]
         for entry in raw { representativeByKey[metadataGroupKey(for: entry)] = entry }
-        let representatives = Array(representativeByKey)
-        var metadataByQuery: [String: TMDBTitleDetails] = [:]
+        // Old query groups are final. Only titles that have never appeared in
+        // the persisted library enter the automatic lookup queue.
+        let representatives = representativeByKey.filter { key, _ in
+            previousMetadataByQuery[key] == nil && !previouslyScannedQueries.contains(key)
+        }
+        var metadataByQuery: [String: TMDBTitleDetails] = previousMetadataByQuery
         await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
             var iterator = representatives.makeIterator()
-            for _ in 0..<min(8, representatives.count) {
+            // Keep automatic discovery deliberately light on the connection.
+            for _ in 0..<min(1, representatives.count) {
                 guard let (key, entry) = iterator.next() else { break }
                 let lookupTitle = metadataLookupTitle(for: entry)
                 let preferredType = preferredMediaType(for: entry)
                 group.addTask {
-                    let details: TMDBTitleDetails?
-                    if let existing = previousMetadataByQuery[key] {
-                        if existing.detailsPosterPath != nil {
-                            details = existing
-                        } else if shouldFetchMetadata {
-                            details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType) ?? existing
-                        } else {
-                            details = existing
-                        }
-                    } else if !metadataSettingsChanged && previouslyScannedQueries.contains(key) {
-                        details = nil
-                    } else if shouldFetchMetadata {
-                        details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
-                    } else {
-                        details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
-                    }
+                    let details = await TMDBService.shared.detailsOriginalFirst(
+                        for: lookupTitle,
+                        preferredMediaType: preferredType
+                    )
                     return (key, details)
                 }
             }
             while let (key, details) = await group.next() {
                 if let details { metadataByQuery[key] = details }
+                try? await Task.sleep(nanoseconds: 300_000_000)
                 if let (nextKey, nextEntry) = iterator.next() {
                     let lookupTitle = metadataLookupTitle(for: nextEntry)
                     let preferredType = preferredMediaType(for: nextEntry)
                     group.addTask {
-                        let details: TMDBTitleDetails?
-                        if let existing = previousMetadataByQuery[nextKey] {
-                            if existing.detailsPosterPath != nil {
-                                details = existing
-                            } else if shouldFetchMetadata {
-                                details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType) ?? existing
-                            } else {
-                                details = existing
-                            }
-                        } else if !metadataSettingsChanged && previouslyScannedQueries.contains(nextKey) {
-                            details = nil
-                        } else if shouldFetchMetadata {
-                            details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
-                        } else {
-                            details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
-                        }
+                        let details = await TMDBService.shared.detailsOriginalFirst(
+                            for: lookupTitle,
+                            preferredMediaType: preferredType
+                        )
                         return (nextKey, details)
                     }
                 }
@@ -323,13 +313,6 @@ final class UnifiedContentModel: ObservableObject {
                     entry.adultScene = previous.adultScene
                     entry.adultLookupCompleted = previous.adultLookupCompleted
                     if previous.adultScene != nil { entry.title = previous.title }
-                    // A previous metadata lookup may have completed while its
-                    // image download failed. Manual refresh must retry those
-                    // entries instead of preserving a permanently blank card.
-                    let adultPosterKey = "unified-adult|\(entry.id)"
-                    if force, VideoThumbnailLoader.cachedImage(forStableKey: adultPosterKey) == nil {
-                        entry.adultLookupCompleted = nil
-                    }
                 }
                 unknownItems.append(entry)
             }
@@ -352,7 +335,9 @@ final class UnifiedContentModel: ObservableObject {
         // Adult fallback runs after the usable Content screen has finished loading.
         // It also runs on the first normal scan; results are persisted below by
         // enrichUnknownWithAdultMetadata and are not requested again next launch.
-        if ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
+        if !startEpisodeEnrichmentIfNeeded(),
+           ThePornDBSettings.hasValidAPIKey,
+           !unknownItems.isEmpty {
             startAdultEnrichmentIfNeeded()
         }
         loaded = true
@@ -564,6 +549,88 @@ final class UnifiedContentModel: ObservableObject {
         }
     }
 
+    /// Warms episode names, descriptions, and still artwork very gently. Only
+    /// one season and one image are processed at a time so playback and normal
+    /// browsing retain network priority.
+    @discardableResult
+    private func startEpisodeEnrichmentIfNeeded() -> Bool {
+        guard episodeEnrichmentTask == nil else { return true }
+        let batches = episodeMetadataBatches()
+        guard !batches.isEmpty else { return false }
+        episodeEnrichmentTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            var pending = batches
+            while !pending.isEmpty, !Task.isCancelled {
+                let preferredIndex = pending.firstIndex {
+                    self.prioritizedEpisodeSeries.contains($0.seriesEntryID)
+                } ?? pending.startIndex
+                let batch = pending.remove(at: preferredIndex)
+                await self.prefetchEpisodeBatch(batch)
+                self.prioritizedEpisodeSeries.remove(batch.seriesEntryID)
+                try? await Task.sleep(nanoseconds: 700_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            self.episodeEnrichmentTask = nil
+            self.startAdultEnrichmentIfNeeded()
+        }
+        return true
+    }
+
+    func prioritizeEpisodeMetadata(for entry: UnifiedMediaEntry) {
+        guard entry.details?.isSeries == true, !entry.episodes.isEmpty else { return }
+        prioritizedEpisodeSeries.insert(entry.id)
+        _ = startEpisodeEnrichmentIfNeeded()
+    }
+
+    private func episodeMetadataBatches() -> [EpisodeMetadataBatch] {
+        let completed = Set(UserDefaults.standard.stringArray(forKey: "unified.completedEpisodeMetadata.v1") ?? [])
+        return shows.flatMap { entry -> [EpisodeMetadataBatch] in
+            guard let seriesID = entry.details?.id else { return [] }
+            return Dictionary(grouping: entry.episodes, by: \.season)
+                .map { season, episodes in
+                    EpisodeMetadataBatch(
+                        seriesEntryID: entry.id,
+                        tmdbSeriesID: seriesID,
+                        season: season,
+                        episodeNumbers: episodes.map(\.episode).sorted()
+                    )
+                }
+                .filter { !completed.contains($0.identity) }
+                .sorted { $0.season < $1.season }
+        }
+    }
+
+    private func prefetchEpisodeBatch(_ batch: EpisodeMetadataBatch) async {
+        let values = await TMDBService.shared.seasonEpisodeDetails(
+            seriesID: batch.tmdbSeriesID,
+            season: batch.season,
+            episodeNumbers: batch.episodeNumbers
+        )
+        var completed = batch.episodeNumbers.allSatisfy { values[$0] != nil }
+        for episode in batch.episodeNumbers {
+            guard !Task.isCancelled,
+                  let url = values[episode]?.imageURL else { continue }
+            let cacheKey = "tmdb-remote|\(url.absoluteString)"
+            let imageIsReady = await Task.detached(priority: .utility) {
+                if VideoThumbnailLoader.cachedImage(forStableKey: cacheKey) != nil { return true }
+                var request = URLRequest(url: url)
+                request.networkServiceType = .background
+                request.timeoutInterval = 30
+                guard let (data, _) = try? await URLSession.shared.data(for: request),
+                      let image = UIImage(data: data) else { return false }
+                VideoThumbnailLoader.cacheImage(image, forStableKey: cacheKey)
+                return true
+            }.value
+            if !imageIsReady { completed = false }
+            try? await Task.sleep(nanoseconds: 450_000_000)
+        }
+        if completed {
+            var completedBatches = Set(UserDefaults.standard.stringArray(forKey: "unified.completedEpisodeMetadata.v1") ?? [])
+            completedBatches.insert(batch.identity)
+            UserDefaults.standard.set(Array(completedBatches), forKey: "unified.completedEpisodeMetadata.v1")
+        }
+    }
+
     private func bestAdultMatch(_ scenes: [ThePornDBScene], query: String) -> ThePornDBScene? {
         let queryTokens = metadataTokens(query)
         guard !queryTokens.isEmpty else { return nil }
@@ -681,7 +748,10 @@ struct UnifiedContentView: View {
     }
 
     private func posterCard(_ entry: UnifiedMediaEntry) -> some View {
-        Button { selected = entry } label: {
+        Button {
+            model.prioritizeEpisodeMetadata(for: entry)
+            selected = entry
+        } label: {
             VStack(alignment: .leading, spacing: 7) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
@@ -866,6 +936,10 @@ struct UnifiedPosterArtwork: View {
             cachedImage = existing
             return
         }
+
+        // A completed lookup is final. Scrolling or refreshing must not turn an
+        // old unmatched item into another provider request.
+        guard entry.adultLookupCompleted != true else { return }
 
         let query = VideoTitleFormatter.title(from: entry.title)
             .trimmingCharacters(in: .whitespacesAndNewlines)

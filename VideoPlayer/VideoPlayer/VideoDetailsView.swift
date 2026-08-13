@@ -164,6 +164,7 @@ struct VideoDetailsView: View {
     @State private var movieScrollMotion = DetailsScrollMotionModel()
     @State private var standardScrollMotion = DetailsScrollMotionModel()
     @State private var displayedSeriesSeason: Int?
+    @State private var episodeArtworkModel = SeriesEpisodeArtworkModel()
 
     var body: some View {
         NavigationStack {
@@ -328,7 +329,6 @@ struct VideoDetailsView: View {
             isPreparingPlayback = false
             movieScrollMotion.offset = 0
             standardScrollMotion.offset = 0
-            displayedSeriesSeason = selectedEpisodeItem?.season
             prepareForCurrentItem()
         }
         .onChange(of: vm.isLoading) { isLoading in
@@ -1194,22 +1194,22 @@ struct VideoDetailsView: View {
                 }
             }
 
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 13) {
-                        ForEach(visibleSeriesEpisodes) { episode in
-                            cinematicEpisodeCard(episode)
-                                .id(episode.id)
-                        }
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 13) {
+                    ForEach(visibleSeriesEpisodes) { episode in
+                        cinematicEpisodeCard(episode)
                     }
-                    .padding(.vertical, 2)
                 }
-                .environment(\.layoutDirection, .leftToRight)
-                .onAppear {
-                    displayedSeriesSeason = selectedEpisodeItem?.season ?? availableSeriesSeasons.first
-                    scrollToSelectedEpisode(using: proxy)
-                }
-                .onChange(of: item.id) { _ in scrollToSelectedEpisode(using: proxy) }
+                .padding(.vertical, 2)
+            }
+            .environment(\.layoutDirection, .leftToRight)
+            .task(id: episodeArtworkLoadingIdentity) {
+                guard let seriesID = resolvedMovieDetails?.id else { return }
+                await episodeArtworkModel.load(
+                    seriesID: seriesID,
+                    season: visibleSeriesSeason,
+                    episodeNumbers: visibleSeriesEpisodes.map(\.episode)
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1223,6 +1223,7 @@ struct VideoDetailsView: View {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .fill(Color.white.opacity(0.07))
                     EpisodeStillArtwork(
+                        model: episodeArtworkModel,
                         seriesID: resolvedMovieDetails?.id,
                         season: episode.season,
                         episode: episode.episode,
@@ -1257,7 +1258,11 @@ struct VideoDetailsView: View {
                     }
                 }
 
-                Text("\(episode.episode). \(episode.episodeTitle)")
+                Text("\(episode.episode). \(episodeArtworkModel.episodeName(
+                    seriesID: resolvedMovieDetails?.id,
+                    season: episode.season,
+                    episode: episode.episode
+                ) ?? episode.episodeTitle)")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -1272,13 +1277,9 @@ struct VideoDetailsView: View {
         return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
     }
 
-    private func scrollToSelectedEpisode(using proxy: ScrollViewProxy) {
-        guard item.relatedEpisodes.contains(where: { $0.id == item.id }) else { return }
-        DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.22)) {
-                proxy.scrollTo(item.id, anchor: .center)
-            }
-        }
+    private var episodeArtworkLoadingIdentity: String {
+        let episodes = visibleSeriesEpisodes.map(\.episode).map(String.init).joined(separator: ",")
+        return "\(resolvedMovieDetails?.id ?? 0)|s\(visibleSeriesSeason)|\(episodes)"
     }
 
     private func tmdbInformationCard(_ details: TMDBTitleDetails) -> some View {
@@ -1762,11 +1763,11 @@ private struct DetailsLoadingSpinner: View {
 }
 
 private struct EpisodeStillArtwork: View {
+    @ObservedObject var model: SeriesEpisodeArtworkModel
     let seriesID: Int?
     let season: Int
     let episode: Int
     let fallback: UIImage?
-    @State private var stillURL: URL?
 
     var body: some View {
         ZStack {
@@ -1776,25 +1777,60 @@ private struct EpisodeStillArtwork: View {
                     .scaledToFill()
             }
 
-            if let stillURL {
+            if let stillURL = model.imageURL(seriesID: seriesID, season: season, episode: episode) {
                 CachedTMDBImage(url: stillURL, contentMode: .fill)
                     .transition(.opacity)
             }
         }
-        .task(id: loadingIdentity) {
-            guard let seriesID else { return }
-            let details = await TMDBService.shared.episodeDetails(
-                seriesID: seriesID,
-                season: season,
-                episode: episode
-            )
-            guard !Task.isCancelled else { return }
-            stillURL = details?.imageURL
-        }
+    }
+}
+
+private final class SeriesEpisodeArtworkModel: ObservableObject {
+    @Published private var imageURLs: [String: URL] = [:]
+    @Published private var episodeNames: [String: String] = [:]
+    private var loadedSeasons: Set<String> = []
+    private var loadingSeasons: Set<String> = []
+
+    func imageURL(seriesID: Int?, season: Int, episode: Int) -> URL? {
+        guard let seriesID else { return nil }
+        return imageURLs[episodeKey(seriesID: seriesID, season: season, episode: episode)]
     }
 
-    private var loadingIdentity: String {
-        "\(seriesID ?? 0)|s\(season)|e\(episode)"
+    func episodeName(seriesID: Int?, season: Int, episode: Int) -> String? {
+        guard let seriesID else { return nil }
+        return episodeNames[episodeKey(seriesID: seriesID, season: season, episode: episode)]
+    }
+
+    @MainActor
+    func load(seriesID: Int, season: Int, episodeNumbers: [Int]) async {
+        let seasonKey = "\(seriesID)|s\(season)"
+        guard !loadedSeasons.contains(seasonKey), !loadingSeasons.contains(seasonKey) else { return }
+        loadingSeasons.insert(seasonKey)
+
+        let details = await TMDBService.shared.seasonEpisodeDetails(
+            seriesID: seriesID,
+            season: season,
+            episodeNumbers: episodeNumbers
+        )
+        guard !Task.isCancelled else {
+            loadingSeasons.remove(seasonKey)
+            return
+        }
+        var updatedURLs = imageURLs
+        var updatedNames = episodeNames
+        for (episode, value) in details {
+            let key = episodeKey(seriesID: seriesID, season: season, episode: episode)
+            updatedURLs[key] = value.imageURL
+            if !value.name.isEmpty { updatedNames[key] = value.name }
+        }
+        imageURLs = updatedURLs
+        episodeNames = updatedNames
+        loadingSeasons.remove(seasonKey)
+        loadedSeasons.insert(seasonKey)
+    }
+
+    private func episodeKey(seriesID: Int, season: Int, episode: Int) -> String {
+        "\(seriesID)|s\(season)|e\(episode)"
     }
 }
 
