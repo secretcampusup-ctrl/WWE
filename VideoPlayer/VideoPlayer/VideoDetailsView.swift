@@ -218,8 +218,8 @@ struct VideoDetailsView: View {
                         } else if ThePornDBSettings.isEnabled, let thePornDBMetadata {
                             thePornDBInfoCard(thePornDBMetadata)
                         }
-                        if let history = vm.playbackHistoryEntry(for: item) {
-                            lastWatchedCard(history)
+                        if !vm.recentPlaybackHistory.isEmpty {
+                            recentWatchedSection
                         }
                     }
                         .padding(.horizontal, 16)
@@ -503,8 +503,8 @@ struct VideoDetailsView: View {
                             movieCastAndCrew(details)
                         }
 
-                        if let history = vm.playbackHistoryEntry(for: item) {
-                            lastWatchedCard(history)
+                        if !vm.recentPlaybackHistory.isEmpty {
+                            recentWatchedSection
                         }
 
                         VStack(spacing: 3) {
@@ -715,84 +715,70 @@ struct VideoDetailsView: View {
         .frame(width: 78)
     }
 
-    private func lastWatchedCard(_ history: PlaybackHistoryEntry) -> some View {
-        Button(action: playAndClose) {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack(spacing: 10) {
-                    Image(systemName: history.hasResumePoint ? "clock.arrow.circlepath" : "checkmark.circle.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(history.hasResumePoint ? AppPalette.accent : Color.green)
+    private var recentWatchedSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("Recent Watched")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Last Watched")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                        Text(lastWatchedDateLabel(history.watchedAt))
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.52))
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 12) {
+                    ForEach(vm.recentPlaybackHistory) { history in
+                        recentWatchedPoster(history)
                     }
-
-                    Spacer()
-
-                    Text(history.hasResumePoint ? "Resume" : "Play Again")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.90))
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.42))
                 }
+                .padding(.horizontal, 1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func recentWatchedPoster(_ history: PlaybackHistoryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .bottom) {
+                Group {
+                    if let key = history.posterCacheKey,
+                       let poster = VideoThumbnailLoader.cachedImage(forStableKey: key) {
+                        Image(uiImage: poster)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        ZStack {
+                            Color.white.opacity(0.07)
+                            Image(systemName: "film.fill")
+                                .font(.system(size: 28, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.30))
+                        }
+                    }
+                }
+                .frame(width: 112, height: 154)
+                .clipped()
 
                 if history.durationSeconds > 0 {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.12))
-                            Capsule()
-                                .fill(AppPalette.gradient)
-                                .frame(width: proxy.size.width * lastWatchedFraction(history))
+                            Color.black.opacity(0.45)
+                            AppPalette.gradient
+                                .frame(width: proxy.size.width * recentWatchedFraction(history))
                         }
                     }
                     .frame(height: 4)
-
-                    HStack {
-                        Text(formatPlaybackTime(history.positionSeconds))
-                        Spacer()
-                        Text("\(lastWatchedPercent(history))%")
-                        Spacer()
-                        Text(formatPlaybackTime(history.durationSeconds))
-                    }
-                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.48))
-                    .monospacedDigit()
                 }
             }
-            .padding(14)
-            .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.08)))
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.10)))
+
+            Text(VideoTitleFormatter.title(from: history.title))
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(2)
+                .frame(width: 112, alignment: .leading)
         }
-        .buttonStyle(.plain)
     }
 
-    private func lastWatchedFraction(_ history: PlaybackHistoryEntry) -> CGFloat {
+    private func recentWatchedFraction(_ history: PlaybackHistoryEntry) -> CGFloat {
         guard history.durationSeconds > 0 else { return 0 }
         return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
-    }
-
-    private func lastWatchedPercent(_ history: PlaybackHistoryEntry) -> Int {
-        Int((lastWatchedFraction(history) * 100).rounded())
-    }
-
-    private func formatPlaybackTime(_ seconds: Double) -> String {
-        let value = max(0, Int(seconds.rounded()))
-        if value >= 3_600 {
-            return String(format: "%d:%02d:%02d", value / 3_600, (value % 3_600) / 60, value % 60)
-        }
-        return String(format: "%d:%02d", value / 60, value % 60)
-    }
-
-    private func lastWatchedDateLabel(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var preview: some View {

@@ -27,6 +27,9 @@ private struct UnifiedMediaEntry: Identifiable, Codable {
     let streamURL: URL
     var details: TMDBTitleDetails?
     var adultScene: ThePornDBScene?
+    /// Nil means an older snapshot or not searched yet. True prevents an
+    /// unmatched filename from generating the same API request every launch.
+    var adultLookupCompleted: Bool?
     var episodes: [UnifiedEpisode] = []
     var posterURL: URL? {
         if let url = details?.posterURL { return url }
@@ -84,15 +87,22 @@ private final class UnifiedContentModel: ObservableObject {
     }
 
     func load(vm: AppViewModel, force: Bool = false) async {
-        let metadataMatcherRevision = "release-v2"
+        let metadataMatcherRevision = "release-v2-adult-v1"
         let baseSourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
         }.joined(separator: "|") + "|tmdb:" + Self.stableSignature(TMDBSettings.readAccessToken)
+            + "|tpdb:" + Self.stableSignature(ThePornDBSettings.apiKey)
             + "|matcher:" + metadataMatcherRevision
         var sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
         let shouldFetchMetadata = force || sourceSignature != lastSourceSignature
         // A cached library is immutable until the user explicitly refreshes.
-        if loaded && !force && sourceSignature == lastSourceSignature { return }
+        if loaded && !force && sourceSignature == lastSourceSignature {
+            if ThePornDBSettings.hasValidAPIKey,
+               unknown.contains(where: { $0.adultLookupCompleted != true }) {
+                Task { await self.enrichUnknownWithAdultMetadata() }
+            }
+            return
+        }
         guard !isLoading else { return }
         isLoading = true
         status = "Scanning connected libraries…"
@@ -239,7 +249,9 @@ private final class UnifiedContentModel: ObservableObject {
         unknown = unknownItems.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
 
         // Adult fallback runs after the usable Content screen has finished loading.
-        if force && ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
+        // It also runs on the first normal scan; results are persisted below by
+        // enrichUnknownWithAdultMetadata and are not requested again next launch.
+        if ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
             Task { await self.enrichUnknownWithAdultMetadata() }
         }
         loaded = true
@@ -309,17 +321,35 @@ private final class UnifiedContentModel: ObservableObject {
 
     private func enrichUnknownWithAdultMetadata() async {
         var items = unknown
-        let limit = min(items.count, 200)
-        for index in 0..<limit {
-            guard items[index].adultScene == nil else { continue }
+        // Process up to 200 still-pending entries per pass. Filtering the indices
+        // first ensures libraries larger than 200 continue on later launches.
+        let pendingIndices = Array(items.indices.filter { items[$0].adultLookupCompleted != true }.prefix(200))
+        for index in pendingIndices {
             let query = TMDBService.searchTitle(from: items[index].rawTitle)
-            if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5),
-               let scene = bestAdultMatch(response.list, query: query) {
-                items[index].adultScene = scene
-                items[index].title = scene.title ?? items[index].title
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else {
+                items[index].adultLookupCompleted = true
+                continue
+            }
+            if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5) {
+                items[index].adultLookupCompleted = true
+                if let scene = bestAdultMatch(response.list, query: query) ?? response.list.first {
+                    items[index].adultScene = scene
+                    items[index].title = scene.title ?? items[index].title
+                } else if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query) {
+                    // No scene: use the shared performer fallback. Cache its image
+                    // under the same stable key consumed by the Unknown poster grid.
+                    items[index].title = metadata.title ?? items[index].title
+                    if let cover = metadata.coverImage {
+                        VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified|\(items[index].id)")
+                    }
+                }
                 unknown = items
+                if index.isMultiple(of: 10) { persistSnapshot() }
             }
         }
+        unknown = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        persistSnapshot()
     }
 
     private func bestAdultMatch(_ scenes: [ThePornDBScene], query: String) -> ThePornDBScene? {
@@ -371,8 +401,6 @@ struct UnifiedContentView: View {
                             }.frame(maxWidth: .infinity).padding(.top, 90)
                         } else if currentEntries.isEmpty {
                             emptyState
-                        } else if section == .unknown {
-                            LazyVStack(spacing: 10) { ForEach(currentEntries) { unknownRow($0) } }
                         } else {
                             LazyVGrid(columns: columns, spacing: 18) { ForEach(currentEntries) { posterCard($0) } }
                         }
@@ -426,7 +454,12 @@ struct UnifiedContentView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
-                    if let url = entry.posterURL {
+                    if section == .unknown,
+                       let cached = VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)") {
+                        Image(uiImage: cached)
+                            .resizable()
+                            .scaledToFill()
+                    } else if let url = entry.posterURL {
                         KFImage(url)
                             .placeholder { ProgressView().tint(AppPalette.accent) }
                             .cacheOriginalImage()
@@ -438,25 +471,6 @@ struct UnifiedContentView: View {
                 Text(entry.title).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.leading)
                 if !entry.episodes.isEmpty { Text("\(entry.episodes.count) episodes").font(.caption2).foregroundStyle(AppPalette.accent) }
             }
-        }.buttonStyle(.plain)
-    }
-
-    private func unknownRow(_ entry: UnifiedMediaEntry) -> some View {
-        Button { selected = entry } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.07))
-                    if let url = entry.posterURL {
-                        KFImage(url).placeholder { ProgressView() }.cacheOriginalImage().fade(duration: 0.12).resizable().scaledToFill()
-                    }
-                    else { Image(systemName: "play.rectangle.fill").foregroundStyle(.secondary) }
-                }.frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 10))
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(entry.title).font(.subheadline.weight(.semibold)).lineLimit(2)
-                    Text(entry.sourceLabel).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer(); Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-            }.padding(10).background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 15))
         }.buttonStyle(.plain)
     }
 

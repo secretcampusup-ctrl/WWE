@@ -4,9 +4,9 @@ import Foundation
 /// مسؤولة عن تخزين مفتاح API والإعدادات
 struct ThePornDBSettings {
 
-    // Temporarily paused, not removed. Flip this to true when adult metadata
-    // should be enabled again. TMDB is the only active metadata provider now.
-    static let isEnabled = false
+    // Enabled for Unknown-library recognition and its video-details metadata.
+    // Requests still require a configured key and remain cache/gate protected.
+    static let isEnabled = true
 
     /// الحصول على مفتاح API من UserDefaults
     static var apiKey: String {

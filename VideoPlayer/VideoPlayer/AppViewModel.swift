@@ -22,6 +22,7 @@ struct PlaybackHistoryEntry: Identifiable, Codable, Equatable {
     let id: String
     var title: String
     var source: String
+    var posterCacheKey: String?
     var positionSeconds: Double
     var durationSeconds: Double
     var watchedAt: Date
@@ -54,6 +55,10 @@ class AppViewModel: ObservableObject {
     /// starts metadata, artwork, or provider requests.
     @Published private(set) var playbackHistory: [String: PlaybackHistoryEntry] = [:]
 
+    var recentPlaybackHistory: [PlaybackHistoryEntry] {
+        Array(playbackHistory.values.sorted { $0.watchedAt > $1.watchedAt }.prefix(12))
+    }
+
     /// Videos explicitly pinned by the user, newest favorites first.
     var favoriteLinks: [SavedVideoLink] {
         savedLinks
@@ -76,7 +81,7 @@ class AppViewModel: ObservableObject {
     private let playlistsKey = "video_playlists_v1"
     private let pikPakCachePrefix = "pikpak_webdav_cache_v1_"
     private let playbackHistoryKey = "playback_history_v1"
-    private var pendingHistoryItem: (id: String, title: String, source: String)?
+    private var pendingHistoryItem: (id: String, title: String, source: String, posterCacheKey: String?)?
     private var pendingHistoryProgress: (position: Double, duration: Double)?
 
     init() {
@@ -102,7 +107,12 @@ class AppViewModel: ObservableObject {
     }
 
     func preparePlaybackHistory(for item: VideoDetailsItem) {
-        pendingHistoryItem = (item.id, item.title, item.source)
+        pendingHistoryItem = (
+            item.id,
+            item.title,
+            item.source,
+            item.posterCacheKey ?? VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
+        )
         pendingHistoryProgress = nil
     }
 
@@ -125,6 +135,7 @@ class AppViewModel: ObservableObject {
             id: item.id,
             title: item.title,
             source: item.source,
+            posterCacheKey: item.posterCacheKey,
             positionSeconds: nearEnd ? 0 : progress.position,
             durationSeconds: progress.duration,
             watchedAt: Date()
