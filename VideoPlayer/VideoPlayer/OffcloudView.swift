@@ -52,6 +52,15 @@ final class OffcloudViewModel: ObservableObject {
         filesCacheDates = Self.load([String: Date].self, key: "offcloud_files_cache_dates_v1") ?? [:]
     }
 
+    func reloadPersistedState() {
+        apiKey = OffcloudKeyStore.load()
+        transfers = Self.load([OffcloudTransfer].self, key: historyCacheKey) ?? []
+        filesCache = Self.load([String: [OffcloudFile]].self, key: filesCacheKey) ?? [:]
+        sourceByRequest = Self.load([String: String].self, key: sourcesCacheKey) ?? [:]
+        filesCacheDates = Self.load([String: Date].self, key: filesCacheDatesKey) ?? [:]
+        filesCacheVersion &+= 1
+    }
+
     var hasKey: Bool { !apiKey.isEmpty }
     var hasActiveTransfers: Bool {
         transfers.contains { !$0.isDownloaded && !$0.isFailed }

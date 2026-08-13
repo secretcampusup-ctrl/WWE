@@ -61,6 +61,7 @@ private struct UnifiedContentSnapshot: Codable {
     let shows: [UnifiedMediaEntry]
     let unknown: [UnifiedMediaEntry]
     let sourceSignature: String?
+    let metadataSignature: String?
 }
 
 @MainActor
@@ -72,7 +73,9 @@ final class UnifiedContentModel: ObservableObject {
     @Published var status = ""
     private var loaded = false
     private var lastSourceSignature = ""
+    private var lastMetadataSignature = ""
     private var adultEnrichmentTask: Task<Void, Never>?
+    private var pendingForcedRefresh = false
     private let cloud = OffcloudViewModel()
     private static var snapshotURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -98,23 +101,29 @@ final class UnifiedContentModel: ObservableObject {
                 unknown[index].adultLookupCompleted = nil
             }
             lastSourceSignature = snapshot.sourceSignature ?? ""
+            lastMetadataSignature = snapshot.metadataSignature ?? Self.currentMetadataSignature()
             loaded = true
         }
     }
 
     func load(vm: AppViewModel, force: Bool = false) async {
+        if isLoading {
+            // Pull-to-refresh or a newly added provider must never be discarded
+            // just because an older scan is still finishing.
+            if force { pendingForcedRefresh = true }
+            return
+        }
         if force {
             // A refresh replaces the previous scan. Never let an older adult
             // enrichment pass continue mutating the same array in parallel.
             adultEnrichmentTask?.cancel()
             adultEnrichmentTask = nil
         }
-        let metadataMatcherRevision = "release-v2-adult-v1"
+        let metadataSignature = Self.currentMetadataSignature()
+        let metadataSettingsChanged = metadataSignature != lastMetadataSignature
         let baseSourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
-        }.joined(separator: "|") + "|tmdb:" + Self.stableSignature(TMDBSettings.readAccessToken)
-            + "|tpdb:" + Self.stableSignature(ThePornDBSettings.apiKey)
-            + "|matcher:" + metadataMatcherRevision
+        }.joined(separator: "|") + "|metadata:" + metadataSignature
         var sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
         let shouldFetchMetadata = force || sourceSignature != lastSourceSignature
         // A cached library is immutable until the user explicitly refreshes.
@@ -125,10 +134,23 @@ final class UnifiedContentModel: ObservableObject {
             }
             return
         }
-        guard !isLoading else { return }
         isLoading = true
         status = "Scanning connected libraries…"
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            if pendingForcedRefresh {
+                pendingForcedRefresh = false
+                Task { @MainActor [weak self, weak vm] in
+                    guard let self, let vm else { return }
+                    await self.load(vm: vm, force: true)
+                }
+            }
+        }
+
+        // Settings and provider screens use their own OffcloudViewModel. Reload
+        // the persisted account/files before every catalog scan so this shared
+        // Home/Content model cannot keep an old in-memory provider snapshot.
+        cloud.reloadPersistedState()
 
         var raw: [UnifiedMediaEntry] = []
         for server in vm.servers {
@@ -186,11 +208,27 @@ final class UnifiedContentModel: ObservableObject {
 
         guard !raw.isEmpty else {
             movies = []; shows = []; unknown = []; loaded = true
-            lastSourceSignature = sourceSignature; status = ""
+            lastSourceSignature = sourceSignature
+            lastMetadataSignature = metadataSignature
+            status = ""
             persistSnapshot()
             return
         }
         status = "Scanning files with TMDB…"
+
+        let previousEntriesByID = Dictionary(
+            (movies + shows + unknown).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let previousMetadataByQuery = Dictionary(
+            (movies + shows + unknown).compactMap { entry in
+                entry.details.map { (metadataGroupKey(for: entry), $0) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let previouslyScannedQueries = Set(
+            (movies + shows + unknown).map { metadataGroupKey(for: $0) }
+        )
 
         // Match each cleaned title once. Episode packs can contain hundreds of files
         // that all resolve to the same show, so querying each file serially made the
@@ -207,7 +245,11 @@ final class UnifiedContentModel: ObservableObject {
                 let preferredType = preferredMediaType(for: entry)
                 group.addTask {
                     let details: TMDBTitleDetails?
-                    if shouldFetchMetadata {
+                    if let existing = previousMetadataByQuery[key] {
+                        details = existing
+                    } else if !metadataSettingsChanged && previouslyScannedQueries.contains(key) {
+                        details = nil
+                    } else if shouldFetchMetadata {
                         details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                     } else {
                         details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
@@ -222,7 +264,11 @@ final class UnifiedContentModel: ObservableObject {
                     let preferredType = preferredMediaType(for: nextEntry)
                     group.addTask {
                         let details: TMDBTitleDetails?
-                        if shouldFetchMetadata {
+                        if let existing = previousMetadataByQuery[nextKey] {
+                            details = existing
+                        } else if !metadataSettingsChanged && previouslyScannedQueries.contains(nextKey) {
+                            details = nil
+                        } else if shouldFetchMetadata {
                             details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                         } else {
                             details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
@@ -236,10 +282,6 @@ final class UnifiedContentModel: ObservableObject {
         // Keep completed adult matches while refreshing provider file lists.
         // Otherwise every manual refresh discarded the posters and immediately
         // launched the same large batch of ThePornDB requests again.
-        let previousEntriesByID = Dictionary(
-            (movies + shows + unknown).map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
         var movieItems: [UnifiedMediaEntry] = []
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
@@ -303,12 +345,19 @@ final class UnifiedContentModel: ObservableObject {
         }
         loaded = true
         lastSourceSignature = sourceSignature
+        lastMetadataSignature = metadataSignature
         status = ""
         persistSnapshot()
     }
 
     private func persistSnapshot() {
-        let snapshot = UnifiedContentSnapshot(movies: movies, shows: shows, unknown: unknown, sourceSignature: lastSourceSignature)
+        let snapshot = UnifiedContentSnapshot(
+            movies: movies,
+            shows: shows,
+            unknown: unknown,
+            sourceSignature: lastSourceSignature,
+            metadataSignature: lastMetadataSignature
+        )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: Self.snapshotURL, options: .atomic)
     }
@@ -421,6 +470,12 @@ final class UnifiedContentModel: ObservableObject {
         }
         unknown = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         persistSnapshot()
+    }
+
+    private static func currentMetadataSignature() -> String {
+        "tmdb:" + stableSignature(TMDBSettings.readAccessToken)
+            + "|tpdb:" + stableSignature(ThePornDBSettings.apiKey)
+            + "|matcher:release-v2-adult-v1"
     }
 
     func applyManualTMDB(_ details: TMDBTitleDetails, to entry: UnifiedMediaEntry) {

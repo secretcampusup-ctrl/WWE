@@ -88,6 +88,7 @@ struct HomeLibraryView: View {
     @State private var showFavorites = false
     @State private var showSettings = false
     @State private var showDownloads = false
+    @State private var showRefreshOverlay = false
 
     private let posterWidth: CGFloat = 112
     private let posterHeight: CGFloat = 168
@@ -121,12 +122,24 @@ struct HomeLibraryView: View {
                     }
                     .padding(.top, 12)
                     .padding(.bottom, 110)
+                    .tint(AppPalette.accent)
                 }
                 .scrollIndicators(.hidden)
-                .refreshable { await catalog.load(vm: vm, force: true) }
+                // The native refresh control still supplies the familiar pull
+                // gesture, while its spinner is replaced by our centered loader.
+                .tint(.clear)
+                .refreshable { await refreshLibrary() }
+
+                if showRefreshOverlay {
+                    MediaOrbitRefreshView()
+                        .transition(.scale(scale: 0.86).combined(with: .opacity))
+                        .allowsHitTesting(false)
+                        .zIndex(20)
+                }
             }
+            .animation(.easeOut(duration: 0.2), value: showRefreshOverlay)
             .toolbar(.hidden, for: .navigationBar)
-            .task(id: isActive) {
+            .task(id: homeRefreshID) {
                 guard isActive else { return }
                 await catalog.load(vm: vm, force: false)
             }
@@ -165,7 +178,9 @@ struct HomeLibraryView: View {
             .fullScreenCover(isPresented: $showFavorites) {
                 FavoritesAllView(vm: vm)
             }
-            .sheet(isPresented: $showSettings) { UnifiedSettingsView(vm: vm) }
+            .sheet(isPresented: $showSettings, onDismiss: {
+                Task { await catalog.load(vm: vm, force: true) }
+            }) { UnifiedSettingsView(vm: vm) }
             .sheet(isPresented: $showDownloads) { DownloadManagerView() }
         }
         .preferredColorScheme(.dark)
@@ -183,10 +198,21 @@ struct HomeLibraryView: View {
                     .foregroundStyle(AppTheme.titleGradient)
             }
             Spacer()
+            homeHeaderButton("arrow.clockwise") {
+                Task { await refreshLibrary() }
+            }
             homeHeaderButton("arrow.down.circle.fill") { showDownloads = true }
             homeHeaderButton("gearshape.fill") { showSettings = true }
         }
         .padding(.horizontal, 16)
+    }
+
+    private var homeRefreshID: String {
+        "\(isActive)|" + vm.servers.map {
+            $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
+        }.joined(separator: "|")
+            + "|torbox:\(TorBoxLibraryStore.revision)"
+            + "|offcloud:\(OffcloudKeyStore.load().isEmpty ? 0 : 1)"
     }
 
     private func homeHeaderButton(_ icon: String, action: @escaping () -> Void) -> some View {
@@ -199,6 +225,30 @@ struct HomeLibraryView: View {
                 .overlay(Circle().stroke(Color.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
+    }
+
+    @MainActor
+    private func refreshLibrary() async {
+        guard !showRefreshOverlay else { return }
+        showRefreshOverlay = true
+        let startedAt = Date()
+        await catalog.load(vm: vm, force: true)
+
+        // If the pull happened while another scan was ending, the model queues
+        // this forced refresh. Keep the overlay up through that queued pass too.
+        var idleChecks = 0
+        while idleChecks < 3 {
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            idleChecks = catalog.isLoading ? 0 : idleChecks + 1
+        }
+
+        // Avoid an abrupt flash when a cached refresh finishes immediately.
+        let minimumVisibleTime: TimeInterval = 0.55
+        let remaining = minimumVisibleTime - Date().timeIntervalSince(startedAt)
+        if remaining > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+        }
+        showRefreshOverlay = false
     }
 
     private var resumeSection: some View {
@@ -586,6 +636,69 @@ struct HomeLibraryView: View {
             await vm.playSavedLinkAsync(link)
             if vm.nowPlayingURL == nil { showSavedPlayer = false }
         }
+    }
+}
+
+/// Compact native SwiftUI version of the supplied media-orbit loader.
+/// It is intentionally rendered as an overlay so refreshing never moves cards.
+private struct MediaOrbitRefreshView: View {
+    private let symbols = ["film.fill", "music.note", "video.fill", "play.rectangle.fill"]
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let elapsed = timeline.date.timeIntervalSinceReferenceDate
+            let angle = Angle.degrees(elapsed.truncatingRemainder(dividingBy: 7) / 7 * 360)
+            let pulse = 1 + (sin(elapsed * 2.7) * 0.055)
+
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Circle().fill(Color.black.opacity(0.2)))
+                    .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.8))
+                    .shadow(color: .black.opacity(0.38), radius: 18, y: 8)
+
+                Circle()
+                    .stroke(
+                        AppPalette.accent.opacity(0.22),
+                        style: StrokeStyle(lineWidth: 1.2, dash: [3, 5], dashPhase: elapsed * -9)
+                    )
+                    .frame(width: 82, height: 82)
+                    .scaleEffect(pulse)
+
+                Circle()
+                    .stroke(AppPalette.blue.opacity(0.13), lineWidth: 1)
+                    .frame(width: 62, height: 62)
+                    .scaleEffect(2 - pulse)
+
+                ForEach(Array(symbols.enumerated()), id: \.offset) { index, symbol in
+                    let itemAngle = angle + .degrees(Double(index) * 90 - 90)
+                    let radians = itemAngle.radians
+
+                    Image(systemName: symbol)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.88))
+                        .frame(width: 25, height: 25)
+                        .background(Color.white.opacity(0.075), in: Circle())
+                        .overlay(Circle().stroke(AppPalette.accent.opacity(0.2), lineWidth: 0.7))
+                        .shadow(color: AppPalette.accent.opacity(0.2), radius: 7)
+                        .offset(x: cos(radians) * 35, y: sin(radians) * 35)
+                }
+
+                Circle()
+                    .fill(AppPalette.diagonalGradient)
+                    .frame(width: 29, height: 29)
+                    .shadow(color: AppPalette.accent.opacity(0.55), radius: 12)
+                    .scaleEffect(pulse)
+
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(.white)
+                    .scaleEffect(pulse)
+            }
+        }
+        .frame(width: 108, height: 108)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Refreshing library")
     }
 }
 
