@@ -37,33 +37,25 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
 @MainActor
 enum ScreenOrientationLock {
-    static var allowedOrientations: UIInterfaceOrientationMask = .allButUpsideDown
+    static var allowedOrientations: UIInterfaceOrientationMask = .portrait
 
     @discardableResult
     static func lockToCurrentOrientation() -> Bool {
         guard let scene = activeScene else { return false }
-
-        switch scene.interfaceOrientation {
-        case .portrait:
-            allowedOrientations = .portrait
-        case .portraitUpsideDown:
-            allowedOrientations = .portraitUpsideDown
-        case .landscapeLeft:
-            allowedOrientations = .landscapeLeft
-        case .landscapeRight:
-            allowedOrientations = .landscapeRight
-        default:
-            allowedOrientations = scene.screen.bounds.width > scene.screen.bounds.height
-                ? .landscape
-                : .portrait
-        }
-
+        allowedOrientations = .portrait
         apply(allowedOrientations, to: scene)
         return true
     }
 
     static func unlock() {
-        allowedOrientations = .allButUpsideDown
+        // Outside the player the app always returns to portrait.
+        allowedOrientations = .portrait
+        guard let scene = activeScene else { return }
+        apply(allowedOrientations, to: scene)
+    }
+
+    static func setPlayerLandscape(_ landscape: Bool) {
+        allowedOrientations = landscape ? .landscapeRight : .portrait
         guard let scene = activeScene else { return }
         apply(allowedOrientations, to: scene)
     }

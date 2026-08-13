@@ -29,6 +29,13 @@ private struct MovieHeaderScrollOffsetKey: PreferenceKey {
     }
 }
 
+private struct StandardHeaderScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct VideoDetailsItem: Identifiable {
     let id: String
     let title: String
@@ -171,6 +178,8 @@ struct VideoDetailsView: View {
     @State private var tmdbEpisode: TMDBEpisodeDetails?
     @State private var isPreparingPlayback = false
     @State private var movieHeaderScrollOffset: CGFloat = 0
+    @State private var standardHeaderScrollOffset: CGFloat = 0
+    @State private var displayedSeriesSeason: Int?
 
     var body: some View {
         NavigationStack {
@@ -183,7 +192,16 @@ struct VideoDetailsView: View {
 
                         ScrollView(showsIndicators: false) {
                             VStack(alignment: .leading, spacing: 0) {
-                                Color.clear.frame(height: heroHeight - 24)
+                                Color.clear
+                                    .frame(height: heroHeight - 24)
+                                    .background {
+                                        GeometryReader { marker in
+                                            Color.clear.preference(
+                                                key: StandardHeaderScrollOffsetKey.self,
+                                                value: marker.frame(in: .named("standard-details-scroll")).minY
+                                            )
+                                        }
+                                    }
 
                                 VStack(alignment: .leading, spacing: 14) {
                                 if item.is4K || item.isFullHD || qualityStyle != nil {
@@ -254,6 +272,10 @@ struct VideoDetailsView: View {
                         }
                     }
                 }
+            }
+            .coordinateSpace(name: "standard-details-scroll")
+            .onPreferenceChange(StandardHeaderScrollOffsetKey.self) { value in
+                standardHeaderScrollOffset = value
             }
             .background(AppTheme.bg.ignoresSafeArea())
             .ignoresSafeArea(edges: .top)
@@ -331,6 +353,9 @@ struct VideoDetailsView: View {
         }
         .onChange(of: item.id) { _ in
             isPreparingPlayback = false
+            movieHeaderScrollOffset = 0
+            standardHeaderScrollOffset = 0
+            displayedSeriesSeason = selectedEpisodeItem?.season
             prepareForCurrentItem()
         }
         .onChange(of: vm.isLoading) { isLoading in
@@ -461,6 +486,7 @@ struct VideoDetailsView: View {
     private var isMovieDetailsPage: Bool {
         item.suppliedAdultMetadata != nil
             || item.manualMetadataProvider == "theporndb"
+            || !item.relatedEpisodes.isEmpty
             || (item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil)
     }
 
@@ -548,15 +574,16 @@ struct VideoDetailsView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    GeometryReader { marker in
-                        Color.clear.preference(
-                            key: MovieHeaderScrollOffsetKey.self,
-                            value: marker.frame(in: .named("movie-details-scroll")).minY
-                        )
-                    }
-                    .frame(height: 0)
-
-                    Color.clear.frame(height: max(300, UIScreen.main.bounds.height * 0.39))
+                    Color.clear
+                        .frame(height: max(300, UIScreen.main.bounds.height * 0.39))
+                        .background {
+                            GeometryReader { marker in
+                                Color.clear.preference(
+                                    key: MovieHeaderScrollOffsetKey.self,
+                                    value: marker.frame(in: .named("movie-details-scroll")).minY
+                                )
+                            }
+                        }
 
                     VStack(spacing: 16) {
                         movieTitleTreatment
@@ -583,6 +610,10 @@ struct VideoDetailsView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
 
+                        if !item.relatedEpisodes.isEmpty {
+                            seriesEpisodesSection
+                        }
+
                         if let details = resolvedMovieDetails, details.director != nil || !details.cast.isEmpty {
                             movieCastAndCrew(details)
                         }
@@ -602,7 +633,7 @@ struct VideoDetailsView: View {
 
                         VStack(spacing: 3) {
                             Text("\(item.source) · \(item.fileExtension.uppercased())")
-                            Text("My Library · Movies")
+                            Text(item.relatedEpisodes.isEmpty ? "My Library · Movies" : "My Library · TV Shows")
                         }
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.white.opacity(0.34))
@@ -730,7 +761,7 @@ struct VideoDetailsView: View {
                     }
                 } else {
                     VStack(spacing: 2) {
-                        Label(hasMovieProgress ? "Resume" : "Play", systemImage: "play.fill")
+                        Label(playButtonTitle, systemImage: "play.fill")
                             .font(.system(size: 15, weight: .bold))
                         if hasMovieProgress {
                             Text("Played: \(movieProgressPercent)%")
@@ -910,6 +941,13 @@ struct VideoDetailsView: View {
 
     private var preview: some View {
         GeometryReader { proxy in
+            let pullDistance = max(0, standardHeaderScrollOffset)
+            let upwardDistance = max(0, -standardHeaderScrollOffset)
+            let headerScale = 1 + min(pullDistance / max(proxy.size.height, 1), 0.18)
+            let parallaxOffset = standardHeaderScrollOffset < 0
+                ? standardHeaderScrollOffset * 0.22
+                : 0
+            let fadeAmount = min(0.52, Double(upwardDistance / 230) * 0.52)
             ZStack {
                 Button(action: playAndClose) {
                     ZStack {
@@ -921,11 +959,16 @@ struct VideoDetailsView: View {
                                 .scaledToFill()
                                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                                 .clipped()
+                                .scaleEffect(headerScale, anchor: .top)
+                                .offset(y: parallaxOffset)
                         } else {
                             DetailsLoadingSpinner(size: 36, lineWidth: 3, color: .white)
                         }
 
                         Color.black.opacity(displayedFrame == nil ? 0.10 : 0.16)
+
+                        Color.black.opacity(fadeAmount)
+                            .allowsHitTesting(false)
 
                         LinearGradient(
                             stops: [
@@ -1168,6 +1211,9 @@ struct VideoDetailsView: View {
     }
 
     private var stableMetadataCacheKey: String {
+        if !item.relatedEpisodes.isEmpty, let details = item.suppliedTMDBDetails {
+            return "series|tmdb|\(details.id)"
+        }
         let normalizedTitle = item.displayTitle
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
@@ -1232,49 +1278,139 @@ struct VideoDetailsView: View {
         }
     }
 
+    private var selectedEpisodeItem: VideoEpisodeItem? {
+        item.relatedEpisodes.first { $0.id == item.id }
+    }
+
+    private var availableSeriesSeasons: [Int] {
+        Array(Set(item.relatedEpisodes.map(\.season))).sorted()
+    }
+
+    private var visibleSeriesSeason: Int {
+        displayedSeriesSeason
+            ?? selectedEpisodeItem?.season
+            ?? availableSeriesSeasons.first
+            ?? 1
+    }
+
+    private var visibleSeriesEpisodes: [VideoEpisodeItem] {
+        item.relatedEpisodes
+            .filter { $0.season == visibleSeriesSeason }
+            .sorted { $0.episode < $1.episode }
+    }
+
     private var seriesEpisodesSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                ZStack { Circle().fill(AppPalette.accent.opacity(0.14)); Image(systemName: "rectangle.stack.fill").foregroundStyle(AppPalette.accent) }.frame(width: 34, height: 34)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Episodes").font(.headline).foregroundStyle(.white)
-                    Text("Continue watching the series").font(.caption2).foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                Text("Season \(visibleSeriesSeason)")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
                 Spacer()
-                Text("\(item.relatedEpisodes.count)").font(.caption.bold().monospacedDigit()).foregroundStyle(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 6).background(AppPalette.accent.opacity(0.18), in: Capsule())
+                Text("\(visibleSeriesEpisodes.count) Episodes")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
             }
+
+            if availableSeriesSeasons.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(availableSeriesSeasons, id: \.self) { season in
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    displayedSeriesSeason = season
+                                }
+                            } label: {
+                                Text("Season \(season)")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(visibleSeriesSeason == season ? .black : .white.opacity(0.72))
+                                    .padding(.horizontal, 13)
+                                    .frame(height: 32)
+                                    .background(
+                                        visibleSeriesSeason == season ? Color.white : Color.white.opacity(0.07),
+                                        in: Capsule()
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 12) {
-                        ForEach(item.relatedEpisodes) { episode in
-                            let current = episode.id == item.id
-                            Button { onSelectEpisode?(episode.id) } label: {
-                                Text(episode.numberLabel)
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                                    .tracking(0.35)
-                                    .foregroundStyle(current ? Color.white : AppPalette.accent)
-                                    .frame(width: 104, height: 46)
-                                    .background(
-                                        current ? AnyShapeStyle(AppPalette.diagonalGradient) : AnyShapeStyle(Color.white.opacity(0.055)),
-                                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .stroke(current ? Color.white.opacity(0.24) : AppPalette.blue.opacity(0.16), lineWidth: 1)
-                                    )
-                                    .shadow(color: current ? AppPalette.purple.opacity(0.24) : .clear, radius: 8, y: 4)
-                            }
-                            .id(episode.id)
-                            .buttonStyle(PremiumPressButtonStyle())
+                    LazyHStack(alignment: .top, spacing: 13) {
+                        ForEach(visibleSeriesEpisodes) { episode in
+                            cinematicEpisodeCard(episode)
+                                .id(episode.id)
                         }
-                    }.padding(.vertical, 3).padding(.horizontal, 1)
+                    }
+                    .padding(.vertical, 2)
                 }
                 .environment(\.layoutDirection, .leftToRight)
-                .onAppear { scrollToSelectedEpisode(using: proxy) }
+                .onAppear {
+                    displayedSeriesSeason = selectedEpisodeItem?.season ?? availableSeriesSeasons.first
+                    scrollToSelectedEpisode(using: proxy)
+                }
                 .onChange(of: item.id) { _ in scrollToSelectedEpisode(using: proxy) }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func cinematicEpisodeCard(_ episode: VideoEpisodeItem) -> some View {
+        let current = episode.id == item.id
+        return Button { onSelectEpisode?(episode.id) } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(Color.white.opacity(0.07))
+                    if let artwork = movieBackdropFrame ?? displayedFrame {
+                        Image(uiImage: artwork)
+                            .resizable()
+                            .scaledToFill()
+                    }
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.78)],
+                        startPoint: .center,
+                        endPoint: .bottom
+                    )
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 31, height: 31)
+                        .background(Color.white.opacity(0.92), in: Circle())
+                }
+                .frame(width: 166, height: 94)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(current ? AppPalette.accent : Color.white.opacity(0.10), lineWidth: current ? 2 : 1)
+                )
+                .overlay(alignment: .bottom) {
+                    let progress = seriesEpisodeProgress(episode)
+                    if progress > 0 {
+                        GeometryReader { proxy in
+                            AppPalette.gradient
+                                .frame(width: proxy.size.width * progress)
+                        }
+                        .frame(height: 4)
+                    }
+                }
+
+                Text("\(episode.episode). \(episode.episodeTitle)")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .frame(width: 166, alignment: .leading)
+            }
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+    }
+
+    private func seriesEpisodeProgress(_ episode: VideoEpisodeItem) -> CGFloat {
+        guard let history = vm.playbackHistory[episode.id], history.durationSeconds > 0 else { return 0 }
+        return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
     }
 
     private func scrollToSelectedEpisode(using proxy: ScrollViewProxy) {

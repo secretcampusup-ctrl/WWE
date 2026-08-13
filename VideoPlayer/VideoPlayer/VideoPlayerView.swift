@@ -56,6 +56,7 @@ struct VideoPlayerView: View {
     @State private var endCountdownTask: Task<Void, Never>?
     @State private var didTearDownPlayback = false
     @State private var didResetNetworkAfterPlayback = false
+    @State private var isPlayerLandscape = false
 
     // Temporary test mode: every file uses the main Apple player only.
     // The MKV player remains in the project but is not selected.
@@ -148,6 +149,7 @@ struct VideoPlayerView: View {
                         }
                         PlayerQualityBadge(label: mkvQualityLabel)
                         Spacer()
+                        playerOrientationButton
                         Button {
                             mkvFillMode.toggle()
                             scheduleAutoHide()
@@ -325,6 +327,8 @@ struct VideoPlayerView: View {
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
+            isPlayerLandscape = false
+            ScreenOrientationLock.setPlayerLandscape(false)
             didTearDownPlayback = false
             didResetNetworkAfterPlayback = false
             screenBrightness = Double(UIScreen.main.brightness)
@@ -350,6 +354,7 @@ struct VideoPlayerView: View {
             scheduleAutoHide()
         }
         .onDisappear {
+            ScreenOrientationLock.setPlayerLandscape(false)
             tearDownPlayback()
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
@@ -382,6 +387,7 @@ struct VideoPlayerView: View {
     // MARK: - Top chrome
 
     private func closePlayer() {
+        ScreenOrientationLock.setPlayerLandscape(false)
         tearDownPlayback()
         dismiss()
     }
@@ -436,6 +442,8 @@ struct VideoPlayerView: View {
             PlayerQualityBadge(tier: engine.resolutionTier)
 
             Spacer(minLength: 0)
+
+            playerOrientationButton
 
             Button {
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -590,6 +598,23 @@ struct VideoPlayerView: View {
             margin: Int(subtitleHeight),
             delay: subtitleDelay
         )
+    }
+
+    private var playerOrientationButton: some View {
+        Button {
+            isPlayerLandscape.toggle()
+            ScreenOrientationLock.setPlayerLandscape(isPlayerLandscape)
+            showControls = true
+            scheduleAutoHide()
+        } label: {
+            Image(systemName: isPlayerLandscape ? "rotate.left" : "rotate.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 40, height: 40)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isPlayerLandscape ? "Return to portrait" : "Rotate to landscape")
     }
 
     private var seriesDisplayName: String {
