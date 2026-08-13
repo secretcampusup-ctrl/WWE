@@ -84,10 +84,13 @@ private final class UnifiedContentModel: ObservableObject {
     }
 
     func load(vm: AppViewModel, force: Bool = false) async {
+        let metadataMatcherRevision = "release-v2"
         let baseSourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
-        }.joined(separator: "|") + "|tmdb:" + String(TMDBSettings.readAccessToken.hashValue)
+        }.joined(separator: "|") + "|tmdb:" + Self.stableSignature(TMDBSettings.readAccessToken)
+            + "|matcher:" + metadataMatcherRevision
         var sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
+        let shouldFetchMetadata = force || sourceSignature != lastSourceSignature
         // A cached library is immutable until the user explicitly refreshes.
         if loaded && !force && sourceSignature == lastSourceSignature { return }
         guard !isLoading else { return }
@@ -172,7 +175,7 @@ private final class UnifiedContentModel: ObservableObject {
                 let preferredType = preferredMediaType(for: entry)
                 group.addTask {
                     let details: TMDBTitleDetails?
-                    if force {
+                    if shouldFetchMetadata {
                         details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                     } else {
                         details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
@@ -187,7 +190,7 @@ private final class UnifiedContentModel: ObservableObject {
                     let preferredType = preferredMediaType(for: nextEntry)
                     group.addTask {
                         let details: TMDBTitleDetails?
-                        if force {
+                        if shouldFetchMetadata {
                             details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                         } else {
                             details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
@@ -249,6 +252,15 @@ private final class UnifiedContentModel: ObservableObject {
         let snapshot = UnifiedContentSnapshot(movies: movies, shows: shows, unknown: unknown, sourceSignature: lastSourceSignature)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: Self.snapshotURL, options: .atomic)
+    }
+
+    /// Swift's built-in `hashValue` changes between launches. A deterministic
+    /// one-way signature lets us detect credential changes without persisting
+    /// the TMDB token itself or forcing a full metadata rescan every launch.
+    private static func stableSignature(_ value: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in value.utf8 { hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211 }
+        return String(hash, radix: 16)
     }
 
     private func preferredMediaType(for entry: UnifiedMediaEntry) -> String {
@@ -382,7 +394,7 @@ struct UnifiedContentView: View {
     private var contentRefreshID: String {
         "\(isActive)|" + vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
-        }.joined(separator: "|")
+        }.joined(separator: "|") + "|torbox:\(TorBoxLibraryStore.revision)"
     }
 
     private var currentEntries: [UnifiedMediaEntry] {

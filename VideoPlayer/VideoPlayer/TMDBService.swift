@@ -143,8 +143,12 @@ actor TMDBService {
         guard TMDBSettings.isConfigured else { return nil }
         let original = Self.originalSearchTitle(from: rawTitle)
         let filtered = Self.searchTitle(from: rawTitle)
+        let canonical = Self.canonicalTitleAndYear(from: filtered).title
         var attempted = Set<String>()
-        for query in [original, filtered] where !query.isEmpty {
+        // Release names are often rejected when they still contain group/audio
+        // tags. Try the clean query first, then title-only, and keep the raw
+        // filename solely as a last resort for genuinely unusual movie names.
+        for query in [filtered, canonical, original] where !query.isEmpty {
             let key = query.lowercased()
             guard attempted.insert(key).inserted else { continue }
             if let result = await detailsForQuery(query, preferredMediaType: preferredMediaType) { return result }
@@ -156,8 +160,9 @@ actor TMDBService {
     func cachedDetailsOriginalFirst(for rawTitle: String, preferredMediaType: String? = nil) -> TMDBTitleDetails? {
         let original = Self.originalSearchTitle(from: rawTitle)
         let filtered = Self.searchTitle(from: rawTitle)
+        let canonical = Self.canonicalTitleAndYear(from: filtered).title
         var attempted = Set<String>()
-        for query in [original, filtered] where !query.isEmpty {
+        for query in [filtered, canonical, original] where !query.isEmpty {
             let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard attempted.insert(normalized.lowercased()).inserted else { continue }
             let key = normalized.lowercased() + "|" + (preferredMediaType ?? "any")
@@ -249,11 +254,19 @@ actor TMDBService {
         var value = searchTitle(from: raw)
         let yearPattern = #"(?<!\d)((?:19|20)\d{2})(?!\d)"#
         var year: String?
-        if let regex = try? NSRegularExpression(pattern: yearPattern),
-           let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-           let range = Range(match.range(at: 1), in: value) {
-            year = String(value[range])
-            value.removeSubrange(range)
+        if let regex = try? NSRegularExpression(pattern: yearPattern) {
+            let matches = regex.matches(in: value, range: NSRange(value.startIndex..., in: value))
+            let latestPlausibleYear = Calendar.current.component(.year, from: Date()) + 2
+            // Use the last plausible year. This preserves title numbers in names
+            // such as `Blade Runner 2049 (2017)` and `2001 A Space Odyssey (1968)`.
+            if let match = matches.reversed().first(where: { match in
+                guard let range = Range(match.range(at: 1), in: value),
+                      let number = Int(value[range]) else { return false }
+                return number <= latestPlausibleYear
+            }), let range = Range(match.range(at: 1), in: value) {
+                year = String(value[range])
+                value.removeSubrange(range)
+            }
         }
         value = value.replacingOccurrences(of: #"[\[\](){}._-]+"#, with: " ", options: .regularExpression)
         value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -307,8 +320,10 @@ actor TMDBService {
         var value = (rawTitle.removingPercentEncoding ?? rawTitle)
             .replacingOccurrences(of: ".", with: " ")
             .replacingOccurrences(of: "_", with: " ")
+        // Edition/repack markers normally sit immediately before resolution or
+        // source tags. They are not part of the TMDB title and must be the cutoff.
         value = value.replacingOccurrences(
-            of: #"(?i)\b(?:Season\s*\d{1,3}|S\d{1,3}(?:\s*E\d{1,3})?|COMPLETE|4320p|2160p|1440p|1080p|720p|480p|8K|4K|UHD|FHD|HDR|DV|HDTV|WEB[ -]?DL|WEBRIP|BLURAY|REMUX|x264|x265|H264|H265|HEVC)\b.*$"#,
+            of: #"(?i)\b(?:Season\s*\d{1,3}|S\d{1,3}(?:\s*E\d{1,3})?|COMPLETE|PROPER|REPACK|RERIP|INTERNAL|EXTENDED|UNRATED|REMASTERED|DIRECTORS?[ ._-]*CUT|THEATRICAL|LIMITED|4320p|2160p|1440p|1080p|720p|480p|8K|4K|UHD|FHD|HDR10\+?|HDR|DOLBY[ ._-]*VISION|DV|HDTV|WEB[ ._-]?(?:DL|RIP)|BLU[ ._-]?RAY|BDRIP|BRRIP|REMUX|x264|x265|H[ ._-]?264|H[ ._-]?265|HEVC|AV1|DDP?\d(?:\.\d)?|DTS(?:[ ._-]?HD)?|TRUEHD|ATMOS)\b.*$"#,
             with: "",
             options: .regularExpression
         )
