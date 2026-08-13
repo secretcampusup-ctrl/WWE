@@ -16,6 +16,14 @@ private enum UnifiedSource: Codable {
     case webDAV(server: WebDAVServer, file: WebDAVFile)
     case offcloud(transfer: OffcloudTransfer, file: OffcloudFile)
     case torBox(torrent: TorBoxTorrent, file: TorBoxFile)
+
+    var isVisibleByFileSize: Bool {
+        switch self {
+        case let .webDAV(_, file): return VideoLibraryVisibility.allows(sizeBytes: file.size)
+        case let .offcloud(_, file): return VideoLibraryVisibility.allows(sizeBytes: file.size)
+        case let .torBox(_, file): return VideoLibraryVisibility.allows(sizeBytes: file.size)
+        }
+    }
 }
 
 private struct UnifiedMediaEntry: Identifiable, Codable {
@@ -27,6 +35,7 @@ private struct UnifiedMediaEntry: Identifiable, Codable {
     let streamURL: URL
     var details: TMDBTitleDetails?
     var adultScene: ThePornDBScene?
+    var manualMetadataProvider: String?
     /// Nil means an older snapshot or not searched yet. True prevents an
     /// unmatched filename from generating the same API request every launch.
     var adultLookupCompleted: Bool?
@@ -79,9 +88,9 @@ private final class UnifiedContentModel: ObservableObject {
     init() {
         if let data = try? Data(contentsOf: Self.snapshotURL),
            let snapshot = try? JSONDecoder().decode(UnifiedContentSnapshot.self, from: data) {
-            movies = snapshot.movies
-            shows = snapshot.shows
-            unknown = snapshot.unknown
+            movies = Self.removingUndersizedFiles(from: snapshot.movies)
+            shows = Self.removingUndersizedFiles(from: snapshot.shows)
+            unknown = Self.removingUndersizedFiles(from: snapshot.unknown)
             // Older snapshots could mark metadata complete before a stable
             // poster was actually stored. Requeue only those blank cards.
             for index in unknown.indices where
@@ -227,8 +236,8 @@ private final class UnifiedContentModel: ObservableObject {
         // Keep completed adult matches while refreshing provider file lists.
         // Otherwise every manual refresh discarded the posters and immediately
         // launched the same large batch of ThePornDB requests again.
-        let previousAdultByID = Dictionary(
-            unknown.map { ($0.id, $0) },
+        let previousEntriesByID = Dictionary(
+            (movies + shows + unknown).map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
         var movieItems: [UnifiedMediaEntry] = []
@@ -237,6 +246,12 @@ private final class UnifiedContentModel: ObservableObject {
         for var entry in raw {
             let query = metadataGroupKey(for: entry)
             entry.details = metadataByQuery[query]
+            if let previous = previousEntriesByID[entry.id], previous.manualMetadataProvider != nil {
+                entry.details = previous.details
+                entry.adultScene = previous.adultScene
+                entry.manualMetadataProvider = previous.manualMetadataProvider
+                entry.title = previous.title
+            }
             if let canonicalTitle = entry.details?.title, !canonicalTitle.isEmpty {
                 entry.title = canonicalTitle
             }
@@ -250,7 +265,7 @@ private final class UnifiedContentModel: ObservableObject {
             } else if entry.details != nil {
                 movieItems.append(entry)
             } else {
-                if let previous = previousAdultByID[entry.id] {
+                if let previous = previousEntriesByID[entry.id] {
                     entry.adultScene = previous.adultScene
                     entry.adultLookupCompleted = previous.adultLookupCompleted
                     if previous.adultScene != nil { entry.title = previous.title }
@@ -408,6 +423,68 @@ private final class UnifiedContentModel: ObservableObject {
         persistSnapshot()
     }
 
+    func applyManualTMDB(_ details: TMDBTitleDetails, to entry: UnifiedMediaEntry) {
+        guard var value = takeEntry(id: entry.id) else { return }
+        value.details = details
+        value.adultScene = nil
+        value.title = details.title
+        value.manualMetadataProvider = "tmdb"
+        if details.isSeries {
+            shows.append(value)
+            shows.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        } else {
+            value.episodes = []
+            movies.append(value)
+            movies.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        }
+        persistSnapshot()
+        if let posterURL = details.posterURL {
+            Task {
+                guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: posterURL),
+                      let image = UIImage(data: data) else { return }
+                VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-manual|\(entry.id)")
+                VideoThumbnailLoader.cacheImage(image, forStableKey: "unified|\(entry.id)")
+            }
+        }
+    }
+
+    private static func removingUndersizedFiles(from entries: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
+        entries.compactMap { original in
+            var entry = original
+            entry.episodes.removeAll { !$0.source.isVisibleByFileSize }
+            guard entry.source.isVisibleByFileSize || !entry.episodes.isEmpty else { return nil }
+            return entry
+        }
+    }
+
+    func applyManualAdult(_ scene: ThePornDBScene, image: UIImage, to entry: UnifiedMediaEntry) {
+        guard var value = takeEntry(id: entry.id) else { return }
+        value.details = nil
+        value.adultScene = scene
+        value.title = scene.title ?? value.title
+        value.adultLookupCompleted = true
+        value.manualMetadataProvider = "theporndb"
+        value.episodes = []
+        unknown.append(value)
+        unknown.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        persistSnapshot()
+        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-manual|\(entry.id)")
+        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-adult|\(entry.id)")
+        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified|\(entry.id)")
+    }
+
+    func applyManualCover(_ image: UIImage, to entry: UnifiedMediaEntry) {
+        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-manual|\(entry.id)")
+        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified|\(entry.id)")
+    }
+
+    private func takeEntry(id: String) -> UnifiedMediaEntry? {
+        if let index = movies.firstIndex(where: { $0.id == id }) { return movies.remove(at: index) }
+        if let index = shows.firstIndex(where: { $0.id == id }) { return shows.remove(at: index) }
+        if let index = unknown.firstIndex(where: { $0.id == id }) { return unknown.remove(at: index) }
+        return nil
+    }
+
     private func startAdultEnrichmentIfNeeded() {
         guard ThePornDBSettings.hasValidAPIKey,
               unknown.contains(where: { $0.adultLookupCompleted != true }),
@@ -444,6 +521,16 @@ private final class UnifiedContentModel: ObservableObject {
     }
 }
 
+private enum UnifiedManualSearchKind {
+    case tmdb, adult, cover
+}
+
+private struct UnifiedManualSearchRequest: Identifiable {
+    let id = UUID()
+    let entry: UnifiedMediaEntry
+    let kind: UnifiedManualSearchKind
+}
+
 struct UnifiedContentView: View {
     @ObservedObject var vm: AppViewModel
     var isActive: Bool
@@ -451,6 +538,7 @@ struct UnifiedContentView: View {
     @State private var section: UnifiedMediaSection = .movies
     @State private var selected: UnifiedMediaEntry?
     @State private var showPlayer = false
+    @State private var manualSearch: UnifiedManualSearchRequest?
     @Namespace private var selectionAnimation
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
@@ -484,6 +572,9 @@ struct UnifiedContentView: View {
             .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
+            .sheet(item: $manualSearch) { request in
+                manualSearchSheet(request)
+            }
         }
     }
 
@@ -522,21 +613,58 @@ struct UnifiedContentView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
-                    if section == .unknown {
-                        UnifiedUnknownPosterArtwork(entry: entry)
-                    } else if let url = entry.posterURL {
-                        KFImage(url)
-                            .placeholder { ProgressView().tint(AppPalette.accent) }
-                            .cacheOriginalImage()
-                            .fade(duration: 0.12)
-                            .resizable()
-                            .scaledToFill()
-                    } else { Image(systemName: section == .shows ? "tv.fill" : "film.fill").font(.title).foregroundStyle(AppPalette.gradient) }
+                    UnifiedPosterArtwork(entry: entry, section: section)
                 }.aspectRatio(2/3, contentMode: .fit).clipShape(RoundedRectangle(cornerRadius: 14))
                 Text(entry.title).font(.caption.weight(.semibold)).lineLimit(2).multilineTextAlignment(.leading)
                 if !entry.episodes.isEmpty { Text("\(entry.episodes.count) episodes").font(.caption2).foregroundStyle(AppPalette.accent) }
             }
-        }.buttonStyle(.plain)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                manualSearch = UnifiedManualSearchRequest(entry: entry, kind: .tmdb)
+            } label: {
+                Label("Search Movie / TV Metadata", systemImage: "film.stack")
+            }
+            Button {
+                manualSearch = UnifiedManualSearchRequest(entry: entry, kind: .adult)
+            } label: {
+                Label("Search Adult Metadata", systemImage: "person.crop.rectangle.stack")
+            }
+            Button {
+                manualSearch = UnifiedManualSearchRequest(entry: entry, kind: .cover)
+            } label: {
+                Label("Search Cover Only", systemImage: "photo.on.rectangle.angled")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func manualSearchSheet(_ request: UnifiedManualSearchRequest) -> some View {
+        switch request.kind {
+        case .tmdb:
+            UnifiedTMDBManualSearchView(initialQuery: VideoTitleFormatter.title(from: request.entry.title)) { details in
+                model.applyManualTMDB(details, to: request.entry)
+                manualSearch = nil
+            }
+        case .adult:
+            ThePornDBSearchView(
+                initialQuery: VideoTitleFormatter.title(from: request.entry.title),
+                initialMode: .scenes,
+                onPickScene: { scene, image in
+                    model.applyManualAdult(scene, image: image, to: request.entry)
+                    manualSearch = nil
+                }
+            ) { image in
+                model.applyManualCover(image, to: request.entry)
+                manualSearch = nil
+            }
+        case .cover:
+            YandexImageSearchView(initialQuery: VideoTitleFormatter.title(from: request.entry.title)) { image in
+                model.applyManualCover(image, to: request.entry)
+                manualSearch = nil
+            }
+        }
     }
 
     private var emptyState: some View {
@@ -584,19 +712,19 @@ struct UnifiedContentView: View {
 /// Unknown posters can arrive either from the background ThePornDB refresh or
 /// from VideoDetailsView. This view observes the shared stable-poster event so
 /// the visible grid updates immediately without requiring a tab/page reload.
-private struct UnifiedUnknownPosterArtwork: View {
+private struct UnifiedPosterArtwork: View {
     let entry: UnifiedMediaEntry
+    let section: UnifiedMediaSection
     @State private var cachedImage: UIImage?
 
     private var cacheKey: String { "unified|\(entry.id)" }
     private var adultCacheKey: String { "unified-adult|\(entry.id)" }
+    private var manualCacheKey: String { "unified-manual|\(entry.id)" }
 
-    init(entry: UnifiedMediaEntry) {
+    init(entry: UnifiedMediaEntry, section: UnifiedMediaSection) {
         self.entry = entry
-        _cachedImage = State(initialValue:
-            VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(entry.id)")
-                ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)")
-        )
+        self.section = section
+        _cachedImage = State(initialValue: nil)
     }
 
     var body: some View {
@@ -618,19 +746,34 @@ private struct UnifiedUnknownPosterArtwork: View {
                     .foregroundStyle(AppPalette.gradient)
             }
         }
-        .task(id: adultCacheKey) {
-            await loadVisiblePosterIfNeeded()
+        .task(id: "\(section.rawValue)|\(manualCacheKey)") {
+            if section == .unknown { await loadVisiblePosterIfNeeded() }
+            else {
+                cachedImage = await cachedPoster(includeAdult: false)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let updatedKey = notification.object as? String,
-                  updatedKey == adultCacheKey || updatedKey == cacheKey else { return }
-            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: adultCacheKey)
-                ?? VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+                  updatedKey == manualCacheKey || updatedKey == adultCacheKey || updatedKey == cacheKey else { return }
+            Task {
+                cachedImage = await cachedPoster(includeAdult: section == .unknown)
+            }
         }
     }
 
+    private func cachedPoster(includeAdult: Bool) async -> UIImage? {
+        if let manual = await VideoThumbnailLoader.cachedImageAsync(forStableKey: manualCacheKey) {
+            return manual
+        }
+        if includeAdult,
+           let adult = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultCacheKey) {
+            return adult
+        }
+        return await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
+    }
+
     private func loadVisiblePosterIfNeeded() async {
-        if let existing = VideoThumbnailLoader.cachedImage(forStableKey: adultCacheKey) {
+        if let existing = await cachedPoster(includeAdult: true) {
             cachedImage = existing
             return
         }
@@ -638,7 +781,7 @@ private struct UnifiedUnknownPosterArtwork: View {
         let query = VideoTitleFormatter.title(from: entry.title)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, ThePornDBSettings.hasValidAPIKey else {
-            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+            cachedImage = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
             return
         }
 
@@ -646,7 +789,7 @@ private struct UnifiedUnknownPosterArtwork: View {
         // shared gate bounds all screens together and the second cache check
         // avoids work if the model refresh completed while this card waited.
         await ThumbnailLoadGate.shared.acquire()
-        if let existing = VideoThumbnailLoader.cachedImage(forStableKey: adultCacheKey) {
+        if let existing = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultCacheKey) {
             await ThumbnailLoadGate.shared.release()
             cachedImage = existing
             return
@@ -656,15 +799,138 @@ private struct UnifiedUnknownPosterArtwork: View {
 
         guard !Task.isCancelled else { return }
         if let cover {
-            VideoThumbnailLoader.cacheImage(cover, forStableKey: adultCacheKey)
-            VideoThumbnailLoader.cacheImage(cover, forStableKey: cacheKey)
-            VideoThumbnailLoader.cacheImage(
+            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: adultCacheKey)
+            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: cacheKey)
+            VideoThumbnailLoader.cacheImageInBackground(
                 cover,
                 forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: entry.title)
             )
             cachedImage = cover
         } else {
-            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+            cachedImage = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
+        }
+    }
+}
+
+private struct UnifiedTMDBManualSearchView: View {
+    let onApply: (TMDBTitleDetails) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var query: String
+    @State private var mediaType: String? = nil
+    @State private var result: TMDBTitleDetails?
+    @State private var isSearching = false
+    @State private var message: String?
+    @State private var searchTask: Task<Void, Never>?
+
+    init(initialQuery: String, onApply: @escaping (TMDBTitleDetails) -> Void) {
+        self.onApply = onApply
+        _query = State(initialValue: initialQuery)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 14) {
+                Picker("Type", selection: $mediaType) {
+                    Text("Any").tag(nil as String?)
+                    Text("Movie").tag("movie" as String?)
+                    Text("TV Show").tag("tv" as String?)
+                }
+                .pickerStyle(.segmented)
+
+                HStack(spacing: 10) {
+                    TextField("Movie or TV title", text: $query)
+                        .textInputAutocapitalization(.words)
+                        .submitLabel(.search)
+                        .onSubmit(search)
+                        .padding(.horizontal, 13)
+                        .frame(height: 44)
+                        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+                    Button(action: search) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 15, weight: .bold))
+                            .frame(width: 44, height: 44)
+                            .foregroundStyle(.white)
+                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if isSearching {
+                    ProgressView("Searching TMDB…")
+                        .tint(AppPalette.accent)
+                        .frame(maxHeight: .infinity)
+                } else if let result {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 13) {
+                            HStack(alignment: .top, spacing: 13) {
+                                KFImage(result.posterURL)
+                                    .placeholder { Color.white.opacity(0.06) }
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 105, height: 157)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Text(result.title).font(.headline)
+                                    Text(result.isSeries ? "TV Show" : "Movie")
+                                        .font(.caption.bold()).foregroundStyle(AppPalette.accent)
+                                    if let date = result.releaseDate { Text(date).font(.caption).foregroundStyle(.secondary) }
+                                    if result.voteAverage > 0 {
+                                        Label(String(format: "%.1f", result.voteAverage), systemImage: "star.fill")
+                                            .font(.caption.bold()).foregroundStyle(.yellow)
+                                    }
+                                }
+                            }
+                            if !result.overview.isEmpty {
+                                Text(result.overview).font(.subheadline).foregroundStyle(.white.opacity(0.75))
+                            }
+                            Button {
+                                onApply(result)
+                                dismiss()
+                            } label: {
+                                Label("Apply Metadata", systemImage: "checkmark.circle.fill")
+                                    .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 13)
+                                    .foregroundStyle(.white).background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 13))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 42, weight: .medium))
+                            .foregroundStyle(AppPalette.gradient)
+                        Text("Search TMDB").font(.title3.bold())
+                        Text(message ?? "Enter the correct title, then apply the matching metadata.")
+                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .padding(16)
+            .background(AppTheme.bg.ignoresSafeArea())
+            .navigationTitle("Manual Metadata")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+            }
+            .onDisappear { searchTask?.cancel() }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func search() {
+        let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        searchTask?.cancel()
+        isSearching = true
+        result = nil
+        message = nil
+        searchTask = Task {
+            let found = await TMDBService.shared.detailsOriginalFirst(for: value, preferredMediaType: mediaType)
+            guard !Task.isCancelled else { return }
+            result = found
+            message = found == nil ? "No matching result was found." : nil
+            isSearching = false
         }
     }
 }
@@ -715,18 +981,47 @@ private struct UnifiedMediaDetailsHost: View {
         if let episode = selectedEpisode {
             return VideoDetailsItem(
                 id: episode.id, title: episode.title, url: episode.url,
+                httpHeaders: playbackHeaders(for: episode.source),
                 // Every episode shares the series artwork/metadata identity. The
                 // selected file and S/E label change, but story/rating/cast do not.
                 posterCacheKey: "unified|\(entry.id)",
                 fileExtension: (episode.title as NSString).pathExtension.uppercased(),
-                source: entry.sourceLabel, relatedEpisodes: relatedEpisodes
+                source: entry.sourceLabel, relatedEpisodes: relatedEpisodes,
+                suppliedTMDBDetails: entry.details,
+                suppliedAdultMetadata: suppliedAdultMetadata,
+                manualMetadataProvider: entry.manualMetadataProvider
             )
         }
         return VideoDetailsItem(
             id: entry.id, title: entry.title, url: entry.streamURL,
+            httpHeaders: playbackHeaders(for: entry.source),
             posterCacheKey: "unified|\(entry.id)",
             fileExtension: (entry.rawTitle as NSString).pathExtension.uppercased(),
-            source: entry.sourceLabel, relatedEpisodes: relatedEpisodes
+            source: entry.sourceLabel, relatedEpisodes: relatedEpisodes,
+            suppliedTMDBDetails: entry.details,
+            suppliedAdultMetadata: suppliedAdultMetadata,
+            manualMetadataProvider: entry.manualMetadataProvider
+        )
+    }
+
+    private func playbackHeaders(for source: UnifiedSource) -> [String: String] {
+        guard case let .webDAV(server, _) = source else { return [:] }
+        return WebDAVClient(server: server).streamHeaders()
+    }
+
+    private var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? {
+        guard let scene = entry.adultScene else { return nil }
+        let cover = VideoThumbnailLoader.cachedImage(forStableKey: "unified-manual|\(entry.id)")
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(entry.id)")
+            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)")
+        return VideoThumbnailLoader.ThePornDBMetadata(
+            source: .scene,
+            title: scene.title,
+            performers: (scene.performers ?? []).compactMap(\.name),
+            tags: scene.tagNames,
+            date: scene.date,
+            siteName: scene.site,
+            coverImage: cover
         )
     }
 

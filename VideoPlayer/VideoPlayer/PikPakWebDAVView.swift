@@ -28,8 +28,6 @@ struct PikPakWebDAVView: View {
 
     // 2 per row — matches the Offcloud grid exactly.
     private let columns = (0..<3).map { _ in GridItem(.flexible(), spacing: 10, alignment: .top) }
-    /// Videos smaller than this are hidden in the PikPak section.
-    private static let minimumVideoSizeBytes: Int64 = 500 * 1024 * 1024 // 500 MB
     private let mainFolderNames: Set<String> = [
         "my pack", "my tiktok", "top", "korean movies", "english series",
         "my upload", "anime", "english movies", "elza", "korean drama"
@@ -556,21 +554,14 @@ struct PikPakWebDAVView: View {
         folderCoverVersion &+= 1
     }
 
-    /// Folders always allowed; any other file only if size ≥ 500 MB.
+    /// Folders remain visible; undersized files never enter a layout.
     private func meetsMinimumVideoSize(_ file: WebDAVFile) -> Bool {
         if file.isDirectory { return true }
-        guard let size = file.size else { return false } // unknown size → hide
-        return size >= Self.minimumVideoSizeBytes
+        return VideoLibraryVisibility.allows(sizeBytes: file.size)
     }
 
     private func visibleFiles(_ source: [WebDAVFile], at current: PikPakLocation) -> [WebDAVFile] {
-        let normalizedFolder = current.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let seriesFolder = !current.path.isEmpty && !mainFolderNames.contains(normalizedFolder)
-            && source.filter { !$0.isDirectory && VideoTitleFormatter.episodeComponents(from: $0.name) != nil }.count >= 2
-        let sized = source.filter {
-            if seriesFolder, !$0.isDirectory, VideoTitleFormatter.episodeComponents(from: $0.name) != nil { return true }
-            return meetsMinimumVideoSize($0)
-        }
+        let sized = source.filter(meetsMinimumVideoSize)
         guard current.path.isEmpty else { return sized }
         return sized.filter {
             !$0.isDirectory || mainFolderNames.contains($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
@@ -782,8 +773,7 @@ private struct PikPakFilePoster: View {
         self.onSearchThePornDB = onSearchThePornDB
         self.onRemoveCover = onRemoveCover
         self.action = action
-        let key = server.id.uuidString + "|" + (file.isDirectory ? "folder" : "file") + "|" + file.path + "|" + file.name
-        _poster = State(initialValue: PikPakFolderCoverStore.cachedImage(for: key) ?? VideoThumbnailLoader.cachedImage(forStableKey: key))
+        _poster = State(initialValue: nil)
     }
     private var stableCacheKey: String {
         server.id.uuidString + "|" + (file.isDirectory ? "folder" : "file") + "|" + file.path + "|" + file.name
@@ -913,17 +903,20 @@ private struct PikPakFilePoster: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let key = notification.object as? String,
-                  key == stableCacheKey,
-                  let cached = VideoThumbnailLoader.cachedImage(forStableKey: key) else { return }
-            poster = cached
-            isLoadingPoster = false
+                  key == stableCacheKey else { return }
+            Task {
+                poster = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key)
+                isLoadingPoster = false
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.posterPrefetchDidFinishNotification)) { notification in
             guard let key = notification.object as? String, key == stableCacheKey else { return }
-            if let cached = VideoThumbnailLoader.cachedImage(forStableKey: key) {
-                poster = cached
+            Task {
+                if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
+                    poster = cached
+                }
+                isLoadingPoster = false
             }
-            isLoadingPoster = false
         }
     }
 

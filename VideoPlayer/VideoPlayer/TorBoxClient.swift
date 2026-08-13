@@ -18,6 +18,7 @@ struct TorBoxFile: Identifiable, Codable, Hashable {
     }
 
     var isVideo: Bool {
+        guard VideoLibraryVisibility.allows(sizeBytes: size) else { return false }
         if mimetype?.lowercased().hasPrefix("video/") == true { return true }
         let ext = (displayName as NSString).pathExtension.lowercased()
         return ["mp4", "mkv", "mov", "m4v", "avi", "webm", "wmv", "flv", "ts", "m2ts", "mts"].contains(ext)

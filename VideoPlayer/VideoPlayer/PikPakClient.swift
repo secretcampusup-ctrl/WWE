@@ -32,6 +32,7 @@ struct PikPakFileItem: Identifiable, Hashable {
 
     var isVideo: Bool {
         if isFolder { return false }
+        guard VideoLibraryVisibility.allows(sizeBytes: size) else { return false }
         if let mime = mimeType?.lowercased(), mime.hasPrefix("video/") { return true }
         return LinkResolver.isVideoFileName(name)
     }

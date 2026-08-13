@@ -1,6 +1,17 @@
 import Foundation
 import SwiftUI
 
+/// Shared by every provider and library screen so sample-sized files cannot
+/// slip into a different section through a separate filtering path.
+enum VideoLibraryVisibility {
+    static let minimumFileSizeBytes: Int64 = 400 * 1_024 * 1_024
+
+    static func allows(sizeBytes: Int64?) -> Bool {
+        guard let sizeBytes else { return true }
+        return sizeBytes >= minimumFileSizeBytes
+    }
+}
+
 enum VideoTitleFormatter {
     private static let seasonEpisodePattern = #"(?i)(?<![A-Z0-9])S(\d{1,3})[\s._-]*E(\d{1,3})(?!\d)"#
 
@@ -206,6 +217,10 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
     var source: LinkSource = .direct
     /// PikPak file id when relevant
     var pikpakFileId: String?
+    /// Stable TorBox identifiers. The actual CDN URL is intentionally resolved
+    /// only when Play is pressed because TorBox download links expire.
+    var torBoxTorrentId: Int?
+    var torBoxFileId: Int?
     /// Remote poster URL (PikPak thumbnail)
     var remotePosterURL: String?
     /// Resume position in seconds (exact spot user left off)
@@ -221,17 +236,22 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
     /// Stable identity used when a provider rotates its temporary stream URL.
     var favoriteIdentity: String?
 
+    var isVisibleInLibrary: Bool {
+        VideoLibraryVisibility.allows(sizeBytes: fileSizeBytes)
+    }
+
     enum LinkSource: String, Codable, Hashable {
         case direct
         case hls
         case pikpak
         case webdav
         case offcloud
+        case torbox
     }
 
     enum CodingKeys: String, CodingKey {
         case id, urlString, resolvedStreamURL, title, dateAdded, lastPlayed
-        case thumbnailFileName, source, pikpakFileId, remotePosterURL
+        case thumbnailFileName, source, pikpakFileId, torBoxTorrentId, torBoxFileId, remotePosterURL
         case resumePositionSeconds, durationSeconds, videoWidth, videoHeight, fileSizeBytes, isFavorite, favoriteIdentity
     }
 
@@ -245,6 +265,8 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
         thumbnailFileName: String? = nil,
         source: LinkSource = .direct,
         pikpakFileId: String? = nil,
+        torBoxTorrentId: Int? = nil,
+        torBoxFileId: Int? = nil,
         remotePosterURL: String? = nil,
         resumePositionSeconds: Double? = nil,
         durationSeconds: Double? = nil,
@@ -263,6 +285,8 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
         self.thumbnailFileName = thumbnailFileName
         self.source = source
         self.pikpakFileId = pikpakFileId
+        self.torBoxTorrentId = torBoxTorrentId
+        self.torBoxFileId = torBoxFileId
         self.remotePosterURL = remotePosterURL
         self.resumePositionSeconds = resumePositionSeconds
         self.durationSeconds = durationSeconds
@@ -284,6 +308,8 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
         thumbnailFileName = try c.decodeIfPresent(String.self, forKey: .thumbnailFileName)
         source = try c.decodeIfPresent(LinkSource.self, forKey: .source) ?? .direct
         pikpakFileId = try c.decodeIfPresent(String.self, forKey: .pikpakFileId)
+        torBoxTorrentId = try c.decodeIfPresent(Int.self, forKey: .torBoxTorrentId)
+        torBoxFileId = try c.decodeIfPresent(Int.self, forKey: .torBoxFileId)
         remotePosterURL = try c.decodeIfPresent(String.self, forKey: .remotePosterURL)
         resumePositionSeconds = try c.decodeIfPresent(Double.self, forKey: .resumePositionSeconds)
         durationSeconds = try c.decodeIfPresent(Double.self, forKey: .durationSeconds)
@@ -306,6 +332,7 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
         case .pikpak: return "PikPak"
         case .webdav: return "WebDAV"
         case .offcloud: return "Offcloud"
+        case .torbox: return "TorBox"
         case .hls: return originalURL?.host ?? "HLS"
         case .direct: return originalURL?.host ?? "Stream"
         }
@@ -313,6 +340,7 @@ struct SavedVideoLink: Identifiable, Codable, Hashable {
 
     var fileExtension: String {
         if source == .pikpak { return "PIKPAK" }
+        if source == .torbox { return "TORBOX" }
         if source == .hls { return "HLS" }
         let ext = (originalURL?.pathExtension ?? url?.pathExtension ?? "").uppercased()
         return ext.isEmpty ? "STREAM" : ext
@@ -480,6 +508,7 @@ struct WebDAVFile: Identifiable, Codable {
     var lastModified: Date?
 
     var isVideo: Bool {
+        guard VideoLibraryVisibility.allows(sizeBytes: size) else { return false }
         if let contentType, contentType.lowercased().hasPrefix("video/") { return true }
         return LinkResolver.isVideoFileName(name)
             || LinkResolver.streamExtensions.contains((name as NSString).pathExtension.lowercased())

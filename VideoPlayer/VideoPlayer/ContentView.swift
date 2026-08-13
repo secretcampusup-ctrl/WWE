@@ -430,12 +430,12 @@ struct ContentView: View {
                     .font(.system(size: 18, weight: .bold))
                     .foregroundColor(.white)
                 Spacer()
-                Text("\(vm.savedLinks.count) saved")
+                Text("\(vm.visibleSavedLinks.count) saved")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.white.opacity(0.4))
             }
 
-            if vm.savedLinks.isEmpty {
+            if vm.visibleSavedLinks.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "rectangle.stack.badge.play")
                         .font(.system(size: 40))
@@ -452,7 +452,7 @@ struct ContentView: View {
                 .padding(.vertical, 36)
             } else {
                 LazyVGrid(columns: posterColumns, spacing: 18) {
-                    ForEach(vm.savedLinks) { link in
+                    ForEach(vm.visibleSavedLinks) { link in
                         MoviePosterCard(
                             link: link,
                             width: posterWidth,
@@ -829,6 +829,7 @@ struct MoviePosterCard: View {
         case .pikpak: return .blue
         case .webdav: return .orange
         case .offcloud: return .cyan
+        case .torbox: return .indigo
         case .hls: return .purple
         case .direct: return .black
         }

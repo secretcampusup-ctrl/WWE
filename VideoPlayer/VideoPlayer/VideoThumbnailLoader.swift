@@ -456,23 +456,9 @@ enum VideoThumbnailLoader {
     /// Returns a cached UIImage from memory (thread-safe, no MainActor needed).
     static func cachedImage(for remote: URL) -> UIImage? {
         let key = cacheKey(for: remote)
-        let shortFileID = String(key.prefix(8))
         let result = memoryCache.object(forKey: key as NSString)
-        if result != nil {
-            logDiagnostic("[PikPakThumbnail] file=\(shortFileID) stage=memoryCache result=hit", level: .debug, fileID: shortFileID)
-            print("[PikPakThumbnail] file=\(shortFileID) stage=memoryCache result=hit")
-        } else {
-            logDiagnostic("[PikPakThumbnail] file=\(shortFileID) stage=memoryCache result=miss", level: .debug, fileID: shortFileID)
-            print("[PikPakThumbnail] file=\(shortFileID) stage=memoryCache result=miss")
-            // Check disk cache if memory miss (PikPak only)
-            if let diskImage = diskCachedImage(forKey: key) {
-                logDiagnostic("[PikPakThumbnail] file=\(shortFileID) stage=diskCache result=hit", level: .debug, fileID: shortFileID)
-                print("[PikPakThumbnail] file=\(shortFileID) stage=diskCache result=hit")
-                return diskImage
-            } else {
-                logDiagnostic("[PikPakThumbnail] file=\(shortFileID) stage=diskCache result=miss", level: .debug, fileID: shortFileID)
-                print("[PikPakThumbnail] file=\(shortFileID) stage=diskCache result=miss")
-            }
+        if result == nil, let diskImage = diskCachedImage(forKey: key) {
+            return diskImage
         }
         return result
     }
@@ -484,6 +470,13 @@ enum VideoThumbnailLoader {
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: cachedImage(forStableKey: key))
             }
+        }
+    }
+
+    /// Resize/compress/write without occupying the scrolling/UI executor.
+    static func cacheImageInBackground(_ image: UIImage, forStableKey key: String) {
+        DispatchQueue.global(qos: .utility).async {
+            cacheImage(image, forStableKey: key)
         }
     }
 
@@ -1221,6 +1214,14 @@ enum VideoThumbnailLoader {
         return UIImage(data: data)
     }
 
+    static func loadCustomPosterAsync(fileName: String) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: loadCustomPoster(fileName: fileName))
+            }
+        }
+    }
+
     static func deleteCustomPoster(fileName: String) {
         let url = customDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: url)
@@ -1509,16 +1510,8 @@ struct PosterThumbnailView: View {
     }
 
     private func load(targetPointSize: CGSize) async {
-        // Generate short file ID for logging
         let targetURL = remotePosterURL ?? url
-        let fileID = targetURL.map { 
-            let digest = SHA256.hash(data: Data($0.absoluteString.utf8))
-            return String(digest.prefix(8).map { String(format: "%02x", $0) }.joined())
-        } ?? "unknown"
-        
-        // Extract host safely for logging
-        let safeHost = targetURL?.host ?? "none"
-        
+
         // Avoid logging every cell while scrolling — was a measurable main-thread cost.
         // Keep the previous image visible while refreshing; never blank a cached thumbnail.
         isLoading = false
@@ -1537,17 +1530,17 @@ struct PosterThumbnailView: View {
         // 1) A user-picked Library/Recent cover always overrides an
         // automatically generated stable thumbnail.
         if let customFileName,
-           let custom = VideoThumbnailLoader.loadCustomPoster(fileName: customFileName) {
+           let custom = await VideoThumbnailLoader.loadCustomPosterAsync(fileName: customFileName) {
             image = custom
             return
         }
 
         // Every screen resolves the same title-based key before its provider-specific key.
         let canonicalKey = VideoThumbnailLoader.canonicalPosterCacheKey(for: title)
-        if let canonical = VideoThumbnailLoader.cachedImage(forStableKey: canonicalKey) {
+        if let canonical = await VideoThumbnailLoader.cachedImageAsync(forStableKey: canonicalKey) {
             image = canonical
             if let stableCacheKey {
-                VideoThumbnailLoader.cacheImage(canonical, forStableKey: stableCacheKey)
+                VideoThumbnailLoader.cacheImageInBackground(canonical, forStableKey: stableCacheKey)
             }
             return
         }
@@ -1565,9 +1558,9 @@ struct PosterThumbnailView: View {
             await ThumbnailLoadGate.shared.release()
             if let tmdbPoster {
                 image = tmdbPoster
-                VideoThumbnailLoader.cacheImage(tmdbPoster, forStableKey: canonicalKey)
+                VideoThumbnailLoader.cacheImageInBackground(tmdbPoster, forStableKey: canonicalKey)
                 if let resolvedStableCacheKey {
-                    VideoThumbnailLoader.cacheImage(tmdbPoster, forStableKey: resolvedStableCacheKey)
+                    VideoThumbnailLoader.cacheImageInBackground(tmdbPoster, forStableKey: resolvedStableCacheKey)
                 }
                 return
             }
@@ -1575,17 +1568,15 @@ struct PosterThumbnailView: View {
 
         // Provider-specific artwork is the fallback after the shared TMDB poster.
         if let stableCacheKey,
-           let stable = VideoThumbnailLoader.cachedImage(forStableKey: stableCacheKey) {
+           let stable = await VideoThumbnailLoader.cachedImageAsync(forStableKey: stableCacheKey) {
             image = stable
-            VideoThumbnailLoader.cacheImage(stable, forStableKey: canonicalKey)
+            VideoThumbnailLoader.cacheImageInBackground(stable, forStableKey: canonicalKey)
             return
         }
 
         // 3) Remote poster (e.g. PikPak thumbnail_link) — this is a genuine automatic
         // network fetch just because the cell appeared, so it's gated like the rest.
         if let remote = remotePosterURL, VideoThumbnailLoader.isAutomaticDownloadEnabled {
-            VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=remotePosterCheck", level: .debug, fileID: fileID)
-            print("[PikPakThumbnail] file=\(fileID) stage=remotePosterCheck")
             isLoading = true
             defer { isLoading = false }
 
@@ -1600,25 +1591,16 @@ struct PosterThumbnailView: View {
 
             if let downloaded {
                 image = downloaded
-                VideoThumbnailLoader.cacheImage(downloaded, forStableKey: canonicalKey)
-                VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=remotePoster result=success", level: .info, fileID: fileID)
-                print("[PikPakThumbnail] file=\(fileID) stage=remotePoster result=success")
+                VideoThumbnailLoader.cacheImageInBackground(downloaded, forStableKey: canonicalKey)
                 return
-            } else {
-                VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=remotePoster result=failure fallback_to_video", level: .warning, fileID: fileID)
-                print("[PikPakThumbnail] file=\(fileID) stage=remotePoster result=failure fallback_to_video")
             }
         }
 
         // 3) Fallback: extract frame from video stream
         guard let videoURL = url else {
-            VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=fallback result=no_video_url", level: .warning, fileID: fileID)
-            print("[PikPakThumbnail] file=\(fileID) stage=fallback result=no_video_url")
             return
         }
 
-        VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=videoFrameFallback", level: .debug, fileID: fileID)
-        print("[PikPakThumbnail] file=\(fileID) stage=videoFrameFallback")
         isLoading = true
         defer { isLoading = false }
 
@@ -1632,13 +1614,9 @@ struct PosterThumbnailView: View {
 
         if let frame {
             image = frame
-            VideoThumbnailLoader.cacheImage(frame, forStableKey: canonicalKey)
-            VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=videoFrame result=success", level: .info, fileID: fileID)
-            print("[PikPakThumbnail] file=\(fileID) stage=videoFrame result=success")
+            VideoThumbnailLoader.cacheImageInBackground(frame, forStableKey: canonicalKey)
             return
         }
-        VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=videoFrame result=failure", level: .error, fileID: fileID)
-        print("[PikPakThumbnail] file=\(fileID) stage=videoFrame result=failure")
 
         // 4) Last resort, and the one automatic network call that's always allowed:
         // look the (filtered) title up on ThePornDB — scenes first, performers next.
@@ -1655,11 +1633,10 @@ struct PosterThumbnailView: View {
         if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query),
            let cover = metadata.coverImage {
             image = cover
-            VideoThumbnailLoader.cacheImage(cover, forStableKey: canonicalKey)
+            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: canonicalKey)
             if let resolvedStableCacheKey {
-                VideoThumbnailLoader.cacheImage(cover, forStableKey: resolvedStableCacheKey)
+                VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: resolvedStableCacheKey)
             }
-            VideoThumbnailLoader.logDiagnostic("[PikPakThumbnail] file=\(fileID) stage=thePornDBFallback result=success", level: .info, fileID: fileID)
         }
     }
 }

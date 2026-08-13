@@ -30,6 +30,9 @@ struct VideoDetailsItem: Identifiable {
     var source: String = "Stream"
     var resumePositionSeconds: Double? = nil
     var relatedEpisodes: [VideoEpisodeItem] = []
+    var suppliedTMDBDetails: TMDBTitleDetails? = nil
+    var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? = nil
+    var manualMetadataProvider: String? = nil
 
     var fileSizeLabel: String {
         guard let fileSizeBytes, fileSizeBytes > 0 else { return "Unknown" }
@@ -321,12 +324,14 @@ struct VideoDetailsView: View {
         .task(id: metadataLoadingIdentity) {
             let requestedItemID = item.id
             let metadataKey = stableMetadataCacheKey
-            tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
+            tmdbDetails = item.manualMetadataProvider == "theporndb"
+                ? nil
+                : (item.suppliedTMDBDetails ?? VideoDetailsMemoryCache.details[metadataKey])
             tmdbEpisode = item.relatedEpisodes.isEmpty
                 ? VideoDetailsMemoryCache.episodes[metadataKey]
                 : nil
-            thePornDBMetadata = ThePornDBSettings.isEnabled
-                ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
+            thePornDBMetadata = ThePornDBSettings.isEnabled && item.manualMetadataProvider != "tmdb"
+                ? (item.suppliedAdultMetadata ?? VideoDetailsMemoryCache.adultMetadata[metadataKey])
                 : nil
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
@@ -353,7 +358,7 @@ struct VideoDetailsView: View {
                     if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
                 }
             }
-            if tmdbDetails == nil {
+            if tmdbDetails == nil, item.manualMetadataProvider != "theporndb" {
                 let loadedDetails = await TMDBService.shared.details(for: item.title)
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 tmdbDetails = loadedDetails
@@ -509,6 +514,12 @@ struct VideoDetailsView: View {
 
                         if let details = resolvedMovieDetails, details.director != nil || !details.cast.isEmpty {
                             movieCastAndCrew(details)
+                        }
+
+                        if resolvedMovieDetails == nil,
+                           ThePornDBSettings.isEnabled,
+                           let thePornDBMetadata {
+                            thePornDBInfoCard(thePornDBMetadata)
                         }
 
                         if !vm.recentPlaybackHistory.isEmpty {
@@ -1093,12 +1104,14 @@ struct VideoDetailsView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             let metadataKey = stableMetadataCacheKey
-            tmdbDetails = VideoDetailsMemoryCache.details[metadataKey]
+            tmdbDetails = item.manualMetadataProvider == "theporndb"
+                ? nil
+                : (item.suppliedTMDBDetails ?? VideoDetailsMemoryCache.details[metadataKey])
             tmdbEpisode = item.relatedEpisodes.isEmpty
                 ? VideoDetailsMemoryCache.episodes[metadataKey]
                 : nil
-            thePornDBMetadata = ThePornDBSettings.isEnabled
-                ? VideoDetailsMemoryCache.adultMetadata[metadataKey]
+            thePornDBMetadata = ThePornDBSettings.isEnabled && item.manualMetadataProvider != "tmdb"
+                ? (item.suppliedAdultMetadata ?? VideoDetailsMemoryCache.adultMetadata[metadataKey])
                 : nil
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"

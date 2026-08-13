@@ -34,6 +34,19 @@ struct PlaybackHistoryEntry: Identifiable, Codable, Equatable {
     }
 }
 
+/// Serializes library snapshots away from the main thread. Revisions prevent
+/// an older, slower task from overwriting a newer favorite state.
+private actor SavedLinksPersistenceWriter {
+    private var latestRevision = 0
+
+    func persist(_ links: [SavedVideoLink], key: String, revision: Int) {
+        guard revision > latestRevision else { return }
+        latestRevision = revision
+        guard let data = try? JSONEncoder().encode(links) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
 @MainActor
 class AppViewModel: ObservableObject {
     @Published var servers: [WebDAVServer] = []
@@ -62,8 +75,12 @@ class AppViewModel: ObservableObject {
     /// Videos explicitly pinned by the user, newest favorites first.
     var favoriteLinks: [SavedVideoLink] {
         savedLinks
-            .filter(\.isFavorite)
+            .filter { $0.isFavorite && $0.isVisibleInLibrary }
             .sorted { $0.dateAdded > $1.dateAdded }
+    }
+
+    var visibleSavedLinks: [SavedVideoLink] {
+        savedLinks.filter(\.isVisibleInLibrary)
     }
 
     /// قوائم التشغيل التي أنشأها المستخدم، الأحدث أولاً
@@ -81,6 +98,8 @@ class AppViewModel: ObservableObject {
     private let playlistsKey = "video_playlists_v1"
     private let pikPakCachePrefix = "pikpak_webdav_cache_v1_"
     private let playbackHistoryKey = "playback_history_v1"
+    private let savedLinksPersistenceWriter = SavedLinksPersistenceWriter()
+    private var savedLinksPersistenceRevision = 0
     private var pendingHistoryItem: (id: String, title: String, source: String, posterCacheKey: String?)?
     private var pendingHistoryProgress: (position: Double, duration: Double)?
 
@@ -192,13 +211,35 @@ class AppViewModel: ObservableObject {
             savedLinks = []
             return
         }
-        savedLinks = decoded.sorted { ($0.lastPlayed ?? $0.dateAdded) > ($1.lastPlayed ?? $1.dateAdded) }
+        var migrated = decoded
+        var didMigrate = false
+        for index in migrated.indices {
+            guard let reference = Self.torBoxReference(from: migrated[index].urlString)
+                    ?? Self.torBoxReference(from: migrated[index].resolvedStreamURL) else { continue }
+            if migrated[index].source != .torbox
+                || migrated[index].torBoxTorrentId != reference.torrentId
+                || migrated[index].torBoxFileId != reference.fileId
+                || migrated[index].resolvedStreamURL != nil {
+                migrated[index].source = .torbox
+                migrated[index].torBoxTorrentId = reference.torrentId
+                migrated[index].torBoxFileId = reference.fileId
+                // This is an internal reference, never a playable stream URL.
+                migrated[index].resolvedStreamURL = nil
+                didMigrate = true
+            }
+        }
+        savedLinks = migrated.sorted { ($0.lastPlayed ?? $0.dateAdded) > ($1.lastPlayed ?? $1.dateAdded) }
+        if didMigrate { persistSavedLinksImmediately() }
     }
 
     func persistSavedLinksImmediately() {
-        if let data = try? JSONEncoder().encode(savedLinks) {
-            UserDefaults.standard.set(data, forKey: linksKey)
-            UserDefaults.standard.synchronize()
+        savedLinksPersistenceRevision += 1
+        let revision = savedLinksPersistenceRevision
+        let snapshot = savedLinks
+        let key = linksKey
+        let writer = savedLinksPersistenceWriter
+        Task(priority: .utility) {
+            await writer.persist(snapshot, key: key, revision: revision)
         }
     }
 
@@ -209,29 +250,29 @@ class AppViewModel: ObservableObject {
     @discardableResult
     func toggleFavorite(_ item: VideoDetailsItem) -> Bool {
         if let index = savedLinks.firstIndex(where: { matches($0, item: item) }) {
-            savedLinks[index].isFavorite.toggle()
-            savedLinks[index].favoriteIdentity = item.id
-            let result = savedLinks[index].isFavorite
-            if result { cachePoster(for: item, savedID: savedLinks[index].id) }
+            var updated = savedLinks[index]
+            updated.isFavorite.toggle()
+            updated.favoriteIdentity = item.id
+            upgradeProviderReference(&updated, from: item)
+            savedLinks[index] = updated
+            let result = updated.isFavorite
             savedLinks = savedLinks
             persistSavedLinksImmediately()
+            if result { cachePoster(for: item, savedID: updated.id) }
             return result
         }
 
-        let source: SavedVideoLink.LinkSource = {
-            let label = item.source.lowercased()
-            if label.contains("offcloud") { return .offcloud }
-            if label.contains("pikpak") || label.contains("webdav") { return .webdav }
-            if item.url.pathExtension.lowercased() == "m3u8" { return .hls }
-            return .direct
-        }()
+        let source = providerSource(for: item)
+        let torBox = Self.torBoxReference(from: item.url.absoluteString)
         let link = SavedVideoLink(
             urlString: item.url.absoluteString,
-            resolvedStreamURL: item.url.absoluteString,
+            resolvedStreamURL: source == .torbox ? nil : item.url.absoluteString,
             title: item.title,
             dateAdded: Date(),
             lastPlayed: nil,
             source: source,
+            torBoxTorrentId: torBox?.torrentId,
+            torBoxFileId: torBox?.fileId,
             durationSeconds: item.durationSeconds,
             videoWidth: item.videoWidth,
             videoHeight: item.videoHeight,
@@ -240,22 +281,32 @@ class AppViewModel: ObservableObject {
             favoriteIdentity: item.id
         )
         savedLinks.insert(link, at: 0)
-        cachePoster(for: item, savedID: link.id)
         persistSavedLinksImmediately()
+        cachePoster(for: item, savedID: link.id)
         return true
     }
 
     private func cachePoster(for item: VideoDetailsItem, savedID: UUID) {
-        let canonicalKey = VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
-        let image = item.customPosterImage
-            ?? item.customPosterFileName.flatMap { VideoThumbnailLoader.loadCustomPoster(fileName: $0) }
-            ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: canonicalKey)
-        guard let image else { return }
-        VideoThumbnailLoader.cacheImage(image, forStableKey: "saved|\(savedID.uuidString)")
-        VideoThumbnailLoader.cacheImage(image, forStableKey: item.id)
-        VideoThumbnailLoader.cacheImage(image, forStableKey: canonicalKey)
-        if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
+        // Poster lookup, resize and WebP disk writes are intentionally detached
+        // from the heart button. The favorite state has already been published
+        // and persisted before this work begins.
+        let title = item.title
+        let itemID = item.id
+        let customImage = item.customPosterImage
+        let customPosterFileName = item.customPosterFileName
+        let posterCacheKey = item.posterCacheKey
+        DispatchQueue.global(qos: .utility).async {
+            let canonicalKey = VideoThumbnailLoader.canonicalPosterCacheKey(for: title)
+            let image = customImage
+                ?? customPosterFileName.flatMap { VideoThumbnailLoader.loadCustomPoster(fileName: $0) }
+                ?? posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
+                ?? VideoThumbnailLoader.cachedImage(forStableKey: canonicalKey)
+            guard let image else { return }
+            VideoThumbnailLoader.cacheImage(image, forStableKey: "saved|\(savedID.uuidString)")
+            VideoThumbnailLoader.cacheImage(image, forStableKey: itemID)
+            VideoThumbnailLoader.cacheImage(image, forStableKey: canonicalKey)
+            if let posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: posterCacheKey) }
+        }
     }
     private func matches(_ link: SavedVideoLink, item: VideoDetailsItem) -> Bool {
         let target = item.url.absoluteString
@@ -273,20 +324,17 @@ class AppViewModel: ObservableObject {
             return existing
         }
 
-        let source: SavedVideoLink.LinkSource = {
-            let label = item.source.lowercased()
-            if label.contains("offcloud") { return .offcloud }
-            if label.contains("pikpak") || label.contains("webdav") { return .webdav }
-            if item.url.pathExtension.lowercased() == "m3u8" { return .hls }
-            return .direct
-        }()
+        let source = providerSource(for: item)
+        let torBox = Self.torBoxReference(from: item.url.absoluteString)
         let link = SavedVideoLink(
             urlString: item.url.absoluteString,
-            resolvedStreamURL: item.url.absoluteString,
+            resolvedStreamURL: source == .torbox ? nil : item.url.absoluteString,
             title: item.title,
             dateAdded: Date(),
             lastPlayed: nil,
             source: source,
+            torBoxTorrentId: torBox?.torrentId,
+            torBoxFileId: torBox?.fileId,
             durationSeconds: item.durationSeconds,
             videoWidth: item.videoWidth,
             videoHeight: item.videoHeight,
@@ -320,7 +368,9 @@ class AppViewModel: ObservableObject {
 
     /// فيديوهات قائمة تشغيل معيّنة، بترتيب الإضافة (الأحدث أولاً)
     func links(in playlist: VideoPlaylist) -> [SavedVideoLink] {
-        playlist.linkIDs.compactMap { id in savedLinks.first(where: { $0.id == id }) }
+        playlist.linkIDs.compactMap { id in
+            savedLinks.first(where: { $0.id == id && $0.isVisibleInLibrary })
+        }
     }
 
     @discardableResult
@@ -547,6 +597,35 @@ class AppViewModel: ObservableObject {
     }
 
     func playSavedLinkAsync(_ link: SavedVideoLink) async {
+        // A TorBox favorite stores only stable torrent/file IDs. Resolve a fresh
+        // signed CDN URL for every play instead of sending `torbox://` to AVPlayer.
+        if link.source == .torbox
+            || Self.torBoxReference(from: link.urlString) != nil
+            || Self.torBoxReference(from: link.resolvedStreamURL) != nil {
+            let reference = torBoxReference(for: link)
+            guard let reference else {
+                errorMessage = "This TorBox favorite is missing its file reference. Remove it and add it again."
+                return
+            }
+            let key = TorBoxKeyStore.load()
+            guard !key.isEmpty else {
+                errorMessage = TorBoxError.missingKey.localizedDescription
+                return
+            }
+            isLoading = true
+            defer { isLoading = false }
+            do {
+                let stream = try await TorBoxClient(apiKey: key).downloadURL(
+                    torrentId: reference.torrentId,
+                    fileId: reference.fileId
+                )
+                startPlayback(url: stream, title: link.title, linkId: link.id)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            return
+        }
+
         // Tokenized PikPak direct download links - preserve fid/sign/userid/etc.
         if LinkResolver.isPikPakDirectDownload(link.urlString)
             || (link.source == .pikpak && LinkResolver.isPikPakDirectDownload(link.resolvedStreamURL ?? "")) {
@@ -600,8 +679,7 @@ class AppViewModel: ObservableObject {
             errorMessage = "No playable URL for this item"
             return
         }
-        if link.source == .webdav,
-           let host = url.host?.lowercased(),
+        if let host = url.host?.lowercased(),
            let server = servers.first(where: { $0.baseURL?.host?.lowercased() == host }) {
             startPlayback(
                 url: url,
@@ -612,6 +690,53 @@ class AppViewModel: ObservableObject {
             return
         }
         startPlayback(url: url, title: link.title, linkId: link.id)
+    }
+
+    private func providerSource(for item: VideoDetailsItem) -> SavedVideoLink.LinkSource {
+        let label = item.source.lowercased()
+        if item.url.scheme?.lowercased() == "torbox" || label.contains("torbox") { return .torbox }
+        if label.contains("offcloud") { return .offcloud }
+        if label.contains("pikpak") || label.contains("webdav") || !item.httpHeaders.isEmpty { return .webdav }
+        if let host = item.url.host?.lowercased(),
+           servers.contains(where: { $0.baseURL?.host?.lowercased() == host }) { return .webdav }
+        if item.url.pathExtension.lowercased() == "m3u8" { return .hls }
+        return .direct
+    }
+
+    private func upgradeProviderReference(_ link: inout SavedVideoLink, from item: VideoDetailsItem) {
+        let source = providerSource(for: item)
+        if let reference = Self.torBoxReference(from: item.url.absoluteString) {
+            link.source = .torbox
+            link.urlString = item.url.absoluteString
+            link.resolvedStreamURL = nil
+            link.torBoxTorrentId = reference.torrentId
+            link.torBoxFileId = reference.fileId
+        } else if link.source == .direct, source != .direct {
+            // Repair old favorites that were saved before provider detection,
+            // without downgrading an existing PikPak/Offcloud source identity.
+            link.source = source
+        }
+    }
+
+    private func torBoxReference(for link: SavedVideoLink) -> (torrentId: Int, fileId: Int)? {
+        if let torrentId = link.torBoxTorrentId, let fileId = link.torBoxFileId {
+            return (torrentId, fileId)
+        }
+        return Self.torBoxReference(from: link.urlString)
+            ?? Self.torBoxReference(from: link.resolvedStreamURL)
+    }
+
+    private static func torBoxReference(from raw: String?) -> (torrentId: Int, fileId: Int)? {
+        guard let raw, let url = URL(string: raw), url.scheme?.lowercased() == "torbox" else { return nil }
+        let parts = ([url.host].compactMap { $0 } + url.pathComponents.filter { $0 != "/" })
+            .map { $0.lowercased() }
+        guard let torrentMarker = parts.firstIndex(of: "torrent"),
+              let fileMarker = parts.firstIndex(of: "file"),
+              parts.indices.contains(torrentMarker + 1),
+              parts.indices.contains(fileMarker + 1),
+              let torrentId = Int(parts[torrentMarker + 1]),
+              let fileId = Int(parts[fileMarker + 1]) else { return nil }
+        return (torrentId, fileId)
     }
 
     private func startPlayback(
@@ -734,10 +859,12 @@ class AppViewModel: ObservableObject {
         let client = WebDAVClient(server: server)
         do {
             let files = try await client.listFiles(at: path)
-            currentFiles = files.sorted { a, b in
-                if a.isDirectory != b.isDirectory { return a.isDirectory }
-                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-            }
+            currentFiles = files
+                .filter { $0.isDirectory || VideoLibraryVisibility.allows(sizeBytes: $0.size) }
+                .sorted { a, b in
+                    if a.isDirectory != b.isDirectory { return a.isDirectory }
+                    return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+                }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -749,7 +876,9 @@ class AppViewModel: ObservableObject {
         guard let data = UserDefaults.standard.data(forKey: pikPakCacheKey(server: server, path: path, flattenFolders: flattenFolders, extractSmallFolders: extractSmallFolders)) else {
             return nil
         }
-        return try? JSONDecoder().decode([WebDAVFile].self, from: data)
+        return (try? JSONDecoder().decode([WebDAVFile].self, from: data))?.filter {
+            $0.isDirectory || VideoLibraryVisibility.allows(sizeBytes: $0.size)
+        }
     }
 
     private func savePikPakFilesToCache(_ files: [WebDAVFile], server: WebDAVServer, path: String, flattenFolders: Bool, extractSmallFolders: Bool) {
@@ -778,11 +907,13 @@ class AppViewModel: ObservableObject {
             } else {
                 files = try await client.listFiles(at: path, forceRefresh: forceRefresh)
             }
-            let sortedFiles = files.sorted {
-                if flattenFolders { return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
+            let sortedFiles = files
+                .filter { $0.isDirectory || VideoLibraryVisibility.allows(sizeBytes: $0.size) }
+                .sorted {
+                    if flattenFolders { return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                    if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                    return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                }
             savePikPakFilesToCache(sortedFiles, server: server, path: path, flattenFolders: flattenFolders, extractSmallFolders: extractSmallFolders)
             return sortedFiles
         } catch {
@@ -846,7 +977,7 @@ class AppViewModel: ObservableObject {
         guard !roots.isEmpty else { return [] }
         let revision = WebDAVContentSelectionStore.revision(for: server.id)
         if !forceRefresh, let cached = WebDAVContentIndexStore.load(serverID: server.id, revision: revision) {
-            return cached
+            return cached.filter(\.isVideo)
         }
         let client = WebDAVClient(server: server)
         var collected: [WebDAVFile] = []
@@ -1108,16 +1239,18 @@ class AppViewModel: ObservableObject {
     func refreshPikPakFiles(parentId: String? = nil, force: Bool = false) async throws {
         let pid = parentId ?? pikpakPath.last?.id ?? ""
         if !force, let cached = pikpakFilesCache[pid] {
-            pikpakFiles = cached
+            pikpakFiles = cached.filter { $0.isFolder || VideoLibraryVisibility.allows(sizeBytes: $0.size) }
             return
         }
         isLoading = true
         defer { isLoading = false }
         let files = try await PikPakClient.shared.listFiles(parentId: pid)
-        let sorted = files.sorted { a, b in
-            if a.isFolder != b.isFolder { return a.isFolder }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-        }
+        let sorted = files
+            .filter { $0.isFolder || VideoLibraryVisibility.allows(sizeBytes: $0.size) }
+            .sorted { a, b in
+                if a.isFolder != b.isFolder { return a.isFolder }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
         pikpakFilesCache[pid] = sorted
         pikpakFiles = sorted
     }

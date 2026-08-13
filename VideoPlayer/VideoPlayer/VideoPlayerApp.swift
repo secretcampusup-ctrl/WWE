@@ -86,6 +86,10 @@ enum ScreenOrientationLock {
 struct VideoPlayerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     init() {
+        // Keep scrolling enabled everywhere but remove the thin iOS indicators
+        // that flash along the screen edges while a ScrollView/List is moving.
+        UIScrollView.appearance().showsVerticalScrollIndicator = false
+        UIScrollView.appearance().showsHorizontalScrollIndicator = false
         ThumbnailPipeline.configure()
         BackgroundVideoCacheManager.shared.cancelAllPrefetches()
         VideoDownloadManager.shared.activate()

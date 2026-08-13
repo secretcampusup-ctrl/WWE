@@ -47,7 +47,10 @@ struct OffcloudFile: Identifiable, Codable, Hashable {
     var resolutionLabel: String? { VideoTitleFormatter.resolution(from: name) }
 
     var streamURL: URL? { URL(string: url) }
-    var isVideo: Bool { LinkResolver.isVideoFileName(name) }
+    var isVideo: Bool {
+        LinkResolver.isVideoFileName(name)
+            && VideoLibraryVisibility.allows(sizeBytes: size)
+    }
 
     var fileExtension: String {
         let value = (name as NSString).pathExtension.uppercased()

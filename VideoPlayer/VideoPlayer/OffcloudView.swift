@@ -43,7 +43,6 @@ final class OffcloudViewModel: ObservableObject {
     private var loadingRequestID: String?
     private let filesCacheLifetime: TimeInterval = 24 * 60 * 60
     private let silentRefreshAge: TimeInterval = 12 * 60 * 60
-    private static let minimumRealVideoSizeBytes: Int64 = 500 * 1024 * 1024
 
     init() {
         apiKey = OffcloudKeyStore.load()
@@ -297,7 +296,7 @@ final class OffcloudViewModel: ObservableObject {
 
     private static func visibleVideoFiles(from files: [OffcloudFile]) -> [OffcloudFile] {
         files
-            .filter { $0.isVideo && ($0.size ?? 0) >= 150 * 1024 * 1024 }
+            .filter(\.isVideo)
             .sorted { ($0.path ?? $0.name) < ($1.path ?? $1.name) }
     }
     func cachedVideoFiles(for transfer: OffcloudTransfer) -> [OffcloudFile] {
@@ -1243,15 +1242,10 @@ private struct OffcloudFilesView: View {
     let onRefresh: () async -> Void
     let onDisappear: () -> Void
     private let columns = (0..<2).map { _ in GridItem(.flexible(), spacing: 10, alignment: .top) }
-    private let minimumRealVideoSizeBytes: Int64 = 500 * 1024 * 1024
-
     private var visibleVideoFiles: [OffcloudFile] {
-        let videos = files
-            .filter { $0.isVideo && ($0.size ?? 0) >= 150 * 1024 * 1024 }
+        files
+            .filter(\.isVideo)
             .sorted { ($0.path ?? $0.name) < ($1.path ?? $1.name) }
-        guard videos.count <= 2 else { return videos }
-        let largeVideos = videos.filter { ($0.size ?? minimumRealVideoSizeBytes) >= minimumRealVideoSizeBytes }
-        return largeVideos.isEmpty ? videos : largeVideos
     }
 
     private var offcloudPosterPrefetchID: [String] {

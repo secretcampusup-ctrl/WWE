@@ -17,6 +17,7 @@ struct ThePornDBSearchView: View {
 
     let initialQuery: String
     let onPick: (UIImage) -> Void
+    let onPickScene: ((ThePornDBScene, UIImage) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var query: String
@@ -29,10 +30,17 @@ struct ThePornDBSearchView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var pickingID: String?
 
-    init(initialQuery: String, onPick: @escaping (UIImage) -> Void) {
+    init(
+        initialQuery: String,
+        initialMode: SearchMode = .performers,
+        onPickScene: ((ThePornDBScene, UIImage) -> Void)? = nil,
+        onPick: @escaping (UIImage) -> Void
+    ) {
         self.initialQuery = initialQuery
         self.onPick = onPick
+        self.onPickScene = onPickScene
         _query = State(initialValue: initialQuery)
+        _mode = State(initialValue: initialMode)
     }
 
     private let performerColumns = [
@@ -376,7 +384,8 @@ struct ThePornDBSearchView: View {
 
                 let image = try await ThePornDBAPIService.shared.downloadImage(from: imageURL)
                 await MainActor.run {
-                    onPick(image)
+                    if let onPickScene { onPickScene(scene, image) }
+                    else { onPick(image) }
                     dismiss()
                 }
             } catch let error as ThePornDBError {
