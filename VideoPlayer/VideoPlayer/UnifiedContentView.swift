@@ -15,6 +15,7 @@ enum UnifiedMediaSection: String, CaseIterable, Identifiable {
 private enum UnifiedSource: Codable {
     case webDAV(server: WebDAVServer, file: WebDAVFile)
     case offcloud(transfer: OffcloudTransfer, file: OffcloudFile)
+    case torBox(torrent: TorBoxTorrent, file: TorBoxFile)
 }
 
 private struct UnifiedMediaEntry: Identifiable, Codable {
@@ -47,6 +48,7 @@ private struct UnifiedContentSnapshot: Codable {
     let movies: [UnifiedMediaEntry]
     let shows: [UnifiedMediaEntry]
     let unknown: [UnifiedMediaEntry]
+    let sourceSignature: String?
 }
 
 @MainActor
@@ -76,16 +78,18 @@ private final class UnifiedContentModel: ObservableObject {
             movies = snapshot.movies
             shows = snapshot.shows
             unknown = snapshot.unknown
+            lastSourceSignature = snapshot.sourceSignature ?? ""
             loaded = true
         }
     }
 
     func load(vm: AppViewModel, force: Bool = false) async {
-        let sourceSignature = vm.servers.map {
+        let baseSourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
         }.joined(separator: "|") + "|tmdb:" + String(TMDBSettings.readAccessToken.hashValue)
+        var sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
         // A cached library is immutable until the user explicitly refreshes.
-        if loaded && !force { return }
+        if loaded && !force && sourceSignature == lastSourceSignature { return }
         guard !isLoading else { return }
         isLoading = true
         status = "Scanning connected libraries…"
@@ -116,6 +120,30 @@ private final class UnifiedContentModel: ObservableObject {
                         id: "offcloud|\(transfer.requestId)|\(file.id)", rawTitle: file.name,
                         title: file.name, sourceLabel: "Offcloud",
                         source: .offcloud(transfer: transfer, file: file), streamURL: url
+                    ))
+                }
+            }
+        }
+
+        let torBoxKey = TorBoxKeyStore.load()
+        if !torBoxKey.isEmpty {
+            var torrents = TorBoxLibraryStore.load()
+            if force {
+                do {
+                    torrents = try await TorBoxClient(apiKey: torBoxKey).torrents(bypassCache: true)
+                    TorBoxLibraryStore.save(torrents)
+                    sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
+                } catch {
+                    status = error.localizedDescription
+                }
+            }
+            for torrent in torrents where torrent.isReady {
+                for file in torrent.videoFiles {
+                    guard let url = URL(string: "torbox://torrent/\(torrent.id)/file/\(file.id)") else { continue }
+                    raw.append(UnifiedMediaEntry(
+                        id: "torbox|\(torrent.id)|\(file.id)", rawTitle: file.displayName,
+                        title: file.displayName, sourceLabel: "TorBox",
+                        source: .torBox(torrent: torrent, file: file), streamURL: url
                     ))
                 }
             }
@@ -218,7 +246,7 @@ private final class UnifiedContentModel: ObservableObject {
     }
 
     private func persistSnapshot() {
-        let snapshot = UnifiedContentSnapshot(movies: movies, shows: shows, unknown: unknown)
+        let snapshot = UnifiedContentSnapshot(movies: movies, shows: shows, unknown: unknown, sourceSignature: lastSourceSignature)
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: Self.snapshotURL, options: .atomic)
     }
@@ -249,6 +277,7 @@ private final class UnifiedContentModel: ObservableObject {
         switch entry.source {
         case let .webDAV(_, file): sourcePath = file.path
         case let .offcloud(_, file): sourcePath = file.path ?? file.name
+        case let .torBox(torrent, file): sourcePath = (torrent.name.map { $0 + "/" } ?? "") + (file.name ?? file.displayName)
         }
         let genericFolders: Set<String> = [
             "movie", "movies", "film", "films", "tv", "tv show", "tv shows", "series",
@@ -426,7 +455,7 @@ struct UnifiedContentView: View {
                 .foregroundStyle(AppPalette.gradient)
             Text(section == .unknown ? "No Unknown Content" : "No \(section.rawValue)")
                 .font(.title3.weight(.bold))
-            Text("Pull to refresh after adding WebDAV or Offcloud in Home settings.")
+            Text("Pull to refresh after adding WebDAV, Offcloud, or TorBox in Home settings.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -450,6 +479,12 @@ struct UnifiedContentView: View {
             } else {
                 _ = vm.playOnlineURL(url.absoluteString)
             }
+        case let .torBox(torrent, file):
+            Task { @MainActor in
+                guard await vm.playTorBoxFile(torrentId: torrent.id, file: file) else { return }
+                showPlayer = true
+            }
+            return
         }
         showPlayer = true
     }
@@ -525,6 +560,12 @@ private struct UnifiedMediaDetailsHost: View {
             if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
                 vm.playSavedLink(saved)
             } else { _ = vm.playOnlineURL(url.absoluteString) }
+        case let .torBox(torrent, file):
+            Task { @MainActor in
+                guard await vm.playTorBoxFile(torrentId: torrent.id, file: file) else { return }
+                showPlayer = true
+            }
+            return
         }
         showPlayer = true
     }
@@ -535,10 +576,13 @@ struct UnifiedSettingsView: View {
     @ObservedObject var vm: AppViewModel
     @StateObject private var cloud = OffcloudViewModel()
     @State private var offcloudKey = ""
+    @State private var torBoxKey = ""
+    @State private var torBoxStatus = ""
+    @State private var isSavingTorBox = false
     @State private var destination: SettingsDestination?
 
     private enum SettingsDestination: String, Identifiable {
-        case webdav, offcloud, tmdb, adult
+        case webdav, offcloud, torbox, tmdb, adult
         var id: String { rawValue }
     }
 
@@ -548,6 +592,7 @@ struct UnifiedSettingsView: View {
                 Section("Cloud Sources") {
                     settingsRow("WebDAV", "Connect PikPak or another WebDAV server", "externaldrive.connected.to.line.below", .webdav)
                     settingsRow("Offcloud", "Add or update the Offcloud API key", "cloud.fill", .offcloud)
+                    settingsRow("TorBox", "Connect your TorBox account and library", "shippingbox.fill", .torbox)
                 }
                 Section("Metadata") {
                     settingsRow("TMDB", "Movies and TV metadata — first priority", "film.stack.fill", .tmdb)
@@ -561,7 +606,7 @@ struct UnifiedSettingsView: View {
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(item: $destination) { item in destinationView(item) }
-            .onAppear { offcloudKey = cloud.apiKey }
+            .onAppear { offcloudKey = cloud.apiKey; torBoxKey = TorBoxKeyStore.load() }
         }.preferredColorScheme(.dark)
     }
 
@@ -580,6 +625,33 @@ struct UnifiedSettingsView: View {
         case .webdav: WebDAVSettingsView(vm: vm)
         case .tmdb: TMDBSettingsView()
         case .adult: ThePornDBSettingsView()
+        case .torbox:
+            NavigationStack {
+                Form {
+                    Section("TorBox Account") {
+                        SecureField("API Key", text: $torBoxKey).textContentType(.password)
+                        Text("The key is verified with TorBox and stored securely in the iPhone Keychain.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if !torBoxStatus.isEmpty {
+                        Section { Text(torBoxStatus).font(.footnote).foregroundStyle(.secondary) }
+                    }
+                    Section {
+                        Button {
+                            saveTorBoxAccount()
+                        } label: {
+                            if isSavingTorBox { HStack { ProgressView(); Text("Connecting…") } }
+                            else { Text("Save and Sync TorBox") }
+                        }
+                        .disabled(isSavingTorBox || torBoxKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if !TorBoxKeyStore.load().isEmpty {
+                            Button("Remove TorBox Account", role: .destructive) {
+                                _ = TorBoxKeyStore.delete(); TorBoxLibraryStore.clear(); torBoxKey = ""; torBoxStatus = ""
+                            }
+                        }
+                    }
+                }.navigationTitle("TorBox Settings").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { destination = nil } } }
+            }.preferredColorScheme(.dark)
         case .offcloud:
             NavigationStack {
                 Form {
@@ -594,6 +666,29 @@ struct UnifiedSettingsView: View {
                 }.navigationTitle("Offcloud Settings").navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { destination = nil } } }
             }.preferredColorScheme(.dark)
+        }
+    }
+
+    private func saveTorBoxAccount() {
+        let key = torBoxKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        isSavingTorBox = true
+        torBoxStatus = "Checking account…"
+        Task { @MainActor in
+            do {
+                let client = TorBoxClient(apiKey: key)
+                try await client.validate()
+                let torrents = try await client.torrents(bypassCache: true)
+                guard TorBoxKeyStore.save(key) else { throw TorBoxError.invalidResponse }
+                TorBoxLibraryStore.save(torrents)
+                torBoxStatus = "Connected · \(torrents.count) torrents synced"
+                isSavingTorBox = false
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                destination = nil
+            } catch {
+                torBoxStatus = error.localizedDescription
+                isSavingTorBox = false
+            }
         }
     }
 }

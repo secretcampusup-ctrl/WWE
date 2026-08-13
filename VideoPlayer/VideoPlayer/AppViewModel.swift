@@ -866,6 +866,27 @@ class AppViewModel: ObservableObject {
         nowPlaying = nil
     }
 
+    /// TorBox CDN links are generated on demand and expire, so they must never
+    /// be persisted in the library. Resolve immediately before presentation.
+    @MainActor
+    func playTorBoxFile(torrentId: Int, file: TorBoxFile) async -> Bool {
+        let key = TorBoxKeyStore.load()
+        guard !key.isEmpty else {
+            errorMessage = TorBoxError.missingKey.localizedDescription
+            return false
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let url = try await TorBoxClient(apiKey: key).downloadURL(torrentId: torrentId, fileId: file.id)
+            startPlayback(url: url, title: file.displayName)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     // MARK: - Open any link (direct / HLS / PikPak share / magnet via PikPak)
 
     /// Save first immediately, then play or resolve.

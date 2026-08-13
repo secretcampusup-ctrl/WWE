@@ -385,13 +385,16 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
 private struct PirateBayDetailsView: View {
     let item: PirateBayResult; let tint: Color
     @StateObject private var model = PirateBayDetailsModel()
-    @State private var sending = false; @State private var message: String?; @State private var selectedImage = 0; @State private var showViewer = false
+    @State private var sendingOffcloud = false; @State private var sendingTorBox = false; @State private var message: String?; @State private var selectedImage = 0; @State private var showViewer = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text(item.name).font(.title2.bold()).fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    actionButton("Send to Offcloud", icon: "cloud.fill", busy: sending) { sendToOffcloud() }
+                VStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        actionButton("Offcloud", icon: "cloud.fill", busy: sendingOffcloud) { sendToOffcloud() }
+                        actionButton("TorBox", icon: "shippingbox.fill", busy: sendingTorBox) { sendToTorBox() }
+                    }
                     actionButton("Copy Magnet", icon: "doc.on.doc.fill") { UIPasteboard.general.string = item.magnet; toast("Magnet copied") }
                 }
                 HStack(spacing: 14) { Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green); Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange); Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary) }.font(.caption.bold())
@@ -426,8 +429,20 @@ private struct PirateBayDetailsView: View {
         Button(action: action) { Group { if busy { ProgressView() } else { Label(title, systemImage: icon) } }.font(.subheadline.bold()).frame(maxWidth: .infinity).padding(.vertical, 13) }.buttonStyle(.plain).foregroundStyle(.white).background(tint.opacity(0.82), in: Capsule()).disabled(busy)
     }
     private func sendToOffcloud() {
-        let key = OffcloudKeyStore.load(); guard !key.isEmpty else { toast("Add your Offcloud API key first"); return }; sending = true
-        Task { do { _ = try await OffcloudClient(apiKey: key).create(url: item.magnet); toast("Sent to Offcloud") } catch { toast(error.localizedDescription) }; sending = false }
+        let key = OffcloudKeyStore.load(); guard !key.isEmpty else { toast("Add your Offcloud API key first"); return }; sendingOffcloud = true
+        Task { do { _ = try await OffcloudClient(apiKey: key).create(url: item.magnet); toast("Sent to Offcloud") } catch { toast(error.localizedDescription) }; sendingOffcloud = false }
+    }
+    private func sendToTorBox() {
+        let key = TorBoxKeyStore.load(); guard !key.isEmpty else { toast("Add your TorBox API key first"); return }; sendingTorBox = true
+        Task {
+            do {
+                _ = try await TorBoxClient(apiKey: key).createTorrent(magnet: item.magnet)
+                let torrents = try await TorBoxClient(apiKey: key).torrents(bypassCache: true)
+                TorBoxLibraryStore.save(torrents)
+                toast("Sent to TorBox")
+            } catch { toast(error.localizedDescription) }
+            sendingTorBox = false
+        }
     }
     private func toast(_ value: String) { message = value; Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if message == value { message = nil } } }
 }

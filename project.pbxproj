@@ -22,6 +22,7 @@
 		AA000012 /* LinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000013 /* LinkResolver.swift */; };
 		AA000015 /* WebDAVSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000016 /* WebDAVSettingsView.swift */; };
 		AA000016 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000017 /* MainTabView.swift */; };
+		AA000056 /* TorBoxClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000056 /* TorBoxClient.swift */; };
 		AA000020 /* OffcloudClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000021 /* OffcloudClient.swift */; };
 		AA000021 /* OffcloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000022 /* OffcloudView.swift */; };
 		AA000022 /* VideoDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000023 /* VideoDetailsView.swift */; };
@@ -61,6 +62,7 @@
 		BB000013 /* LinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkResolver.swift; sourceTree = "<group>"; };
 		BB000016 /* WebDAVSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebDAVSettingsView.swift; sourceTree = "<group>"; };
 		BB000017 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		BB000056 /* TorBoxClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxClient.swift; sourceTree = "<group>"; };
 		BB000021 /* OffcloudClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OffcloudClient.swift; sourceTree = "<group>"; };
 		BB000022 /* OffcloudView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OffcloudView.swift; sourceTree = "<group>"; };
 		BB000023 /* VideoDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDetailsView.swift; sourceTree = "<group>"; };
@@ -119,6 +121,7 @@
 				BB000036 /* LinkResolver+CleanTitle.swift */,
 				BB000016 /* WebDAVSettingsView.swift */,
 				BB000017 /* MainTabView.swift */,
+				BB000056 /* TorBoxClient.swift */,
 				BB000021 /* OffcloudClient.swift */,
 				BB000022 /* OffcloudView.swift */,
 				BB000023 /* VideoDetailsView.swift */,
@@ -234,6 +237,7 @@
 				AA000012 /* LinkResolver.swift in Sources */,
 				AA000015 /* WebDAVSettingsView.swift in Sources */,
 				AA000016 /* MainTabView.swift in Sources */,
+				AA000056 /* TorBoxClient.swift in Sources */,
 				AA000020 /* OffcloudClient.swift in Sources */,
 				AA000021 /* OffcloudView.swift in Sources */,
 				AA000022 /* VideoDetailsView.swift in Sources */,

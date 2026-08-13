@@ -12,6 +12,7 @@
 		AA000053 /* SecureCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000053 /* SecureCredentialStore.swift */; };
 		AA000054 /* AppNetworkSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000054 /* AppNetworkSession.swift */; };
 		AA000055 /* HighPriorityNetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000055 /* HighPriorityNetworkManager.swift */; };
+		AA000056 /* TorBoxClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000056 /* TorBoxClient.swift */; };
 		AA000049 /* WebLoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000049 /* WebLoginView.swift */; };
 		AA000001 /* VideoPlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001 /* VideoPlayerApp.swift */; };
 		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000002 /* ContentView.swift */; };
@@ -71,6 +72,7 @@
 		BB000053 /* SecureCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureCredentialStore.swift; sourceTree = "<group>"; };
 		BB000054 /* AppNetworkSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNetworkSession.swift; sourceTree = "<group>"; };
 		BB000055 /* HighPriorityNetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HighPriorityNetworkManager.swift; sourceTree = "<group>"; };
+		BB000056 /* TorBoxClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxClient.swift; sourceTree = "<group>"; };
 		BB000005 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		BB000006 /* AddServerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddServerView.swift; sourceTree = "<group>"; };
 		BB000007 /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserView.swift; sourceTree = "<group>"; };
@@ -146,6 +148,7 @@
 				BB000053 /* SecureCredentialStore.swift */,
 				BB000054 /* AppNetworkSession.swift */,
 				BB000055 /* HighPriorityNetworkManager.swift */,
+				BB000056 /* TorBoxClient.swift */,
 				BB000005 /* Models.swift */,
 				BB000006 /* AddServerView.swift */,
 				BB000007 /* FileBrowserView.swift */,
@@ -318,6 +321,7 @@
 				AA000053 /* SecureCredentialStore.swift in Sources */,
 				AA000054 /* AppNetworkSession.swift in Sources */,
 				AA000055 /* HighPriorityNetworkManager.swift in Sources */,
+				AA000056 /* TorBoxClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
