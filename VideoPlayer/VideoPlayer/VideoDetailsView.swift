@@ -151,6 +151,7 @@ struct VideoDetailsView: View {
     @State private var thePornDBMetadata: VideoThumbnailLoader.ThePornDBMetadata?
     @State private var tmdbDetails: TMDBTitleDetails?
     @State private var tmdbEpisode: TMDBEpisodeDetails?
+    @State private var isPreparingPlayback = false
 
     var body: some View {
         NavigationStack {
@@ -310,7 +311,12 @@ struct VideoDetailsView: View {
             prepareForCurrentItem()
         }
         .onChange(of: item.id) { _ in
+            isPreparingPlayback = false
             prepareForCurrentItem()
+        }
+        .onChange(of: vm.isLoading) { isLoading in
+            guard !isLoading, isPreparingPlayback else { return }
+            withAnimation(.easeOut(duration: 0.18)) { isPreparingPlayback = false }
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let key = notification.object as? String,
@@ -467,6 +473,9 @@ struct VideoDetailsView: View {
                             size: CGSize(width: proxy.size.width, height: heroHeight)
                         )
                         .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                    } else {
+                        DetailsLoadingSpinner(size: 38, lineWidth: 3.2)
+                            .frame(width: proxy.size.width, height: heroHeight)
                     }
                     LinearGradient(
                         stops: [
@@ -655,13 +664,22 @@ struct VideoDetailsView: View {
 
     private var moviePlayButton: some View {
         Button(action: playAndClose) {
-            VStack(spacing: 2) {
-                Label(hasMovieProgress ? "Resume" : "Play", systemImage: "play.fill")
-                    .font(.system(size: 15, weight: .bold))
-                if hasMovieProgress {
-                    Text("Played: \(movieProgressPercent)%")
-                        .font(.system(size: 9, weight: .semibold))
-                        .opacity(0.65)
+            Group {
+                if isPreparingPlayback {
+                    HStack(spacing: 9) {
+                        DetailsLoadingSpinner(size: 18, lineWidth: 2.2, color: Color.black.opacity(0.78))
+                        Text("Preparing...").font(.system(size: 15, weight: .bold))
+                    }
+                } else {
+                    VStack(spacing: 2) {
+                        Label(hasMovieProgress ? "Resume" : "Play", systemImage: "play.fill")
+                            .font(.system(size: 15, weight: .bold))
+                        if hasMovieProgress {
+                            Text("Played: \(movieProgressPercent)%")
+                                .font(.system(size: 9, weight: .semibold))
+                                .opacity(0.65)
+                        }
+                    }
                 }
             }
             .foregroundStyle(Color.black.opacity(0.86))
@@ -670,6 +688,7 @@ struct VideoDetailsView: View {
             .background(Color.white.opacity(0.92), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(PremiumPressButtonStyle())
+        .disabled(isPreparingPlayback)
     }
 
     private var hasMovieProgress: Bool {
@@ -858,9 +877,7 @@ struct VideoDetailsView: View {
                                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                                 .clipped()
                         } else {
-                            ProgressView()
-                                .controlSize(.large)
-                                .tint(.white)
+                            DetailsLoadingSpinner(size: 36, lineWidth: 3, color: .white)
                         }
 
                         Color.black.opacity(displayedFrame == nil ? 0.10 : 0.16)
@@ -1268,13 +1285,8 @@ struct VideoDetailsView: View {
                 thePornDBInfoRow(label: "Site", value: site)
             }
         }
-        .padding(14)
+        .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
     }
 
     private func thePornDBInfoRow(label: String, value: String) -> some View {
@@ -1325,10 +1337,16 @@ struct VideoDetailsView: View {
     private var primaryPlayButton: some View {
         Button(action: playAndClose) {
             HStack(spacing: 10) {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 18, weight: .bold))
-                Text(playButtonTitle)
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                if isPreparingPlayback {
+                    DetailsLoadingSpinner(size: 19, lineWidth: 2.3, color: .white)
+                    Text("Preparing...")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                } else {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 18, weight: .bold))
+                    Text(playButtonTitle)
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                }
             }
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
@@ -1340,7 +1358,8 @@ struct VideoDetailsView: View {
             )
             .shadow(color: AppPalette.purple.opacity(0.34), radius: 14, y: 6)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PremiumPressButtonStyle())
+        .disabled(isPreparingPlayback)
     }
 
     private func actionButton(
@@ -1380,9 +1399,23 @@ struct VideoDetailsView: View {
     }
 
     private func playAndClose() {
+        guard !isPreparingPlayback else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        withAnimation(.easeOut(duration: 0.16)) { isPreparingPlayback = true }
         vm.preparePlaybackHistory(for: item)
         onPlay()
-        if dismissOnPlay { dismiss() }
+        if dismissOnPlay {
+            dismiss()
+        } else {
+            // A direct stream may be ready without toggling vm.isLoading. Reset
+            // the covered details screen so Play is normal after leaving player.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                if !vm.isLoading {
+                    withAnimation(.easeOut(duration: 0.18)) { isPreparingPlayback = false }
+                }
+            }
+        }
     }
 
     private var currentDownload: ManagedVideoDownload? {
@@ -1588,6 +1621,30 @@ private extension UIImage {
     }
 }
 
+/// A Core Animation-backed spinner used while details artwork and playback URLs
+/// are prepared. Unlike the platform ProgressView it always has explicit motion.
+private struct DetailsLoadingSpinner: View {
+    let size: CGFloat
+    let lineWidth: CGFloat
+    var color: Color = AppPalette.accent
+    @State private var rotating = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.08, to: 0.82)
+            .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            .frame(width: size, height: size)
+            .rotationEffect(.degrees(rotating ? 360 : 0))
+            .onAppear {
+                rotating = false
+                withAnimation(.linear(duration: 0.72).repeatForever(autoreverses: false)) {
+                    rotating = true
+                }
+            }
+            .accessibilityLabel("Loading")
+    }
+}
+
 private struct CachedTMDBImage: View {
     let url: URL?
     let contentMode: ContentMode
@@ -1740,9 +1797,7 @@ struct ImmediatePlayerLoadingView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 14) {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(.white)
+                DetailsLoadingSpinner(size: 42, lineWidth: 3.4, color: .white)
                 Text("Loading video…")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.white.opacity(0.72))

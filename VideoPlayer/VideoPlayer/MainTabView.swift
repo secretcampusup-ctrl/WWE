@@ -137,7 +137,6 @@ struct HomeLibraryView: View {
                         .zIndex(20)
                 }
             }
-            .animation(.easeOut(duration: 0.2), value: showRefreshOverlay)
             .toolbar(.hidden, for: .navigationBar)
             .task(id: homeRefreshID) {
                 guard isActive else { return }
@@ -643,60 +642,62 @@ struct HomeLibraryView: View {
 /// It is intentionally rendered as an overlay so refreshing never moves cards.
 private struct MediaOrbitRefreshView: View {
     private let symbols = ["film.fill", "music.note", "video.fill", "play.rectangle.fill"]
+    @State private var isRotating = false
+    @State private var isPulsing = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let elapsed = timeline.date.timeIntervalSinceReferenceDate
-            let angle = Angle.degrees(elapsed.truncatingRemainder(dividingBy: 7) / 7 * 360)
-            let pulse = 1 + (sin(elapsed * 2.7) * 0.055)
+        ZStack {
+            Circle()
+                .fill(Color(red: 0.075, green: 0.065, blue: 0.085).opacity(0.96))
+                .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.8))
+                .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
 
             ZStack {
                 Circle()
-                    .fill(.ultraThinMaterial)
-                    .overlay(Circle().fill(Color.black.opacity(0.2)))
-                    .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.8))
-                    .shadow(color: .black.opacity(0.38), radius: 18, y: 8)
-
-                Circle()
                     .stroke(
-                        AppPalette.accent.opacity(0.22),
-                        style: StrokeStyle(lineWidth: 1.2, dash: [3, 5], dashPhase: elapsed * -9)
+                        AppPalette.accent.opacity(0.25),
+                        style: StrokeStyle(lineWidth: 1.2, dash: [3, 5])
                     )
                     .frame(width: 82, height: 82)
-                    .scaleEffect(pulse)
-
-                Circle()
-                    .stroke(AppPalette.blue.opacity(0.13), lineWidth: 1)
-                    .frame(width: 62, height: 62)
-                    .scaleEffect(2 - pulse)
 
                 ForEach(Array(symbols.enumerated()), id: \.offset) { index, symbol in
-                    let itemAngle = angle + .degrees(Double(index) * 90 - 90)
-                    let radians = itemAngle.radians
-
                     Image(systemName: symbol)
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.88))
                         .frame(width: 25, height: 25)
                         .background(Color.white.opacity(0.075), in: Circle())
                         .overlay(Circle().stroke(AppPalette.accent.opacity(0.2), lineWidth: 0.7))
-                        .shadow(color: AppPalette.accent.opacity(0.2), radius: 7)
-                        .offset(x: cos(radians) * 35, y: sin(radians) * 35)
+                        .offset(y: -35)
+                        .rotationEffect(.degrees(Double(index) * 90))
                 }
-
-                Circle()
-                    .fill(AppPalette.diagonalGradient)
-                    .frame(width: 29, height: 29)
-                    .shadow(color: AppPalette.accent.opacity(0.55), radius: 12)
-                    .scaleEffect(pulse)
-
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 12, weight: .black))
-                    .foregroundStyle(.white)
-                    .scaleEffect(pulse)
             }
+            .drawingGroup(opaque: false)
+            .rotationEffect(.degrees(isRotating ? 360 : 0))
+
+            Circle()
+                .stroke(AppPalette.blue.opacity(0.16), lineWidth: 1)
+                .frame(width: 57, height: 57)
+                .scaleEffect(isPulsing ? 1.08 : 0.94)
+
+            Circle()
+                .fill(AppPalette.diagonalGradient)
+                .frame(width: 29, height: 29)
+                .shadow(color: AppPalette.accent.opacity(0.4), radius: 8)
+                .scaleEffect(isPulsing ? 1.06 : 0.94)
+
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 12, weight: .black))
+                .foregroundStyle(.white)
         }
         .frame(width: 108, height: 108)
+        .onAppear {
+            withAnimation(.linear(duration: 4.8).repeatForever(autoreverses: false)) {
+                isRotating = true
+            }
+            withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Refreshing library")
     }
