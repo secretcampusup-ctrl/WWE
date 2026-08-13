@@ -161,8 +161,8 @@ struct VideoDetailsView: View {
     @State private var tmdbDetails: TMDBTitleDetails?
     @State private var tmdbEpisode: TMDBEpisodeDetails?
     @State private var isPreparingPlayback = false
-    @State private var movieHeaderScrollOffset: CGFloat = 0
-    @State private var standardHeaderScrollOffset: CGFloat = 0
+    @State private var movieScrollMotion = DetailsScrollMotionModel()
+    @State private var standardScrollMotion = DetailsScrollMotionModel()
     @State private var displayedSeriesSeason: Int?
 
     var body: some View {
@@ -245,7 +245,7 @@ struct VideoDetailsView: View {
                         .background(AppTheme.bg)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                             }
-                            .background(DetailsScrollOffsetObserver(offset: $standardHeaderScrollOffset))
+                            .background(DetailsScrollOffsetObserver(motion: standardScrollMotion))
                         }
                     }
                 }
@@ -326,8 +326,8 @@ struct VideoDetailsView: View {
         }
         .onChange(of: item.id) { _ in
             isPreparingPlayback = false
-            movieHeaderScrollOffset = 0
-            standardHeaderScrollOffset = 0
+            movieScrollMotion.offset = 0
+            standardScrollMotion.offset = 0
             displayedSeriesSeason = selectedEpisodeItem?.season
             prepareForCurrentItem()
         }
@@ -472,71 +472,11 @@ struct VideoDetailsView: View {
 
     private var movieDetailsScreen: some View {
         ZStack(alignment: .top) {
-            GeometryReader { proxy in
-                // Keep artwork underneath the complete blend. The final opaque
-                // stop lands exactly where this hero ends, so no hard image edge
-                // can appear on tall or short displays.
-                let heroHeight = max(320, proxy.size.height * 0.54)
-                let pullDistance = max(0, movieHeaderScrollOffset)
-                let upwardDistance = max(0, -movieHeaderScrollOffset)
-                let headerScale = 1 + min(pullDistance / max(heroHeight, 1), 0.18)
-                let parallaxOffset = movieHeaderScrollOffset < 0
-                    ? movieHeaderScrollOffset * 0.22
-                    : 0
-                let fadeAmount = min(1.0, Double(upwardDistance / 210))
-                ZStack {
-                    movieDetailsBaseColor
-                    Group {
-                        if let backdrop = movieBackdropFrame {
-                            FullPosterDetailsBackdrop(image: backdrop)
-                        } else if let displayedFrame {
-                            FullPosterDetailsBackdrop(image: displayedFrame)
-                        } else {
-                            DetailsLoadingSpinner(size: 38, lineWidth: 3.2)
-                        }
-                    }
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-                    .scaleEffect(headerScale, anchor: .top)
-                    .offset(y: parallaxOffset)
-
-                    LinearGradient(
-                        stops: [
-                            // Keep status and navigation controls legible over
-                            // bright artwork while retaining the poster detail.
-                            .init(color: .black.opacity(0.50), location: 0.00),
-                            .init(color: .black.opacity(0.38), location: 0.18),
-
-                            // Blend into the warm details background around the
-                            // middle of the display, then hide artwork entirely.
-                            .init(color: movieDetailsBaseColor.opacity(0.20), location: 0.30),
-                            .init(color: movieDetailsBaseColor.opacity(0.72), location: 0.41),
-                            .init(color: movieDetailsBaseColor.opacity(0.96), location: 0.49),
-                            .init(color: movieDetailsBaseColor, location: 0.54),
-                            .init(color: movieDetailsBaseColor, location: 1.00)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .allowsHitTesting(false)
-
-                    // This extra layer is driven only by upward scrolling. It
-                    // leaves the artwork open initially, then darkens it smoothly
-                    // as content approaches the top controls.
-                    LinearGradient(
-                        colors: [
-                            Color.black.opacity(0.48 * fadeAmount),
-                            Color.black.opacity(0.30 * fadeAmount),
-                            Color.clear
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: heroHeight)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .allowsHitTesting(false)
-                }
-                .clipped()
-            }
+            CinematicDetailsHeader(
+                image: movieBackdropFrame ?? displayedFrame,
+                baseColor: movieDetailsBaseColor,
+                motion: movieScrollMotion
+            )
             .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
@@ -602,7 +542,7 @@ struct VideoDetailsView: View {
                     .padding(.horizontal, 18)
                     .padding(.bottom, 42)
                 }
-                .background(DetailsScrollOffsetObserver(offset: $movieHeaderScrollOffset))
+                .background(DetailsScrollOffsetObserver(motion: movieScrollMotion))
             }
 
             HStack {
@@ -897,47 +837,9 @@ struct VideoDetailsView: View {
 
     private var preview: some View {
         GeometryReader { proxy in
-            let pullDistance = max(0, standardHeaderScrollOffset)
-            let upwardDistance = max(0, -standardHeaderScrollOffset)
-            let headerScale = 1 + min(pullDistance / max(proxy.size.height, 1), 0.18)
-            let parallaxOffset = standardHeaderScrollOffset < 0
-                ? standardHeaderScrollOffset * 0.22
-                : 0
-            let fadeAmount = min(0.52, Double(upwardDistance / 230) * 0.52)
             ZStack {
                 Button(action: playAndClose) {
-                    ZStack {
-                        Color.white.opacity(0.06)
-
-                        if let displayedFrame {
-                            Image(uiImage: displayedFrame)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-                                .clipped()
-                                .scaleEffect(headerScale, anchor: .top)
-                                .offset(y: parallaxOffset)
-                        } else {
-                            DetailsLoadingSpinner(size: 36, lineWidth: 3, color: .white)
-                        }
-
-                        Color.black.opacity(displayedFrame == nil ? 0.10 : 0.16)
-
-                        Color.black.opacity(fadeAmount)
-                            .allowsHitTesting(false)
-
-                        LinearGradient(
-                            stops: [
-                                .init(color: Color.clear, location: 0.42),
-                                .init(color: AppTheme.bg.opacity(0.12), location: 0.62),
-                                .init(color: AppTheme.bg.opacity(0.72), location: 0.84),
-                                .init(color: AppTheme.bg, location: 1.0)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .allowsHitTesting(false)
-                    }
+                    StandardDetailsHeaderArtwork(image: displayedFrame, motion: standardScrollMotion)
                     .frame(width: proxy.size.width, height: proxy.size.height)
                     .clipped()
                 }
@@ -1638,11 +1540,15 @@ struct VideoDetailsView: View {
 
 // MARK: - إضافة الفيديو لقائمة تشغيل
 
+private final class DetailsScrollMotionModel: ObservableObject {
+    @Published var offset: CGFloat = 0
+}
+
 private struct DetailsScrollOffsetObserver: UIViewRepresentable {
-    @Binding var offset: CGFloat
+    let motion: DetailsScrollMotionModel
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(offset: $offset)
+        Coordinator(motion: motion)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -1654,7 +1560,6 @@ private struct DetailsScrollOffsetObserver: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.offset = $offset
         guard !context.coordinator.isAttached else { return }
         DispatchQueue.main.async { context.coordinator.attach(from: uiView) }
     }
@@ -1664,14 +1569,14 @@ private struct DetailsScrollOffsetObserver: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject {
-        var offset: Binding<CGFloat>
+        private let motion: DetailsScrollMotionModel
         private weak var scrollView: UIScrollView?
         private var observation: NSKeyValueObservation?
         private var attachAttempts = 0
         var isAttached: Bool { scrollView != nil }
 
-        init(offset: Binding<CGFloat>) {
-            self.offset = offset
+        init(motion: DetailsScrollMotionModel) {
+            self.motion = motion
         }
 
         func attach(from probe: UIView) {
@@ -1709,9 +1614,111 @@ private struct DetailsScrollOffsetObserver: UIViewRepresentable {
             // At rest: contentOffset.y == -adjustedContentInset.top. Pulling
             // down becomes positive; scrolling content up becomes negative.
             let value = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
-            if abs(offset.wrappedValue - value) > 0.1 {
-                offset.wrappedValue = value
+            if abs(motion.offset - value) > 0.35 {
+                motion.offset = value
             }
+        }
+    }
+}
+
+private struct CinematicDetailsHeader: View {
+    let image: UIImage?
+    let baseColor: Color
+    @ObservedObject var motion: DetailsScrollMotionModel
+
+    var body: some View {
+        GeometryReader { proxy in
+            let heroHeight = max(320, proxy.size.height * 0.54)
+            let pullDistance = max(0, motion.offset)
+            let upwardDistance = max(0, -motion.offset)
+            let scale = 1 + min(pullDistance / max(heroHeight, 1), 0.18)
+            let yOffset = motion.offset < 0 ? motion.offset * 0.22 : 0
+            let fade = min(1.0, Double(upwardDistance / 210))
+
+            ZStack {
+                baseColor
+                Group {
+                    if let image {
+                        FullPosterDetailsBackdrop(image: image)
+                    } else {
+                        DetailsLoadingSpinner(size: 38, lineWidth: 3.2)
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                .scaleEffect(scale, anchor: .top)
+                .offset(y: yOffset)
+
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.50), location: 0.00),
+                        .init(color: .black.opacity(0.38), location: 0.18),
+                        .init(color: baseColor.opacity(0.20), location: 0.30),
+                        .init(color: baseColor.opacity(0.72), location: 0.41),
+                        .init(color: baseColor.opacity(0.96), location: 0.49),
+                        .init(color: baseColor, location: 0.54),
+                        .init(color: baseColor, location: 1.00)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.48 * fade),
+                        Color.black.opacity(0.30 * fade),
+                        Color.clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: heroHeight)
+                .frame(maxHeight: .infinity, alignment: .top)
+            }
+            .allowsHitTesting(false)
+            .clipped()
+        }
+    }
+}
+
+private struct StandardDetailsHeaderArtwork: View {
+    let image: UIImage?
+    @ObservedObject var motion: DetailsScrollMotionModel
+
+    var body: some View {
+        GeometryReader { proxy in
+            let pullDistance = max(0, motion.offset)
+            let upwardDistance = max(0, -motion.offset)
+            let scale = 1 + min(pullDistance / max(proxy.size.height, 1), 0.18)
+            let yOffset = motion.offset < 0 ? motion.offset * 0.22 : 0
+            let fade = min(0.52, Double(upwardDistance / 230) * 0.52)
+
+            ZStack {
+                Color.white.opacity(0.06)
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                        .scaleEffect(scale, anchor: .top)
+                        .offset(y: yOffset)
+                } else {
+                    DetailsLoadingSpinner(size: 36, lineWidth: 3, color: .white)
+                }
+                Color.black.opacity(image == nil ? 0.10 : 0.16)
+                Color.black.opacity(fade)
+                LinearGradient(
+                    stops: [
+                        .init(color: Color.clear, location: 0.42),
+                        .init(color: AppTheme.bg.opacity(0.12), location: 0.62),
+                        .init(color: AppTheme.bg.opacity(0.72), location: 0.84),
+                        .init(color: AppTheme.bg, location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .allowsHitTesting(false)
+            .clipped()
         }
     }
 }
