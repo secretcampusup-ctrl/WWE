@@ -160,6 +160,7 @@ final class UnifiedContentModel: ObservableObject {
         // Home/Content model cannot keep an old in-memory provider snapshot.
         cloud.reloadPersistedState()
 
+        let existingLibraryEntries = movies + shows + unknown
         var raw: [UnifiedMediaEntry] = []
         for server in vm.servers {
             let files = await vm.contentLibraryFiles(server: server, forceRefresh: force)
@@ -212,6 +213,45 @@ final class UnifiedContentModel: ObservableObject {
                     ))
                 }
             }
+        }
+
+        if force {
+            // WebDAV refreshes are discovery-only. Preserve every previously
+            // indexed file and append newly scanned paths, even when one folder
+            // temporarily times out. Series aggregates are expanded back into
+            // their episode files before merging.
+            let configuredServerIDs = Set(vm.servers.map(\.id))
+            let preservedWebDAVEntries = existingLibraryEntries.flatMap { entry -> [UnifiedMediaEntry] in
+                if !entry.episodes.isEmpty {
+                    return entry.episodes.compactMap { episode in
+                        guard case let .webDAV(server, _) = episode.source,
+                              configuredServerIDs.contains(server.id) else { return nil }
+                        return UnifiedMediaEntry(
+                            id: episode.id,
+                            rawTitle: episode.title,
+                            title: entry.title,
+                            sourceLabel: entry.sourceLabel,
+                            source: episode.source,
+                            streamURL: episode.url,
+                            details: entry.details,
+                            adultScene: entry.adultScene,
+                            manualMetadataProvider: entry.manualMetadataProvider,
+                            adultLookupCompleted: entry.adultLookupCompleted
+                        )
+                    }
+                }
+                guard case let .webDAV(server, _) = entry.source,
+                      configuredServerIDs.contains(server.id) else { return [] }
+                return [entry]
+            }
+            var entriesByID = Dictionary(
+                preservedWebDAVEntries.map { ($0.id, $0) },
+                uniquingKeysWith: { existing, _ in existing }
+            )
+            for entry in raw where entriesByID[entry.id] == nil {
+                entriesByID[entry.id] = entry
+            }
+            raw = Array(entriesByID.values)
         }
 
         guard !raw.isEmpty else {

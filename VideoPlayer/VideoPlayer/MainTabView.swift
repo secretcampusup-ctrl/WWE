@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import Kingfisher
+import Combine
 
 struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
@@ -89,6 +90,10 @@ struct HomeLibraryView: View {
     @State private var showSettings = false
     @State private var showDownloads = false
     @State private var showRefreshOverlay = false
+    @State private var heroIndex = 0
+    @State private var showHeroPlayer = false
+
+    private let heroTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
 
     private let posterWidth: CGFloat = 112
     private let posterHeight: CGFloat = 168
@@ -104,23 +109,26 @@ struct HomeLibraryView: View {
                 .ignoresSafeArea()
 
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 28) {
-                        homeHeader
-                        resumeSection
-                        posterSection("Recently Added", items: recentlyAdded)
-                        posterSection("Movies", items: catalog.movies)
-                        posterSection("TV Shows", items: catalog.shows)
-                        posterSection("Anime", items: animeItems)
-                        posterSection("Others", items: otherItems)
-                        posterSection("Unwatched", items: unwatchedItems)
-                        posterSection("Watched", items: watchedItems)
-                        favoritesSection
-                        categorySection("By Genre", categories: genreCategories)
-                        categorySection("By Rating", categories: ratingCategories)
-                        categorySection("By Release Date", categories: releaseCategories)
-                        categorySection("By Age Rating", categories: ageRatingCategories)
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        heroSection
+
+                        LazyVStack(alignment: .leading, spacing: 28) {
+                            resumeSection
+                            posterSection("Recently Added", items: recentlyAdded)
+                            posterSection("Movies", items: catalog.movies)
+                            posterSection("TV Shows", items: catalog.shows)
+                            posterSection("Anime", items: animeItems)
+                            posterSection("Others", items: otherItems)
+                            posterSection("Unwatched", items: unwatchedItems)
+                            posterSection("Watched", items: watchedItems)
+                            favoritesSection
+                            categorySection("By Genre", categories: genreCategories)
+                            categorySection("By Rating", categories: ratingCategories)
+                            categorySection("By Release Date", categories: releaseCategories)
+                            categorySection("By Age Rating", categories: ageRatingCategories)
+                        }
+                        .padding(.top, -34)
                     }
-                    .padding(.top, 12)
                     .padding(.bottom, 110)
                     .tint(AppPalette.accent)
                 }
@@ -141,6 +149,16 @@ struct HomeLibraryView: View {
             .task(id: homeRefreshID) {
                 guard isActive else { return }
                 await catalog.load(vm: vm, force: false)
+            }
+            .onReceive(heroTimer) { _ in
+                guard isActive, featuredItems.count > 1 else { return }
+                withAnimation(.easeInOut(duration: 0.55)) {
+                    heroIndex = (heroIndex + 1) % featuredItems.count
+                }
+            }
+            .onChange(of: featuredItems.map(\.id)) { items in
+                if items.isEmpty { heroIndex = 0 }
+                else if heroIndex >= items.count { heroIndex = 0 }
             }
             .fullScreenCover(item: $selectedEntry) { entry in
                 UnifiedMediaDetailsHost(
@@ -182,6 +200,9 @@ struct HomeLibraryView: View {
             .fullScreenCover(isPresented: $showFavorites) {
                 FavoritesAllView(vm: vm)
             }
+            .fullScreenCover(isPresented: $showHeroPlayer) {
+                ResolvedPlayerScreen(vm: vm)
+            }
             .sheet(isPresented: $showSettings, onDismiss: {
                 Task { await catalog.load(vm: vm, force: true) }
             }) { UnifiedSettingsView(vm: vm) }
@@ -209,6 +230,181 @@ struct HomeLibraryView: View {
             homeHeaderButton("gearshape.fill") { showSettings = true }
         }
         .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private var heroSection: some View {
+        if featuredItems.isEmpty {
+            homeHeader
+                .padding(.top, 12)
+                .padding(.bottom, 22)
+        } else {
+            ZStack(alignment: .top) {
+                TabView(selection: $heroIndex) {
+                    ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
+                        heroSlide(entry)
+                            .tag(index)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+
+                homeHeader
+                    .padding(.top, 12)
+
+                VStack {
+                    Spacer()
+                    HStack(spacing: 7) {
+                        ForEach(featuredItems.indices, id: \.self) { index in
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
+                            } label: {
+                                Capsule()
+                                    .fill(index == heroIndex ? Color.white : Color.white.opacity(0.32))
+                                    .frame(width: index == heroIndex ? 22 : 6, height: 6)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Featured item \(index + 1)")
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.25), value: heroIndex)
+                    .padding(.bottom, 52)
+                }
+            }
+            .frame(height: 610)
+        }
+    }
+
+    private func heroSlide(_ entry: UnifiedMediaEntry) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            if let imageURL = entry.details?.detailsBackdropURL ?? entry.details?.imageURL ?? entry.posterURL {
+                KFImage(imageURL)
+                    .placeholder {
+                        ZStack {
+                            AppTheme.bg
+                            ProgressView().tint(AppPalette.accent)
+                        }
+                    }
+                    .cacheOriginalImage()
+                    .fade(duration: 0.22)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                UnifiedPosterArtwork(entry: entry, section: section(for: entry))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            }
+
+            LinearGradient(
+                colors: [.black.opacity(0.82), .black.opacity(0.44), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            LinearGradient(
+                stops: [
+                    .init(color: .black.opacity(0.48), location: 0),
+                    .init(color: .clear, location: 0.28),
+                    .init(color: AppTheme.bg.opacity(0.28), location: 0.62),
+                    .init(color: AppTheme.bg.opacity(0.92), location: 0.86),
+                    .init(color: AppTheme.bg, location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            VStack(alignment: .leading, spacing: 12) {
+                if let logoURL = entry.details?.logoURL {
+                    KFImage(logoURL)
+                        .cacheOriginalImage()
+                        .fade(duration: 0.18)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 270, maxHeight: 92, alignment: .leading)
+                } else {
+                    Text(entry.title.uppercased())
+                        .font(.system(size: 42, weight: .black, design: .rounded))
+                        .tracking(-1.6)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: 430, alignment: .leading)
+                }
+
+                heroMetadata(entry)
+
+                if let overview = entry.details?.overview, !overview.isEmpty {
+                    Text(overview)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.76))
+                        .lineLimit(2)
+                        .lineSpacing(2)
+                        .frame(maxWidth: 470, alignment: .leading)
+                }
+
+                HStack(spacing: 10) {
+                    Button { playHero(entry) } label: {
+                        Label("Play", systemImage: "play.fill")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.black)
+                            .frame(width: 142, height: 46)
+                            .background(Color.white, in: Capsule())
+                    }
+                    .buttonStyle(PremiumPressButtonStyle())
+
+                    Button {
+                        catalog.prioritizeEpisodeMetadata(for: entry)
+                        selectedEntry = entry
+                    } label: {
+                        Label("More Info", systemImage: "info.circle")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 142, height: 46)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(Color.white.opacity(0.17)))
+                    }
+                    .buttonStyle(PremiumPressButtonStyle())
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 88)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+    }
+
+    private func heroMetadata(_ entry: UnifiedMediaEntry) -> some View {
+        let values = heroMetadataValues(entry)
+        return HStack(spacing: 8) {
+            ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                if index > 0 {
+                    Circle().fill(Color.white.opacity(0.42)).frame(width: 3, height: 3)
+                }
+                Text(value)
+                    .foregroundStyle(index == 0 && value.hasPrefix("★") ? Color.yellow : Color.white.opacity(0.88))
+            }
+        }
+        .font(.system(size: 11, weight: .bold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+    }
+
+    private func heroMetadataValues(_ entry: UnifiedMediaEntry) -> [String] {
+        var values: [String] = []
+        if let rating = entry.details?.voteAverage, rating > 0 {
+            values.append(String(format: "★ %.1f", rating))
+        }
+        let year = releaseYear(entry)
+        if year != "—" { values.append(year) }
+        if let genres = entry.details?.genres.prefix(2).map(\.name), !genres.isEmpty {
+            values.append(genres.joined(separator: " · "))
+        }
+        if entry.details?.isSeries == true || !entry.episodes.isEmpty {
+            let count = max(1, Set(entry.episodes.map(\.season)).count)
+            values.append(count == 1 ? "1 Season" : "\(count) Seasons")
+        } else if let runtime = entry.details?.runtimeMinutes, runtime > 0 {
+            values.append("\(runtime / 60)h \(runtime % 60)m")
+        }
+        return values
     }
 
     private var homeRefreshID: String {
@@ -485,6 +681,21 @@ struct HomeLibraryView: View {
         return (catalog.movies + catalog.shows + catalog.unknown).filter { seen.insert($0.id).inserted }
     }
 
+    private var featuredItems: [UnifiedMediaEntry] {
+        let candidates = (catalog.movies + catalog.shows).filter { entry in
+            guard entry.details != nil else { return false }
+            return entry.details?.detailsBackdropURL != nil
+                || entry.details?.imageURL != nil
+                || entry.posterURL != nil
+        }
+        return Array(candidates.sorted { lhs, rhs in
+            let leftDate = sourceDate(lhs)
+            let rightDate = sourceDate(rhs)
+            if leftDate != rightDate { return leftDate > rightDate }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }.prefix(5))
+    }
+
     private var historyByID: [String: PlaybackHistoryEntry] {
         Dictionary(uniqueKeysWithValues: vm.recentPlaybackHistory.map { ($0.id, $0) })
     }
@@ -648,6 +859,53 @@ struct HomeLibraryView: View {
             await vm.playSavedLinkAsync(link)
             if vm.nowPlayingURL == nil { showSavedPlayer = false }
         }
+    }
+
+    @MainActor
+    private func playHero(_ entry: UnifiedMediaEntry) {
+        catalog.prioritizeEpisodeMetadata(for: entry)
+        let episode = preferredHeroEpisode(for: entry)
+        let source = episode?.source ?? entry.source
+        let playbackTitle = episode?.title ?? entry.rawTitle
+
+        switch source {
+        case let .webDAV(server, file):
+            vm.play(file: file, server: server)
+            showHeroPlayer = true
+
+        case let .offcloud(_, file):
+            guard let url = file.streamURL else { return }
+            if let saved = vm.saveDirectLink(
+                url.absoluteString,
+                resolvedStream: url,
+                source: .offcloud,
+                title: playbackTitle
+            ) {
+                vm.playSavedLink(saved)
+            } else {
+                _ = vm.playOnlineURL(url.absoluteString)
+            }
+            showHeroPlayer = true
+
+        case let .torBox(torrent, file):
+            Task { @MainActor in
+                guard await vm.playTorBoxFile(torrentId: torrent.id, file: file) else { return }
+                showHeroPlayer = true
+            }
+        }
+    }
+
+    private func preferredHeroEpisode(for entry: UnifiedMediaEntry) -> UnifiedEpisode? {
+        let resumable = entry.episodes.compactMap { episode -> (UnifiedEpisode, PlaybackHistoryEntry)? in
+            guard let history = historyByID[episode.id], history.hasResumePoint else { return nil }
+            return (episode, history)
+        }
+        if let recent = resumable.max(by: { $0.1.watchedAt < $1.1.watchedAt }) {
+            return recent.0
+        }
+        return entry.episodes.sorted {
+            $0.season == $1.season ? $0.episode < $1.episode : $0.season < $1.season
+        }.first
     }
 }
 

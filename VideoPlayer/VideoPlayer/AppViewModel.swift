@@ -976,9 +976,11 @@ class AppViewModel: ObservableObject {
         let roots = configuredRoots.map(WebDAVContentSelectionStore.minimalRoots) ?? [""]
         guard !roots.isEmpty else { return [] }
         let revision = WebDAVContentSelectionStore.revision(for: server.id)
-        if !forceRefresh, let cached = WebDAVContentIndexStore.load(serverID: server.id, revision: revision) {
-            return cached.filter(\.isVideo)
+        let persistedIndex = WebDAVContentIndexStore.load(serverID: server.id, revision: revision)
+        if !forceRefresh, let persistedIndex {
+            return persistedIndex.filter(\.isVideo)
         }
+        let cachedIndex = persistedIndex ?? []
         let client = WebDAVClient(server: server)
         var collected: [WebDAVFile] = []
         await withTaskGroup(of: [WebDAVFile].self) { group in
@@ -989,8 +991,21 @@ class AppViewModel: ObservableObject {
             }
             for await files in group { collected.append(contentsOf: files) }
         }
-        var seen = Set<String>()
-        let result = collected.filter { seen.insert($0.path).inserted }
+        // Manual refresh is append-only. Keep the persisted WebDAV index in
+        // place and merge newly discovered paths into it. A slow/partial folder
+        // response must never blank the library or force old metadata to load
+        // again. Folder selection changes use a new revision and therefore
+        // still start with the newly selected scope.
+        var filesByPath = Dictionary(
+            cachedIndex.filter(\.isVideo).map { ($0.path, $0) },
+            uniquingKeysWith: { existing, _ in existing }
+        )
+        for file in collected where file.isVideo {
+            filesByPath[file.path] = file
+        }
+        let result = filesByPath.values.sorted {
+            $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
         WebDAVContentIndexStore.save(result, serverID: server.id, revision: revision)
         return result
     }
