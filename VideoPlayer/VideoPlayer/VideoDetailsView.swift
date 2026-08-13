@@ -385,8 +385,12 @@ struct VideoDetailsView: View {
             if ThePornDBSettings.isEnabled, let thePornDBMetadata {
                 VideoDetailsMemoryCache.adultMetadata[metadataKey] = thePornDBMetadata
             }
-            if ThePornDBSettings.isEnabled, let cover = thePornDBMetadata?.coverImage, frame == nil {
-                frame = cover
+            if ThePornDBSettings.isEnabled, let cover = thePornDBMetadata?.coverImage {
+                if frame == nil { frame = cover }
+                VideoThumbnailLoader.cacheImage(
+                    cover,
+                    forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
+                )
                 if let key = item.posterCacheKey {
                     VideoThumbnailLoader.cacheImage(cover, forStableKey: key)
                 }

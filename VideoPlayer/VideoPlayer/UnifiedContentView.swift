@@ -82,6 +82,12 @@ private final class UnifiedContentModel: ObservableObject {
             movies = snapshot.movies
             shows = snapshot.shows
             unknown = snapshot.unknown
+            // Older snapshots could mark metadata complete before a stable
+            // poster was actually stored. Requeue only those blank cards.
+            for index in unknown.indices where unknown[index].adultScene != nil
+                && VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(unknown[index].id)") == nil {
+                unknown[index].adultLookupCompleted = nil
+            }
             lastSourceSignature = snapshot.sourceSignature ?? ""
             loaded = true
         }
@@ -248,6 +254,13 @@ private final class UnifiedContentModel: ObservableObject {
                     entry.adultScene = previous.adultScene
                     entry.adultLookupCompleted = previous.adultLookupCompleted
                     if previous.adultScene != nil { entry.title = previous.title }
+                    // A previous metadata lookup may have completed while its
+                    // image download failed. Manual refresh must retry those
+                    // entries instead of preserving a permanently blank card.
+                    let posterKey = "unified|\(entry.id)"
+                    if force, VideoThumbnailLoader.cachedImage(forStableKey: posterKey) == nil {
+                        entry.adultLookupCompleted = nil
+                    }
                 }
                 unknownItems.append(entry)
             }
@@ -357,6 +370,21 @@ private final class UnifiedContentModel: ObservableObject {
                 if let scene = bestAdultMatch(response.list, query: query) ?? response.list.first {
                     items[index].adultScene = scene
                     items[index].title = scene.title ?? items[index].title
+                    let posterKey = "unified|\(items[index].id)"
+                    if VideoThumbnailLoader.cachedImage(forStableKey: posterKey) == nil,
+                       let imageURL = scene.bestImage {
+                        await ThumbnailLoadGate.shared.acquire()
+                        let cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
+                        await ThumbnailLoadGate.shared.release()
+                        guard !Task.isCancelled else { return }
+                        if let cover {
+                            VideoThumbnailLoader.cacheImage(cover, forStableKey: posterKey)
+                            VideoThumbnailLoader.cacheImage(
+                                cover,
+                                forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: items[index].rawTitle)
+                            )
+                        }
+                    }
                 } else if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query) {
                     guard !Task.isCancelled else { return }
                     // No scene: use the shared performer fallback. Cache its image
@@ -488,11 +516,8 @@ struct UnifiedContentView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
-                    if section == .unknown,
-                       let cached = VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)") {
-                        Image(uiImage: cached)
-                            .resizable()
-                            .scaledToFill()
+                    if section == .unknown {
+                        UnifiedUnknownPosterArtwork(entry: entry)
                     } else if let url = entry.posterURL {
                         KFImage(url)
                             .placeholder { ProgressView().tint(AppPalette.accent) }
@@ -547,6 +572,49 @@ struct UnifiedContentView: View {
             return
         }
         showPlayer = true
+    }
+}
+
+/// Unknown posters can arrive either from the background ThePornDB refresh or
+/// from VideoDetailsView. This view observes the shared stable-poster event so
+/// the visible grid updates immediately without requiring a tab/page reload.
+private struct UnifiedUnknownPosterArtwork: View {
+    let entry: UnifiedMediaEntry
+    @State private var cachedImage: UIImage?
+
+    private var cacheKey: String { "unified|\(entry.id)" }
+
+    init(entry: UnifiedMediaEntry) {
+        self.entry = entry
+        _cachedImage = State(initialValue: VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)"))
+    }
+
+    var body: some View {
+        Group {
+            if let cachedImage {
+                Image(uiImage: cachedImage)
+                    .resizable()
+                    .scaledToFill()
+            } else if let url = entry.posterURL {
+                KFImage(url)
+                    .placeholder { ProgressView().tint(AppPalette.accent) }
+                    .cacheOriginalImage()
+                    .fade(duration: 0.12)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "film.fill")
+                    .font(.title)
+                    .foregroundStyle(AppPalette.gradient)
+            }
+        }
+        .task(id: cacheKey) {
+            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
+            guard notification.object as? String == cacheKey else { return }
+            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+        }
     }
 }
 
