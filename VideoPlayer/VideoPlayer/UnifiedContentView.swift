@@ -58,15 +58,6 @@ private final class UnifiedContentModel: ObservableObject {
     @Published var unknown: [UnifiedMediaEntry] = []
     @Published var isLoading = false
     @Published var status = ""
-    @Published var scanCompleted = false
-    @Published var processedCount = 0
-    @Published var totalCount = 0
-
-    var remainingCount: Int { max(0, totalCount - processedCount) }
-    var progressFraction: Double {
-        guard totalCount > 0 else { return 0 }
-        return min(1, Double(processedCount) / Double(totalCount))
-    }
     private var loaded = false
     private var lastSourceSignature = ""
     private let cloud = OffcloudViewModel()
@@ -104,10 +95,8 @@ private final class UnifiedContentModel: ObservableObject {
         if loaded && !force && sourceSignature == lastSourceSignature { return }
         guard !isLoading else { return }
         isLoading = true
-        scanCompleted = false
-        processedCount = 0
-        totalCount = 0
-        status = "Reading connected libraries…"
+        status = "Scanning connected libraries…"
+        defer { isLoading = false }
 
         var raw: [UnifiedMediaEntry] = []
         for server in vm.servers {
@@ -165,52 +154,29 @@ private final class UnifiedContentModel: ObservableObject {
 
         guard !raw.isEmpty else {
             movies = []; shows = []; unknown = []; loaded = true
-            lastSourceSignature = sourceSignature
+            lastSourceSignature = sourceSignature; status = ""
             persistSnapshot()
-            scanCompleted = true
-            status = "Library updated"
-            try? await Task.sleep(nanoseconds: 550_000_000)
-            isLoading = false
-            status = ""
             return
         }
-        totalCount = raw.count
-        status = "Preparing metadata scan…"
+        status = "Scanning files with TMDB…"
 
         // Match each cleaned title once. Episode packs can contain hundreds of files
         // that all resolve to the same show, so querying each file serially made the
         // Content screen appear to load forever.
         var representativeByKey: [String: UnifiedMediaEntry] = [:]
-        var fileCountByKey: [String: Int] = [:]
-        for entry in raw {
-            let key = metadataGroupKey(for: entry)
-            representativeByKey[key] = entry
-            fileCountByKey[key, default: 0] += 1
-        }
+        for entry in raw { representativeByKey[metadataGroupKey(for: entry)] = entry }
         let representatives = Array(representativeByKey)
-        // Do not hold the Content screen behind TMDB. Publish every discovered
-        // file immediately, then progressively replace filename cards with the
-        // canonical title and artwork as each lookup finishes.
-        publishProgressiveLibrary(raw: raw, metadataByQuery: [:])
-        loaded = true
-        persistSnapshot()
-        isLoading = false
-        status = "Matching movies and TV shows with TMDB…"
         var metadataByQuery: [String: TMDBTitleDetails] = [:]
         await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
             var iterator = representatives.makeIterator()
-            for _ in 0..<min(12, representatives.count) {
+            for _ in 0..<min(8, representatives.count) {
                 guard let (key, entry) = iterator.next() else { break }
                 let lookupTitle = metadataLookupTitle(for: entry)
                 let preferredType = preferredMediaType(for: entry)
                 group.addTask {
                     let details: TMDBTitleDetails?
                     if shouldFetchMetadata {
-                        details = await TMDBService.shared.detailsOriginalFirst(
-                            for: lookupTitle,
-                            preferredMediaType: preferredType,
-                            persistImmediately: false
-                        )
+                        details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                     } else {
                         details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                     }
@@ -219,19 +185,13 @@ private final class UnifiedContentModel: ObservableObject {
             }
             while let (key, details) = await group.next() {
                 if let details { metadataByQuery[key] = details }
-                processedCount = min(totalCount, processedCount + (fileCountByKey[key] ?? 1))
-                publishProgressiveLibrary(raw: raw, metadataByQuery: metadataByQuery)
                 if let (nextKey, nextEntry) = iterator.next() {
                     let lookupTitle = metadataLookupTitle(for: nextEntry)
                     let preferredType = preferredMediaType(for: nextEntry)
                     group.addTask {
                         let details: TMDBTitleDetails?
                         if shouldFetchMetadata {
-                            details = await TMDBService.shared.detailsOriginalFirst(
-                                for: lookupTitle,
-                                preferredMediaType: preferredType,
-                                persistImmediately: false
-                            )
+                            details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                         } else {
                             details = await TMDBService.shared.cachedDetailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType)
                         }
@@ -239,9 +199,6 @@ private final class UnifiedContentModel: ObservableObject {
                     }
                 }
             }
-        }
-        if shouldFetchMetadata {
-            await TMDBService.shared.flushPersistentCache()
         }
 
         var movieItems: [UnifiedMediaEntry] = []
@@ -277,8 +234,6 @@ private final class UnifiedContentModel: ObservableObject {
             showItems.append(first)
         }
 
-        status = "Saving library…"
-        processedCount = totalCount
         movies = deduplicatedMovies(movieItems).sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         shows = showItems.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         unknown = unknownItems.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
@@ -289,66 +244,8 @@ private final class UnifiedContentModel: ObservableObject {
         }
         loaded = true
         lastSourceSignature = sourceSignature
-        persistSnapshot()
-        scanCompleted = true
-        status = "Library updated"
-        try? await Task.sleep(nanoseconds: 700_000_000)
-        isLoading = false
         status = ""
-    }
-
-    private func publishProgressiveLibrary(
-        raw: [UnifiedMediaEntry],
-        metadataByQuery: [String: TMDBTitleDetails]
-    ) {
-        var movieItems: [UnifiedMediaEntry] = []
-        var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
-
-        for var entry in raw {
-            entry.details = metadataByQuery[metadataGroupKey(for: entry)]
-            if let canonicalTitle = entry.details?.title, !canonicalTitle.isEmpty {
-                entry.title = canonicalTitle
-            }
-
-            let looksLikeSeries = entry.details?.isSeries == true
-                || (entry.details == nil && preferredMediaType(for: entry) == "tv")
-            if looksLikeSeries {
-                let parts = VideoTitleFormatter.episodeComponents(from: entry.rawTitle)
-                let season = parts?.season ?? 1
-                let episode = parts?.episode ?? 1
-                let key = entry.details.map { "tmdb|\($0.id)" } ?? metadataGroupKey(for: entry)
-                let item = UnifiedEpisode(
-                    id: entry.id,
-                    title: entry.rawTitle,
-                    season: season,
-                    episode: episode,
-                    source: entry.source,
-                    url: entry.streamURL
-                )
-                showEpisodes[key, default: []].append((entry, item))
-            } else {
-                // Movie-like filenames remain visible while their TMDB request is
-                // pending. A failed lookup is moved to Unknown by the final pass.
-                movieItems.append(entry)
-            }
-        }
-
-        var showItems: [UnifiedMediaEntry] = []
-        for values in showEpisodes.values {
-            guard var first = values.first?.0 else { continue }
-            first.title = first.details?.title ?? TMDBService.searchTitle(from: first.rawTitle)
-            first.episodes = values.map(\.1).sorted { lhs, rhs in
-                lhs.season == rhs.season ? lhs.episode < rhs.episode : lhs.season < rhs.season
-            }
-            showItems.append(first)
-        }
-
-        movies = deduplicatedMovies(movieItems).sorted {
-            $0.title.localizedStandardCompare($1.title) == .orderedAscending
-        }
-        shows = showItems.sorted {
-            $0.title.localizedStandardCompare($1.title) == .orderedAscending
-        }
+        persistSnapshot()
     }
 
     private func persistSnapshot() {
@@ -467,7 +364,12 @@ struct UnifiedContentView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         sectionPicker
-                        if currentEntries.isEmpty {
+                        if model.isLoading && currentEntries.isEmpty {
+                            VStack(spacing: 14) {
+                                ProgressView().tint(AppPalette.accent).scaleEffect(1.15)
+                                Text(model.status).font(.subheadline).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity).padding(.top, 90)
+                        } else if currentEntries.isEmpty {
                             emptyState
                         } else if section == .unknown {
                             LazyVStack(spacing: 10) { ForEach(currentEntries) { unknownRow($0) } }
@@ -476,8 +378,6 @@ struct UnifiedContentView: View {
                         }
                     }.padding(.horizontal, 14).padding(.bottom, 110)
                 }.refreshable { await model.load(vm: vm, force: true) }
-
-                if model.isLoading { scanProgressOverlay }
             }
             .navigationTitle("Content")
             .toolbar {
@@ -489,55 +389,6 @@ struct UnifiedContentView: View {
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
         }
-    }
-
-    private var scanProgressOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.38).ignoresSafeArea()
-            VStack(spacing: 17) {
-                ZStack {
-                    Circle().stroke(Color.white.opacity(0.10), lineWidth: 7)
-                    Circle()
-                        .trim(from: 0, to: model.totalCount == 0 ? 0.18 : model.progressFraction)
-                        .stroke(AppPalette.gradient, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: model.progressFraction)
-                    if model.scanCompleted {
-                        Image(systemName: "checkmark").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
-                    } else if model.totalCount > 0 {
-                        Text("\(Int(model.progressFraction * 100))%")
-                            .font(.system(size: 16, weight: .bold, design: .rounded)).monospacedDigit()
-                    } else {
-                        ProgressView().tint(.white)
-                    }
-                }
-                .frame(width: 82, height: 82)
-
-                VStack(spacing: 6) {
-                    Text(model.scanCompleted ? "Complete" : model.status)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .multilineTextAlignment(.center)
-                    if model.totalCount > 0 {
-                        Text("Scanning \(model.processedCount) of \(model.totalCount)")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit()
-                        Text("\(model.remainingCount) files remaining")
-                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                    } else if !model.scanCompleted {
-                        Text("Reading folders and files")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 28).padding(.vertical, 24)
-            .frame(width: 275)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 26).stroke(Color.white.opacity(0.14)))
-            .shadow(color: AppPalette.accent.opacity(0.22), radius: 28)
-            .transition(.scale(scale: 0.88).combined(with: .opacity))
-        }
-        .zIndex(200)
-        .animation(.spring(response: 0.4, dampingFraction: 0.82), value: model.scanCompleted)
     }
 
     private var contentRefreshID: String {
