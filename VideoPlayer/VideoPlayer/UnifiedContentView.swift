@@ -246,7 +246,13 @@ final class UnifiedContentModel: ObservableObject {
                 group.addTask {
                     let details: TMDBTitleDetails?
                     if let existing = previousMetadataByQuery[key] {
-                        details = existing
+                        if existing.detailsPosterPath != nil {
+                            details = existing
+                        } else if shouldFetchMetadata {
+                            details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType) ?? existing
+                        } else {
+                            details = existing
+                        }
                     } else if !metadataSettingsChanged && previouslyScannedQueries.contains(key) {
                         details = nil
                     } else if shouldFetchMetadata {
@@ -265,7 +271,13 @@ final class UnifiedContentModel: ObservableObject {
                     group.addTask {
                         let details: TMDBTitleDetails?
                         if let existing = previousMetadataByQuery[nextKey] {
-                            details = existing
+                            if existing.detailsPosterPath != nil {
+                                details = existing
+                            } else if shouldFetchMetadata {
+                                details = await TMDBService.shared.detailsOriginalFirst(for: lookupTitle, preferredMediaType: preferredType) ?? existing
+                            } else {
+                                details = existing
+                            }
                         } else if !metadataSettingsChanged && previouslyScannedQueries.contains(nextKey) {
                             details = nil
                         } else if shouldFetchMetadata {
@@ -475,7 +487,7 @@ final class UnifiedContentModel: ObservableObject {
     private static func currentMetadataSignature() -> String {
         "tmdb:" + stableSignature(TMDBSettings.readAccessToken)
             + "|tpdb:" + stableSignature(ThePornDBSettings.apiKey)
-            + "|matcher:release-v2-adult-v1"
+            + "|matcher:release-v2-adult-v1-details-poster-v1"
     }
 
     func applyManualTMDB(_ details: TMDBTitleDetails, to entry: UnifiedMediaEntry) {

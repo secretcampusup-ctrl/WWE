@@ -43,6 +43,7 @@ struct TMDBTitleDetails: Identifiable, Codable {
     let director: TMDBCrewMember?
     let logoPath: String?
     let noLanguageBackdropPath: String?
+    let detailsPosterPath: String?
 
     var isSeries: Bool { mediaType == "tv" }
     var posterURL: URL? {
@@ -56,6 +57,10 @@ struct TMDBTitleDetails: Identifiable, Codable {
     }
     var detailsBackdropURL: URL? {
         guard let path = noLanguageBackdropPath ?? backdropPath else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
+    }
+    var detailsPosterURL: URL? {
+        guard let path = detailsPosterPath ?? posterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var logoURL: URL? {
@@ -109,7 +114,7 @@ actor TMDBService {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TMDBMetadata", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        cacheURL = directory.appendingPathComponent("metadata-v5.json")
+        cacheURL = directory.appendingPathComponent("metadata-v6.json")
         if let data = try? Data(contentsOf: cacheURL),
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
@@ -220,7 +225,12 @@ actor TMDBService {
                     ?? payload.images?.logos.first?.filePath,
                 // TMDB's No Language section is represented by iso_639_1 = null.
                 // Preserve API order and use its first backdrop exactly.
-                noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath
+                noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath,
+                // Details now uses portrait posters: No Language first, then
+                // the first English poster. Never substitute a backdrop here.
+                detailsPosterPath: payload.images?.posters?.first(where: { $0.iso6391 == nil })?.filePath
+                    ?? payload.images?.posters?.first(where: { $0.iso6391 == "en" })?.filePath
+                    ?? payload.posterPath
             )
             // One successful response is shared by the Content scan and Details
             // screen even when one requested `movie`/`tv` and the other `any`.
@@ -366,10 +376,14 @@ actor TMDBService {
     }
     func episodeDetails(seriesTitle: String, season: Int, episode: Int) async -> TMDBEpisodeDetails? {
         guard let series = await details(for: seriesTitle), series.isSeries else { return nil }
-        let cacheKey = "\(series.id)|s\(season)|e\(episode)"
+        return await episodeDetails(seriesID: series.id, season: season, episode: episode)
+    }
+
+    func episodeDetails(seriesID: Int, season: Int, episode: Int) async -> TMDBEpisodeDetails? {
+        let cacheKey = "\(seriesID)|s\(season)|e\(episode)"
         if let cached = episodeCache[cacheKey] { return cached }
         do {
-            let payload: EpisodePayload = try await request("/3/tv/\(series.id)/season/\(season)/episode/\(episode)", query: [:])
+            let payload: EpisodePayload = try await request("/3/tv/\(seriesID)/season/\(season)/episode/\(episode)", query: [:])
             let details = TMDBEpisodeDetails(name: payload.name ?? "Episode \(episode)", overview: payload.overview ?? "", stillPath: payload.stillPath)
             episodeCache[cacheKey] = details
             persistCache()
@@ -429,6 +443,7 @@ private struct ReleaseDateEntry: Decodable { let certification: String }
 private struct TMDBImagesPayload: Decodable {
     let logos: [TMDBLogoPayload]
     let backdrops: [TMDBBackdropPayload]?
+    let posters: [TMDBBackdropPayload]?
 }
 private struct TMDBLogoPayload: Decodable { let filePath: String; let iso6391: String? }
 private struct TMDBBackdropPayload: Decodable { let filePath: String; let iso6391: String? }

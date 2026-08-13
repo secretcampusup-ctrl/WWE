@@ -2,8 +2,6 @@ import SwiftUI
 import Foundation
 import UIKit
 import Combine
-import Vision
-import ImageIO
 
 struct VideoEpisodeItem: Identifiable {
     let id: String
@@ -20,20 +18,6 @@ struct VideoDetailsSuggestion: Identifiable {
     let title: String
     let posterCacheKey: String
     let imageURL: URL?
-}
-
-private struct MovieHeaderScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-private struct StandardHeaderScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
 }
 
 struct VideoDetailsItem: Identifiable {
@@ -194,14 +178,6 @@ struct VideoDetailsView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 Color.clear
                                     .frame(height: heroHeight - 24)
-                                    .background {
-                                        GeometryReader { marker in
-                                            Color.clear.preference(
-                                                key: StandardHeaderScrollOffsetKey.self,
-                                                value: marker.frame(in: .named("standard-details-scroll")).minY
-                                            )
-                                        }
-                                    }
 
                                 VStack(alignment: .leading, spacing: 14) {
                                 if item.is4K || item.isFullHD || qualityStyle != nil {
@@ -269,13 +245,10 @@ struct VideoDetailsView: View {
                         .background(AppTheme.bg)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                             }
+                            .background(DetailsScrollOffsetObserver(offset: $standardHeaderScrollOffset))
                         }
                     }
                 }
-            }
-            .coordinateSpace(name: "standard-details-scroll")
-            .onPreferenceChange(StandardHeaderScrollOffsetKey.self) { value in
-                standardHeaderScrollOffset = value
             }
             .background(AppTheme.bg.ignoresSafeArea())
             .ignoresSafeArea(edges: .top)
@@ -408,15 +381,17 @@ struct VideoDetailsView: View {
                     if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
                 }
             }
-            if tmdbDetails == nil, item.manualMetadataProvider != "theporndb" {
+            // Snapshots created before poster-based Details do not contain the
+            // preferred No Language/English poster path. Upgrade them once.
+            if tmdbDetails?.detailsPosterPath == nil, item.manualMetadataProvider != "theporndb" {
                 let loadedDetails = await TMDBService.shared.details(for: item.title)
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
-                tmdbDetails = loadedDetails
+                if let loadedDetails { tmdbDetails = loadedDetails }
             }
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil,
                VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
-               let imageURL = isMovieDetailsPage ? tmdbDetails?.detailsBackdropURL : tmdbDetails?.imageURL,
+               let imageURL = isMovieDetailsPage ? tmdbDetails?.detailsPosterURL : tmdbDetails?.imageURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
@@ -431,8 +406,8 @@ struct VideoDetailsView: View {
                     VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
                 }
                 VideoThumbnailLoader.cacheImage(image, forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
-                // Wide movie backdrops belong only to Details. Sharing this key
-                // with the grid was what replaced vertical posters after opening.
+                // Full portrait artwork belongs only to Details. Sharing this
+                // key with the grid would overwrite its lightweight poster.
                 if !isMovieDetailsPage, let key = item.posterCacheKey {
                     VideoThumbnailLoader.cacheImage(image, forStableKey: key)
                 }
@@ -513,17 +488,9 @@ struct VideoDetailsView: View {
                     movieDetailsBaseColor
                     Group {
                         if let backdrop = movieBackdropFrame {
-                            SmartCinematicBackdrop(
-                                image: backdrop,
-                                cacheKey: tmdbTitleArtworkCacheKey,
-                                size: CGSize(width: proxy.size.width, height: heroHeight)
-                            )
+                            FullPosterDetailsBackdrop(image: backdrop)
                         } else if let displayedFrame {
-                            SmartCinematicBackdrop(
-                                image: displayedFrame,
-                                cacheKey: "details-focal|\(stableMetadataCacheKey)",
-                                size: CGSize(width: proxy.size.width, height: heroHeight)
-                            )
+                            FullPosterDetailsBackdrop(image: displayedFrame)
                         } else {
                             DetailsLoadingSpinner(size: 38, lineWidth: 3.2)
                         }
@@ -576,14 +543,6 @@ struct VideoDetailsView: View {
                 VStack(spacing: 0) {
                     Color.clear
                         .frame(height: max(300, UIScreen.main.bounds.height * 0.39))
-                        .background {
-                            GeometryReader { marker in
-                                Color.clear.preference(
-                                    key: MovieHeaderScrollOffsetKey.self,
-                                    value: marker.frame(in: .named("movie-details-scroll")).minY
-                                )
-                            }
-                        }
 
                     VStack(spacing: 16) {
                         movieTitleTreatment
@@ -643,10 +602,7 @@ struct VideoDetailsView: View {
                     .padding(.horizontal, 18)
                     .padding(.bottom, 42)
                 }
-            }
-            .coordinateSpace(name: "movie-details-scroll")
-            .onPreferenceChange(MovieHeaderScrollOffsetKey.self) { value in
-                movieHeaderScrollOffset = value
+                .background(DetailsScrollOffsetObserver(offset: $movieHeaderScrollOffset))
             }
 
             HStack {
@@ -1040,7 +996,7 @@ struct VideoDetailsView: View {
     }
 
     private var tmdbTitleArtworkCacheKey: String {
-        (isMovieDetailsPage ? "tmdb-movie-backdrop-nolang-original-v1|" : "tmdb-title|") + stableMetadataCacheKey
+        (isMovieDetailsPage ? "tmdb-details-poster-nolang-en-original-v1|" : "tmdb-title|") + stableMetadataCacheKey
     }
 
     private var topSafeAreaInset: CGFloat {
@@ -1364,11 +1320,12 @@ struct VideoDetailsView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .fill(Color.white.opacity(0.07))
-                    if let artwork = movieBackdropFrame ?? displayedFrame {
-                        Image(uiImage: artwork)
-                            .resizable()
-                            .scaledToFill()
-                    }
+                    EpisodeStillArtwork(
+                        seriesID: resolvedMovieDetails?.id,
+                        season: episode.season,
+                        episode: episode.episode,
+                        fallback: movieBackdropFrame ?? displayedFrame
+                    )
                     LinearGradient(
                         colors: [.clear, .black.opacity(0.78)],
                         startPoint: .center,
@@ -1681,124 +1638,95 @@ struct VideoDetailsView: View {
 
 // MARK: - إضافة الفيديو لقائمة تشغيل
 
-private struct SmartCinematicBackdrop: View {
-    let image: UIImage
-    let cacheKey: String
-    let size: CGSize
-    @State private var focalPoint: UnitPoint?
+private struct DetailsScrollOffsetObserver: UIViewRepresentable {
+    @Binding var offset: CGFloat
 
-    init(image: UIImage, cacheKey: String, size: CGSize) {
-        self.image = image
-        self.cacheKey = cacheKey
-        self.size = size
-        _focalPoint = State(initialValue: SmartBackdropFocalStore.point(for: cacheKey))
+    func makeCoordinator() -> Coordinator {
+        Coordinator(offset: $offset)
     }
+
+    func makeUIView(context: Context) -> UIView {
+        let probe = UIView(frame: .zero)
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        DispatchQueue.main.async { context.coordinator.attach(from: probe) }
+        return probe
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.offset = $offset
+        guard !context.coordinator.isAttached else { return }
+        DispatchQueue.main.async { context.coordinator.attach(from: uiView) }
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject {
+        var offset: Binding<CGFloat>
+        private weak var scrollView: UIScrollView?
+        private var observation: NSKeyValueObservation?
+        private var attachAttempts = 0
+        var isAttached: Bool { scrollView != nil }
+
+        init(offset: Binding<CGFloat>) {
+            self.offset = offset
+        }
+
+        func attach(from probe: UIView) {
+            var ancestor = probe.superview
+            while let view = ancestor, !(view is UIScrollView) {
+                ancestor = view.superview
+            }
+            guard let found = ancestor as? UIScrollView else {
+                guard attachAttempts < 8 else { return }
+                attachAttempts += 1
+                DispatchQueue.main.async { [weak self, weak probe] in
+                    guard let self, let probe else { return }
+                    self.attach(from: probe)
+                }
+                return
+            }
+            guard scrollView !== found else { return }
+            attachAttempts = 0
+            detach()
+            scrollView = found
+            publish(from: found)
+            observation = found.observe(\.contentOffset, options: [.new]) { [weak self, weak found] _, _ in
+                guard let self, let found else { return }
+                self.publish(from: found)
+            }
+        }
+
+        func detach() {
+            observation?.invalidate()
+            observation = nil
+            scrollView = nil
+        }
+
+        private func publish(from scrollView: UIScrollView) {
+            // At rest: contentOffset.y == -adjustedContentInset.top. Pulling
+            // down becomes positive; scrolling content up becomes negative.
+            let value = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+            if abs(offset.wrappedValue - value) > 0.1 {
+                offset.wrappedValue = value
+            }
+        }
+    }
+}
+
+private struct FullPosterDetailsBackdrop: View {
+    let image: UIImage
 
     var body: some View {
-        Group {
-            if focalPoint != nil {
-                let placement = aspectFillPlacement
-                Image(uiImage: image)
-                    .resizable()
-                    .frame(width: placement.rendered.width, height: placement.rendered.height)
-                    .position(x: placement.center.x, y: placement.center.y)
-                    .frame(width: size.width, height: size.height)
-                    .clipped()
-            } else {
-                // Do not flash the centered image and move it a moment later.
-                Color.clear.frame(width: size.width, height: size.height)
-            }
+        GeometryReader { proxy in
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
         .transaction { $0.animation = nil }
-            .task(id: ObjectIdentifier(image)) {
-                if let cached = SmartBackdropFocalStore.point(for: cacheKey) {
-                    focalPoint = cached
-                    return
-                }
-                let detected = await SmartBackdropAnalyzer.focalPoint(in: image)
-                guard !Task.isCancelled else { return }
-                focalPoint = detected
-                SmartBackdropFocalStore.save(detected, for: cacheKey)
-            }
-    }
-
-    private var aspectFillPlacement: (rendered: CGSize, center: CGPoint) {
-        let source = image.size
-        guard source.width > 0, source.height > 0, size.width > 0, size.height > 0 else {
-            return (size, CGPoint(x: size.width / 2, y: size.height / 2))
-        }
-        let scale = max(size.width / source.width, size.height / source.height)
-        let rendered = CGSize(width: source.width * scale, height: source.height * scale)
-        let point = focalPoint ?? .center
-        let idealX = size.width / 2 - point.x * rendered.width
-        let idealY = size.height / 2 - point.y * rendered.height
-        let originX = min(0, max(size.width - rendered.width, idealX))
-        let originY = min(0, max(size.height - rendered.height, idealY))
-        return (rendered, CGPoint(x: originX + rendered.width / 2, y: originY + rendered.height / 2))
-    }
-}
-
-private enum SmartBackdropAnalyzer {
-    static func focalPoint(in image: UIImage) async -> UnitPoint {
-        guard let cgImage = image.cgImage else { return .center }
-        let orientation = image.visionOrientation
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let faceRequest = VNDetectFaceRectanglesRequest()
-                let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation)
-                try? handler.perform([faceRequest])
-                let faceRects = (faceRequest.results ?? []).map(\.boundingBox)
-                if let point = focalPoint(for: faceRects) {
-                    continuation.resume(returning: point)
-                    return
-                }
-
-                let saliencyRequest = VNGenerateAttentionBasedSaliencyImageRequest()
-                try? handler.perform([saliencyRequest])
-                let salientRects = saliencyRequest.results?.first?.salientObjects?.map(\.boundingBox) ?? []
-                continuation.resume(returning: focalPoint(for: salientRects) ?? .center)
-            }
-        }
-    }
-
-    private static func focalPoint(for rects: [CGRect]) -> UnitPoint? {
-        guard var union = rects.first else { return nil }
-        for rect in rects.dropFirst() { union = union.union(rect) }
-        let x = min(0.88, max(0.12, union.midX))
-        let y = min(0.68, max(0.18, 1 - union.midY))
-        return UnitPoint(x: x, y: y)
-    }
-}
-
-private enum SmartBackdropFocalStore {
-    private static let defaultsKey = "tmdb.smartBackdropFocal.v1"
-
-    static func point(for key: String) -> UnitPoint? {
-        guard let value = UserDefaults.standard.dictionary(forKey: defaultsKey)?[key] as? [Double],
-              value.count == 2 else { return nil }
-        return UnitPoint(x: value[0], y: value[1])
-    }
-
-    static func save(_ point: UnitPoint, for key: String) {
-        var values = UserDefaults.standard.dictionary(forKey: defaultsKey) ?? [:]
-        values[key] = [point.x, point.y]
-        UserDefaults.standard.set(values, forKey: defaultsKey)
-    }
-}
-
-private extension UIImage {
-    var visionOrientation: CGImagePropertyOrientation {
-        switch imageOrientation {
-        case .up: return .up
-        case .upMirrored: return .upMirrored
-        case .down: return .down
-        case .downMirrored: return .downMirrored
-        case .left: return .left
-        case .leftMirrored: return .leftMirrored
-        case .right: return .right
-        case .rightMirrored: return .rightMirrored
-        @unknown default: return .up
-        }
     }
 }
 
@@ -1823,6 +1751,43 @@ private struct DetailsLoadingSpinner: View {
                 }
             }
             .accessibilityLabel("Loading")
+    }
+}
+
+private struct EpisodeStillArtwork: View {
+    let seriesID: Int?
+    let season: Int
+    let episode: Int
+    let fallback: UIImage?
+    @State private var stillURL: URL?
+
+    var body: some View {
+        ZStack {
+            if let fallback {
+                Image(uiImage: fallback)
+                    .resizable()
+                    .scaledToFill()
+            }
+
+            if let stillURL {
+                CachedTMDBImage(url: stillURL, contentMode: .fill)
+                    .transition(.opacity)
+            }
+        }
+        .task(id: loadingIdentity) {
+            guard let seriesID else { return }
+            let details = await TMDBService.shared.episodeDetails(
+                seriesID: seriesID,
+                season: season,
+                episode: episode
+            )
+            guard !Task.isCancelled else { return }
+            stillURL = details?.imageURL
+        }
+    }
+
+    private var loadingIdentity: String {
+        "\(seriesID ?? 0)|s\(season)|e\(episode)"
     }
 }
 
