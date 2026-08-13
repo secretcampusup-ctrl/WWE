@@ -188,6 +188,13 @@ private final class UnifiedContentModel: ObservableObject {
             fileCountByKey[key, default: 0] += 1
         }
         let representatives = Array(representativeByKey)
+        // Do not hold the Content screen behind TMDB. Publish every discovered
+        // file immediately, then progressively replace filename cards with the
+        // canonical title and artwork as each lookup finishes.
+        publishProgressiveLibrary(raw: raw, metadataByQuery: [:])
+        loaded = true
+        persistSnapshot()
+        isLoading = false
         status = "Matching movies and TV shows with TMDB…"
         var metadataByQuery: [String: TMDBTitleDetails] = [:]
         await withTaskGroup(of: (String, TMDBTitleDetails?).self) { group in
@@ -213,6 +220,7 @@ private final class UnifiedContentModel: ObservableObject {
             while let (key, details) = await group.next() {
                 if let details { metadataByQuery[key] = details }
                 processedCount = min(totalCount, processedCount + (fileCountByKey[key] ?? 1))
+                publishProgressiveLibrary(raw: raw, metadataByQuery: metadataByQuery)
                 if let (nextKey, nextEntry) = iterator.next() {
                     let lookupTitle = metadataLookupTitle(for: nextEntry)
                     let preferredType = preferredMediaType(for: nextEntry)
@@ -287,6 +295,60 @@ private final class UnifiedContentModel: ObservableObject {
         try? await Task.sleep(nanoseconds: 700_000_000)
         isLoading = false
         status = ""
+    }
+
+    private func publishProgressiveLibrary(
+        raw: [UnifiedMediaEntry],
+        metadataByQuery: [String: TMDBTitleDetails]
+    ) {
+        var movieItems: [UnifiedMediaEntry] = []
+        var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
+
+        for var entry in raw {
+            entry.details = metadataByQuery[metadataGroupKey(for: entry)]
+            if let canonicalTitle = entry.details?.title, !canonicalTitle.isEmpty {
+                entry.title = canonicalTitle
+            }
+
+            let looksLikeSeries = entry.details?.isSeries == true
+                || (entry.details == nil && preferredMediaType(for: entry) == "tv")
+            if looksLikeSeries {
+                let parts = VideoTitleFormatter.episodeComponents(from: entry.rawTitle)
+                let season = parts?.season ?? 1
+                let episode = parts?.episode ?? 1
+                let key = entry.details.map { "tmdb|\($0.id)" } ?? metadataGroupKey(for: entry)
+                let item = UnifiedEpisode(
+                    id: entry.id,
+                    title: entry.rawTitle,
+                    season: season,
+                    episode: episode,
+                    source: entry.source,
+                    url: entry.streamURL
+                )
+                showEpisodes[key, default: []].append((entry, item))
+            } else {
+                // Movie-like filenames remain visible while their TMDB request is
+                // pending. A failed lookup is moved to Unknown by the final pass.
+                movieItems.append(entry)
+            }
+        }
+
+        var showItems: [UnifiedMediaEntry] = []
+        for values in showEpisodes.values {
+            guard var first = values.first?.0 else { continue }
+            first.title = first.details?.title ?? TMDBService.searchTitle(from: first.rawTitle)
+            first.episodes = values.map(\.1).sorted { lhs, rhs in
+                lhs.season == rhs.season ? lhs.episode < rhs.episode : lhs.season < rhs.season
+            }
+            showItems.append(first)
+        }
+
+        movies = deduplicatedMovies(movieItems).sorted {
+            $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+        shows = showItems.sorted {
+            $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
     }
 
     private func persistSnapshot() {

@@ -93,6 +93,7 @@ actor TMDBService {
     static let shared = TMDBService()
     private var detailsCache: [String: TMDBTitleDetails]
     private var episodeCache: [String: TMDBEpisodeDetails]
+    private var failedLookupCache: [String: Date]
     private let cacheURL: URL
     private let decoder: JSONDecoder = {
         let value = JSONDecoder()
@@ -109,14 +110,20 @@ actor TMDBService {
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
             episodeCache = payload.episodes
+            failedLookupCache = payload.failedLookups ?? [:]
         } else {
             detailsCache = [:]
             episodeCache = [:]
+            failedLookupCache = [:]
         }
     }
 
     private func persistCache() {
-        let payload = TMDBPersistentCache(details: detailsCache, episodes: episodeCache)
+        let payload = TMDBPersistentCache(
+            details: detailsCache,
+            episodes: episodeCache,
+            failedLookups: failedLookupCache
+        )
         guard let data = try? JSONEncoder().encode(payload) else { return }
         try? data.write(to: cacheURL, options: .atomic)
     }
@@ -189,8 +196,16 @@ actor TMDBService {
         guard !normalizedQuery.isEmpty else { return nil }
         let cacheKey = normalizedQuery.lowercased() + "|" + (preferredMediaType ?? "any")
         if let cached = detailsCache[cacheKey] { return cached }
+        if let failedAt = failedLookupCache[cacheKey],
+           Date().timeIntervalSince(failedAt) < 7 * 24 * 60 * 60 {
+            return nil
+        }
         let candidates = await searchCandidates(for: normalizedQuery, preferredMediaType: preferredMediaType)
-        guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else { return nil }
+        guard let match = Self.bestMatch(in: candidates, query: normalizedQuery, preferredMediaType: preferredMediaType) else {
+            failedLookupCache[cacheKey] = Date()
+            if persistImmediately { persistCache() }
+            return nil
+        }
         do {
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
             let payload: DetailPayload = try await request(endpoint, query: [
@@ -221,9 +236,14 @@ actor TMDBService {
                     ?? payload.images?.logos.first?.filePath
             )
             detailsCache[cacheKey] = details
+            failedLookupCache.removeValue(forKey: cacheKey)
             if persistImmediately { persistCache() }
             return details
-        } catch { return nil }
+        } catch {
+            failedLookupCache[cacheKey] = Date()
+            if persistImmediately { persistCache() }
+            return nil
+        }
     }
 
     private func searchCandidates(for rawQuery: String, preferredMediaType: String?) async -> [SearchResult] {
@@ -389,6 +409,7 @@ actor TMDBService {
 private struct TMDBPersistentCache: Codable {
     let details: [String: TMDBTitleDetails]
     let episodes: [String: TMDBEpisodeDetails]
+    let failedLookups: [String: Date]?
 }
 
 private struct SearchResponse: Decodable { let results: [SearchResult] }
