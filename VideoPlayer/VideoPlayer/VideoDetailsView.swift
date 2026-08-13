@@ -1258,11 +1258,7 @@ struct VideoDetailsView: View {
                     }
                 }
 
-                Text("\(episode.episode). \(episodeArtworkModel.episodeName(
-                    seriesID: resolvedMovieDetails?.id,
-                    season: episode.season,
-                    episode: episode.episode
-                ) ?? episode.episodeTitle)")
+                Text(String(episode.episode) + ". " + episodeDisplayName(episode))
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -1275,6 +1271,14 @@ struct VideoDetailsView: View {
     private func seriesEpisodeProgress(_ episode: VideoEpisodeItem) -> CGFloat {
         guard let history = vm.playbackHistory[episode.id], history.durationSeconds > 0 else { return 0 }
         return CGFloat(min(1, max(0, history.positionSeconds / history.durationSeconds)))
+    }
+
+    private func episodeDisplayName(_ episode: VideoEpisodeItem) -> String {
+        episodeArtworkModel.episodeName(
+            seriesID: resolvedMovieDetails?.id,
+            season: episode.season,
+            episode: episode.episode
+        ) ?? episode.episodeTitle
     }
 
     private var episodeArtworkLoadingIdentity: String {
