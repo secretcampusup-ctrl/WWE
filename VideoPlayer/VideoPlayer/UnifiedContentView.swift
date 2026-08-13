@@ -84,8 +84,8 @@ private final class UnifiedContentModel: ObservableObject {
             unknown = snapshot.unknown
             // Older snapshots could mark metadata complete before a stable
             // poster was actually stored. Requeue only those blank cards.
-            for index in unknown.indices where unknown[index].adultScene != nil
-                && VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(unknown[index].id)") == nil {
+            for index in unknown.indices where
+                VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(unknown[index].id)") == nil {
                 unknown[index].adultLookupCompleted = nil
             }
             lastSourceSignature = snapshot.sourceSignature ?? ""
@@ -257,8 +257,8 @@ private final class UnifiedContentModel: ObservableObject {
                     // A previous metadata lookup may have completed while its
                     // image download failed. Manual refresh must retry those
                     // entries instead of preserving a permanently blank card.
-                    let posterKey = "unified|\(entry.id)"
-                    if force, VideoThumbnailLoader.cachedImage(forStableKey: posterKey) == nil {
+                    let adultPosterKey = "unified-adult|\(entry.id)"
+                    if force, VideoThumbnailLoader.cachedImage(forStableKey: adultPosterKey) == nil {
                         entry.adultLookupCompleted = nil
                     }
                 }
@@ -358,7 +358,10 @@ private final class UnifiedContentModel: ObservableObject {
         let pendingIndices = Array(items.indices.filter { items[$0].adultLookupCompleted != true }.prefix(200))
         for index in pendingIndices {
             guard !Task.isCancelled else { return }
-            let query = TMDBService.searchTitle(from: items[index].rawTitle)
+            // Match VideoDetailsView exactly. The former TMDB release-name
+            // cleaner produced a different query for adult filenames, which is
+            // why opening Details found a cover while Content refresh did not.
+            let query = VideoTitleFormatter.title(from: items[index].title)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !query.isEmpty else {
                 items[index].adultLookupCompleted = true
@@ -371,13 +374,15 @@ private final class UnifiedContentModel: ObservableObject {
                     items[index].adultScene = scene
                     items[index].title = scene.title ?? items[index].title
                     let posterKey = "unified|\(items[index].id)"
-                    if VideoThumbnailLoader.cachedImage(forStableKey: posterKey) == nil,
+                    let adultPosterKey = "unified-adult|\(items[index].id)"
+                    if VideoThumbnailLoader.cachedImage(forStableKey: adultPosterKey) == nil,
                        let imageURL = scene.bestImage {
                         await ThumbnailLoadGate.shared.acquire()
                         let cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
                         await ThumbnailLoadGate.shared.release()
                         guard !Task.isCancelled else { return }
                         if let cover {
+                            VideoThumbnailLoader.cacheImage(cover, forStableKey: adultPosterKey)
                             VideoThumbnailLoader.cacheImage(cover, forStableKey: posterKey)
                             VideoThumbnailLoader.cacheImage(
                                 cover,
@@ -391,6 +396,7 @@ private final class UnifiedContentModel: ObservableObject {
                     // under the same stable key consumed by the Unknown poster grid.
                     items[index].title = metadata.title ?? items[index].title
                     if let cover = metadata.coverImage {
+                        VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified-adult|\(items[index].id)")
                         VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified|\(items[index].id)")
                     }
                 }
@@ -583,10 +589,14 @@ private struct UnifiedUnknownPosterArtwork: View {
     @State private var cachedImage: UIImage?
 
     private var cacheKey: String { "unified|\(entry.id)" }
+    private var adultCacheKey: String { "unified-adult|\(entry.id)" }
 
     init(entry: UnifiedMediaEntry) {
         self.entry = entry
-        _cachedImage = State(initialValue: VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)"))
+        _cachedImage = State(initialValue:
+            VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(entry.id)")
+                ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)")
+        )
     }
 
     var body: some View {
@@ -608,11 +618,52 @@ private struct UnifiedUnknownPosterArtwork: View {
                     .foregroundStyle(AppPalette.gradient)
             }
         }
-        .task(id: cacheKey) {
-            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+        .task(id: adultCacheKey) {
+            await loadVisiblePosterIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
-            guard notification.object as? String == cacheKey else { return }
+            guard let updatedKey = notification.object as? String,
+                  updatedKey == adultCacheKey || updatedKey == cacheKey else { return }
+            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: adultCacheKey)
+                ?? VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+        }
+    }
+
+    private func loadVisiblePosterIfNeeded() async {
+        if let existing = VideoThumbnailLoader.cachedImage(forStableKey: adultCacheKey) {
+            cachedImage = existing
+            return
+        }
+
+        let query = VideoTitleFormatter.title(from: entry.title)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, ThePornDBSettings.hasValidAPIKey else {
+            cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
+            return
+        }
+
+        // LazyVGrid creates this task only for visible/near-visible cards. The
+        // shared gate bounds all screens together and the second cache check
+        // avoids work if the model refresh completed while this card waited.
+        await ThumbnailLoadGate.shared.acquire()
+        if let existing = VideoThumbnailLoader.cachedImage(forStableKey: adultCacheKey) {
+            await ThumbnailLoadGate.shared.release()
+            cachedImage = existing
+            return
+        }
+        let cover = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query)?.coverImage
+        await ThumbnailLoadGate.shared.release()
+
+        guard !Task.isCancelled else { return }
+        if let cover {
+            VideoThumbnailLoader.cacheImage(cover, forStableKey: adultCacheKey)
+            VideoThumbnailLoader.cacheImage(cover, forStableKey: cacheKey)
+            VideoThumbnailLoader.cacheImage(
+                cover,
+                forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: entry.title)
+            )
+            cachedImage = cover
+        } else {
             cachedImage = VideoThumbnailLoader.cachedImage(forStableKey: cacheKey)
         }
     }

@@ -393,6 +393,10 @@ struct VideoDetailsView: View {
                 )
                 if let key = item.posterCacheKey {
                     VideoThumbnailLoader.cacheImage(cover, forStableKey: key)
+                    if key.hasPrefix("unified|") {
+                        let suffix = String(key.dropFirst("unified|".count))
+                        VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified-adult|\(suffix)")
+                    }
                 }
             }
         }
