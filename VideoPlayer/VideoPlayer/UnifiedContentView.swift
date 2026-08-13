@@ -63,6 +63,7 @@ private final class UnifiedContentModel: ObservableObject {
     @Published var status = ""
     private var loaded = false
     private var lastSourceSignature = ""
+    private var adultEnrichmentTask: Task<Void, Never>?
     private let cloud = OffcloudViewModel()
     private static var snapshotURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -87,6 +88,12 @@ private final class UnifiedContentModel: ObservableObject {
     }
 
     func load(vm: AppViewModel, force: Bool = false) async {
+        if force {
+            // A refresh replaces the previous scan. Never let an older adult
+            // enrichment pass continue mutating the same array in parallel.
+            adultEnrichmentTask?.cancel()
+            adultEnrichmentTask = nil
+        }
         let metadataMatcherRevision = "release-v2-adult-v1"
         let baseSourceSignature = vm.servers.map {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
@@ -99,7 +106,7 @@ private final class UnifiedContentModel: ObservableObject {
         if loaded && !force && sourceSignature == lastSourceSignature {
             if ThePornDBSettings.hasValidAPIKey,
                unknown.contains(where: { $0.adultLookupCompleted != true }) {
-                Task { await self.enrichUnknownWithAdultMetadata() }
+                startAdultEnrichmentIfNeeded()
             }
             return
         }
@@ -211,6 +218,13 @@ private final class UnifiedContentModel: ObservableObject {
             }
         }
 
+        // Keep completed adult matches while refreshing provider file lists.
+        // Otherwise every manual refresh discarded the posters and immediately
+        // launched the same large batch of ThePornDB requests again.
+        let previousAdultByID = Dictionary(
+            unknown.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var movieItems: [UnifiedMediaEntry] = []
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
@@ -230,6 +244,11 @@ private final class UnifiedContentModel: ObservableObject {
             } else if entry.details != nil {
                 movieItems.append(entry)
             } else {
+                if let previous = previousAdultByID[entry.id] {
+                    entry.adultScene = previous.adultScene
+                    entry.adultLookupCompleted = previous.adultLookupCompleted
+                    if previous.adultScene != nil { entry.title = previous.title }
+                }
                 unknownItems.append(entry)
             }
         }
@@ -252,7 +271,7 @@ private final class UnifiedContentModel: ObservableObject {
         // It also runs on the first normal scan; results are persisted below by
         // enrichUnknownWithAdultMetadata and are not requested again next launch.
         if ThePornDBSettings.hasValidAPIKey && !unknownItems.isEmpty {
-            Task { await self.enrichUnknownWithAdultMetadata() }
+            startAdultEnrichmentIfNeeded()
         }
         loaded = true
         lastSourceSignature = sourceSignature
@@ -325,6 +344,7 @@ private final class UnifiedContentModel: ObservableObject {
         // first ensures libraries larger than 200 continue on later launches.
         let pendingIndices = Array(items.indices.filter { items[$0].adultLookupCompleted != true }.prefix(200))
         for index in pendingIndices {
+            guard !Task.isCancelled else { return }
             let query = TMDBService.searchTitle(from: items[index].rawTitle)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !query.isEmpty else {
@@ -332,11 +352,13 @@ private final class UnifiedContentModel: ObservableObject {
                 continue
             }
             if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5) {
+                guard !Task.isCancelled else { return }
                 items[index].adultLookupCompleted = true
                 if let scene = bestAdultMatch(response.list, query: query) ?? response.list.first {
                     items[index].adultScene = scene
                     items[index].title = scene.title ?? items[index].title
                 } else if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query) {
+                    guard !Task.isCancelled else { return }
                     // No scene: use the shared performer fallback. Cache its image
                     // under the same stable key consumed by the Unknown poster grid.
                     items[index].title = metadata.title ?? items[index].title
@@ -350,6 +372,18 @@ private final class UnifiedContentModel: ObservableObject {
         }
         unknown = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         persistSnapshot()
+    }
+
+    private func startAdultEnrichmentIfNeeded() {
+        guard ThePornDBSettings.hasValidAPIKey,
+              unknown.contains(where: { $0.adultLookupCompleted != true }),
+              adultEnrichmentTask == nil else { return }
+        adultEnrichmentTask = Task { [weak self] in
+            guard let self else { return }
+            await self.enrichUnknownWithAdultMetadata()
+            guard !Task.isCancelled else { return }
+            self.adultEnrichmentTask = nil
+        }
     }
 
     private func bestAdultMatch(_ scenes: [ThePornDBScene], query: String) -> ThePornDBScene? {

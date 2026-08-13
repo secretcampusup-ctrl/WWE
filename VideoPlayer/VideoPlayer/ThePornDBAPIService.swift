@@ -1,7 +1,8 @@
 import Foundation
 import UIKit
+import ImageIO
 
-class ThePornDBAPIService {
+actor ThePornDBAPIService {
 
     static let shared = ThePornDBAPIService()
     private init() {}
@@ -51,8 +52,6 @@ class ThePornDBAPIService {
             throw ThePornDBError.invalidURL
         }
 
-        print("🔍 [ThePornDB API] Request: \(request.url?.absoluteString ?? "N/A")")
-
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await AppNetworkSession.shared.data(for: request)
@@ -62,16 +61,9 @@ class ThePornDBAPIService {
             throw ThePornDBError.networkError(error)
         }
 
-        // طباعة الاستجابة الخام للتشخيص
-        if let raw = String(data: data, encoding: .utf8) {
-            print("📦 [ThePornDB API] Raw response: \(raw)")
-        }
-
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ThePornDBError.invalidResponse
         }
-
-        print("🔍 [ThePornDB API] Status: \(httpResponse.statusCode)")
 
         switch httpResponse.statusCode {
         case 200...299: break
@@ -182,9 +174,16 @@ class ThePornDBAPIService {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw ThePornDBError.serverError((response as? HTTPURLResponse)?.statusCode ?? 500)
         }
-        guard let image = UIImage(data: data, scale: 1.0) else {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_200,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             throw ThePornDBError.decodingError(NSError(domain: "ThePornDB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create image"]))
         }
-        return image
+        return UIImage(cgImage: cgImage)
     }
 }
