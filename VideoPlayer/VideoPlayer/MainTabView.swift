@@ -92,6 +92,7 @@ struct HomeLibraryView: View {
     @State private var showRefreshOverlay = false
     @State private var heroPage = 1
     @State private var showHeroPlayer = false
+    @State private var heroMotion = HomeHeroMotionModel()
 
     private let heroTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
 
@@ -109,14 +110,17 @@ struct HomeLibraryView: View {
                 .ignoresSafeArea()
 
                 if !featuredItems.isEmpty {
-                    heroPinnedBackground
-                        .frame(maxHeight: .infinity, alignment: .top)
-                        .ignoresSafeArea(edges: .top)
-                        .allowsHitTesting(false)
+                    HomeHeroZoomContainer(motion: heroMotion) {
+                        heroPinnedBackground
+                    }
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .ignoresSafeArea(edges: .top)
+                    .allowsHitTesting(false)
                 }
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        heroPullOffsetReader
                         heroSection
 
                         LazyVStack(alignment: .leading, spacing: 28) {
@@ -139,6 +143,10 @@ struct HomeLibraryView: View {
                     }
                     .padding(.bottom, 110)
                     .tint(AppPalette.accent)
+                }
+                .coordinateSpace(name: "home-hero-scroll")
+                .onPreferenceChange(HomeHeroPullPreferenceKey.self) { offset in
+                    heroMotion.pullDistance = max(0, offset)
                 }
                 .scrollIndicators(.hidden)
                 // The native refresh control still supplies the familiar pull
@@ -252,41 +260,58 @@ struct HomeLibraryView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 22)
         } else {
-            ZStack(alignment: .top) {
-                TabView(selection: $heroPage) {
-                    ForEach(Array(heroCarouselItems.enumerated()), id: \.offset) { index, entry in
-                        heroSlide(entry)
-                            .tag(index)
-                    }
-                }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-
-                homeHeader
-                    .padding(.top, 12)
-
-                VStack {
-                    Spacer()
-                    HStack(spacing: 7) {
-                        ForEach(featuredItems.indices, id: \.self) { index in
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.42)) { heroPage = index + 1 }
-                            } label: {
-                                Capsule()
-                                    .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
-                                    .frame(width: index == currentHeroIndex ? 22 : 6, height: 6)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Featured item \(index + 1)")
+            GeometryReader { viewport in
+                let pageWidth = viewport.size.width
+                ZStack(alignment: .top) {
+                    TabView(selection: $heroPage) {
+                        ForEach(Array(heroCarouselItems.enumerated()), id: \.offset) { index, entry in
+                            heroSlide(entry, viewportWidth: pageWidth)
+                                .frame(width: pageWidth, height: 610)
+                                .clipped()
+                                .tag(index)
                         }
                     }
-                    .animation(.easeOut(duration: 0.25), value: currentHeroIndex)
-                    .padding(.bottom, 52)
+                    .frame(width: pageWidth, height: 610)
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+
+                    homeHeader
+                        .frame(width: pageWidth)
+                        .padding(.top, 12)
+
+                    VStack {
+                        Spacer()
+                        HStack(spacing: 7) {
+                            ForEach(featuredItems.indices, id: \.self) { index in
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.42)) { heroPage = index + 1 }
+                                } label: {
+                                    Capsule()
+                                        .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
+                                        .frame(width: index == currentHeroIndex ? 22 : 6, height: 6)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Featured item \(index + 1)")
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.25), value: currentHeroIndex)
+                        .padding(.bottom, 52)
+                    }
                 }
+                .frame(width: pageWidth, height: 610)
             }
             .environment(\.layoutDirection, .leftToRight)
-            .frame(maxWidth: .infinity)
             .frame(height: 610)
         }
+    }
+
+    private var heroPullOffsetReader: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: HomeHeroPullPreferenceKey.self,
+                value: proxy.frame(in: .named("home-hero-scroll")).minY
+            )
+        }
+        .frame(height: 0)
     }
 
     private var heroPinnedBackground: some View {
@@ -329,10 +354,9 @@ struct HomeLibraryView: View {
         .animation(.easeInOut(duration: 0.5), value: currentHeroIndex)
     }
 
-    private func heroSlide(_ entry: UnifiedMediaEntry) -> some View {
-        GeometryReader { proxy in
-            let contentWidth = max(260, min(470, proxy.size.width - 40))
-            VStack(alignment: .leading, spacing: 12) {
+    private func heroSlide(_ entry: UnifiedMediaEntry, viewportWidth: CGFloat) -> some View {
+        let contentWidth = max(260, min(470, viewportWidth - 40))
+        return VStack(alignment: .leading, spacing: 12) {
                 HomeHeroTitleTreatment(title: entry.title, logoURL: entry.details?.logoURL)
                     .frame(width: contentWidth, alignment: .leading)
 
@@ -374,12 +398,12 @@ struct HomeLibraryView: View {
                     .buttonStyle(PremiumPressButtonStyle())
                 }
                 .frame(width: contentWidth)
-            }
-            .frame(width: contentWidth, alignment: .leading)
-            .padding(.leading, 20)
-            .padding(.bottom, 88)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         }
+        .frame(width: contentWidth, alignment: .leading)
+        .padding(.leading, 20)
+        .padding(.bottom, 88)
+        .frame(width: viewportWidth, height: 610, alignment: .bottomLeading)
+        .clipped()
         .contentShape(Rectangle())
     }
 
@@ -939,6 +963,34 @@ struct HomeLibraryView: View {
         return entry.episodes.sorted {
             $0.season == $1.season ? $0.episode < $1.episode : $0.season < $1.season
         }.first
+    }
+}
+
+private final class HomeHeroMotionModel: ObservableObject {
+    @Published var pullDistance: CGFloat = 0
+}
+
+private struct HomeHeroPullPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct HomeHeroZoomContainer<Content: View>: View {
+    @ObservedObject var motion: HomeHeroMotionModel
+    let content: Content
+
+    init(motion: HomeHeroMotionModel, @ViewBuilder content: () -> Content) {
+        self.motion = motion
+        self.content = content()
+    }
+
+    var body: some View {
+        let pull = min(max(0, motion.pullDistance), 220)
+        content
+            .scaleEffect(1 + pull / 680, anchor: .top)
+            .transaction { transaction in transaction.animation = nil }
     }
 }
 
