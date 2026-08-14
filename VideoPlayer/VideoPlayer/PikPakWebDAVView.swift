@@ -19,7 +19,6 @@ struct PikPakWebDAVView: View {
     @State private var showingSetup = false
     @State private var isRefreshing = false
     @State private var folderCoverVersion = 0
-    @State private var showingTMDBSettings = false
     @State private var showingAutoSync = false
     @State private var searchCoverKey: String?
     @State private var searchCoverTitle = ""
@@ -116,18 +115,11 @@ struct PikPakWebDAVView: View {
                               ? "bolt.fill" : "bolt.slash")
                     }
 
-                    Button { showingTMDBSettings = true } label: {
-                        Image(systemName: "film.stack")
-                    }
-
                     Button { showingSetup = true } label: {
                         Image(systemName: "gearshape")
                     }
                 }
             }
-        }
-        .sheet(isPresented: $showingTMDBSettings) {
-            TMDBSettingsView()
         }
         .sheet(isPresented: $showingAutoSync) {
             PikPakAutoSyncSettingsView(vm: vm)

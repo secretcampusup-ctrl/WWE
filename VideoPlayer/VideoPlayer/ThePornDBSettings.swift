@@ -4,27 +4,16 @@ import Foundation
 /// مسؤولة عن تخزين مفتاح API والإعدادات
 struct ThePornDBSettings {
 
+    private static let bundledAPIKey = "aJEKfhYPWMG8dT9QwxZlzxFUQx6jDFq4P40xydqd93ff179b"
+
     // Enabled for Unknown-library recognition and its video-details metadata.
     // Requests still require a configured key and remain cache/gate protected.
     static let isEnabled = true
 
     /// الحصول على مفتاح API من UserDefaults
     static var apiKey: String {
-        get {
-            if let stored = SecureCredentialStore.string(for: AppCredentialKeys.thePornDB) { return stored }
-            if let legacy = UserDefaults.standard.string(forKey: "theporndb_api_key"), !legacy.isEmpty {
-                if SecureCredentialStore.set(legacy, for: AppCredentialKeys.thePornDB) {
-                    UserDefaults.standard.removeObject(forKey: "theporndb_api_key")
-                }
-                return legacy
-            }
-            return ""
-        }
-        set {
-            if SecureCredentialStore.set(newValue, for: AppCredentialKeys.thePornDB) {
-                UserDefaults.standard.removeObject(forKey: "theporndb_api_key")
-            }
-        }
+        get { bundledAPIKey }
+        set { }
     }
 
     static var hasValidAPIKey: Bool {

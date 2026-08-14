@@ -17,11 +17,14 @@ struct MainTabView: View {
                 .opacity(selectedTab == 1 ? 1 : 0).allowsHitTesting(selectedTab == 1)
             PirateBayView(vm: vm)
                 .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
+            UnifiedSettingsView(vm: vm, showsDoneButton: false)
+                .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
 
             HStack(spacing: 4) {
                 dockButton("Home", "house.fill", 0)
                 dockButton("Content", "rectangle.stack.fill", 1)
                 dockButton("Discover", "sailboat.fill", 2)
+                dockButton("Settings", "gearshape.fill", 3)
             }
             .padding(6)
             .background(.ultraThinMaterial, in: Capsule())
@@ -87,8 +90,6 @@ struct HomeLibraryView: View {
     @State private var showSavedPlayer = false
     @State private var selectedCollection: HomeCollection?
     @State private var showFavorites = false
-    @State private var showSettings = false
-    @State private var showDownloads = false
     @State private var showRefreshOverlay = false
     @State private var heroIndex = 0
     @State private var heroRotationSlot = Int(Date().timeIntervalSince1970 / 7_200)
@@ -97,6 +98,7 @@ struct HomeLibraryView: View {
 
     // Check the wall-clock slot periodically. The featured set itself only
     // changes when a new two-hour window begins.
+    private let heroSlideTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
     private let heroRotationTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     private let posterWidth: CGFloat = 112
@@ -205,6 +207,12 @@ struct HomeLibraryView: View {
                 updateHeroRotationIfNeeded()
                 await catalog.load(vm: vm, force: false)
             }
+            .onReceive(heroSlideTimer) { _ in
+                guard isActive, featuredItems.count > 1 else { return }
+                withAnimation(.easeInOut(duration: 0.55)) {
+                    heroIndex = (heroIndex + 1) % featuredItems.count
+                }
+            }
             .onReceive(heroRotationTimer) { date in
                 guard isActive else { return }
                 updateHeroRotationIfNeeded(at: date)
@@ -255,34 +263,16 @@ struct HomeLibraryView: View {
             .fullScreenCover(isPresented: $showHeroPlayer) {
                 ResolvedPlayerScreen(vm: vm)
             }
-            .sheet(isPresented: $showSettings, onDismiss: {
-                Task { await catalog.load(vm: vm, force: true) }
-            }) { UnifiedSettingsView(vm: vm) }
-            .sheet(isPresented: $showDownloads) { DownloadManagerView() }
         }
         .preferredColorScheme(.dark)
     }
 
     private var homeHeader: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("HOME")
-                    .font(.system(size: 11, weight: .black, design: .rounded))
-                    .tracking(2.2)
-                    .foregroundStyle(AppPalette.accent)
-                Text("My Library")
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .foregroundStyle(AppTheme.titleGradient)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.78)
-            }
-            .layoutPriority(1)
             Spacer()
             homeHeaderButton("arrow.clockwise") {
                 Task { await refreshLibrary() }
             }
-            homeHeaderButton("arrow.down.circle.fill") { showDownloads = true }
-            homeHeaderButton("gearshape.fill") { showSettings = true }
         }
         .padding(.horizontal, 16)
         .frame(width: UIScreen.main.bounds.width)

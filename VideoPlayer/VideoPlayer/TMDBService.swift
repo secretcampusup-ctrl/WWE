@@ -1,10 +1,10 @@
 import Foundation
 
 enum TMDBSettings {
-    private static let tokenKey = "tmdb.readAccessToken"
+    private static let bundledReadAccessToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI2M2E3NDZkM2FjZTJlZjVhNDM4Y2FiNjE5N2FkYTVmNCIsIm5iZiI6MTU1NDUzMzM4MC42MTc5OTk4LCJzdWIiOiI1Y2E4NGMwNDkyNTE0MTU2NjJmZDVhZjYiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.HgIosk-aOvM9xzyiL0WVCmAK3p5p47Ym4cqnU-qlBRE"
     static var readAccessToken: String {
-        get { UserDefaults.standard.string(forKey: tokenKey) ?? "" }
-        set { UserDefaults.standard.set(normalize(newValue), forKey: tokenKey) }
+        get { bundledReadAccessToken }
+        set { }
     }
     static var isConfigured: Bool { !readAccessToken.isEmpty }
 

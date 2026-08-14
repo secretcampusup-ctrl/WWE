@@ -1296,39 +1296,30 @@ struct UnifiedMediaDetailsHost: View {
 struct UnifiedSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
-    @StateObject private var cloud = OffcloudViewModel()
-    @State private var offcloudKey = ""
-    @State private var torBoxKey = ""
-    @State private var torBoxStatus = ""
-    @State private var isSavingTorBox = false
+    var showsDoneButton = true
     @State private var destination: SettingsDestination?
 
     private enum SettingsDestination: String, Identifiable {
-        case webdav, offcloud, torbox, tmdb, adult
+        case servers, downloads, directLinks
         var id: String { rawValue }
     }
 
     var body: some View {
         NavigationStack {
             List {
-                Section("Cloud Sources") {
-                    settingsRow("WebDAV", "Connect PikPak or another WebDAV server", "externaldrive.connected.to.line.below", .webdav)
-                    settingsRow("Offcloud", "Add or update the Offcloud API key", "cloud.fill", .offcloud)
-                    settingsRow("TorBox", "Connect your TorBox account and library", "shippingbox.fill", .torbox)
-                }
-                Section("Metadata") {
-                    settingsRow("TMDB", "Movies and TV metadata — first priority", "film.stack.fill", .tmdb)
-                    settingsRow("ThePornDB", "Temporarily paused — TMDB only mode", "pause.circle.fill", .adult)
-                }
-                Section {
-                    Text("TMDB is currently the only active metadata provider. Original file names are sent without release-keyword filtering. Unmatched files remain in Unknown.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                Section("Settings") {
+                    settingsRow("Servers", "WebDAV, Offcloud and TorBox accounts", "server.rack", .servers)
+                    settingsRow("Downloads", "Current downloads and downloaded videos", "arrow.down.circle.fill", .downloads)
+                    settingsRow("Direct Links", "Add PikPak or any direct video link", "link.badge.plus", .directLinks)
                 }
             }
             .navigationTitle("Settings")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                if showsDoneButton {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                }
+            }
             .sheet(item: $destination) { item in destinationView(item) }
-            .onAppear { offcloudKey = cloud.apiKey; torBoxKey = TorBoxKeyStore.load() }
         }.preferredColorScheme(.dark)
     }
 
@@ -1344,9 +1335,94 @@ struct UnifiedSettingsView: View {
 
     @ViewBuilder private func destinationView(_ item: SettingsDestination) -> some View {
         switch item {
-        case .webdav: WebDAVSettingsView(vm: vm)
-        case .tmdb: TMDBSettingsView()
-        case .adult: ThePornDBSettingsView()
+        case .servers: ServerAccountsSettingsView(vm: vm)
+        case .downloads: DownloadManagerView()
+        case .directLinks: DirectLinksSettingsView(vm: vm)
+        }
+    }
+}
+
+private struct ServerAccountsSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: AppViewModel
+    @StateObject private var cloud = OffcloudViewModel()
+    @State private var offcloudKey = ""
+    @State private var torBoxKey = ""
+    @State private var torBoxStatus = ""
+    @State private var isSavingTorBox = false
+    @State private var destination: ServerDestination?
+
+    private enum ServerDestination: String, Identifiable {
+        case webdav, offcloud, torbox
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Servers") {
+                    serverRow("WebDAV", "PikPak, NAS and other WebDAV servers", "externaldrive.connected.to.line.below", .webdav)
+                    serverRow("Offcloud", "Offcloud account and cloud transfers", "cloud.fill", .offcloud)
+                    serverRow("TorBox", "TorBox account and torrent library", "shippingbox.fill", .torbox)
+                }
+            }
+            .navigationTitle("Servers")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+            .sheet(item: $destination) { destinationView($0) }
+            .onAppear {
+                offcloudKey = cloud.apiKey
+                torBoxKey = TorBoxKeyStore.load()
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func serverRow(_ title: String, _ subtitle: String, _ icon: String, _ target: ServerDestination) -> some View {
+        Button { destination = target } label: {
+            HStack(spacing: 13) {
+                Image(systemName: icon).frame(width: 28).foregroundStyle(AppPalette.gradient)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 3)
+        }
+    }
+
+    @ViewBuilder private func destinationView(_ item: ServerDestination) -> some View {
+        switch item {
+        case .webdav:
+            WebDAVSettingsView(vm: vm)
+        case .offcloud:
+            NavigationStack {
+                Form {
+                    Section("Offcloud API") {
+                        SecureField("API Key", text: $offcloudKey).textContentType(.password)
+                        Text("The key is stored securely in the iPhone Keychain.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Section {
+                        Button("Save API Key") {
+                            cloud.saveKey(offcloudKey)
+                            destination = nil
+                        }
+                        .disabled(offcloudKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if cloud.hasKey {
+                            Button("Remove API Key", role: .destructive) {
+                                cloud.clearKey()
+                                offcloudKey = ""
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("Offcloud Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { destination = nil } } }
+            }
+            .preferredColorScheme(.dark)
         case .torbox:
             NavigationStack {
                 Form {
@@ -1358,36 +1434,26 @@ struct UnifiedSettingsView: View {
                         Section { Text(torBoxStatus).font(.footnote).foregroundStyle(.secondary) }
                     }
                     Section {
-                        Button {
-                            saveTorBoxAccount()
-                        } label: {
+                        Button { saveTorBoxAccount() } label: {
                             if isSavingTorBox { HStack { ProgressView(); Text("Connecting…") } }
                             else { Text("Save and Sync TorBox") }
                         }
                         .disabled(isSavingTorBox || torBoxKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         if !TorBoxKeyStore.load().isEmpty {
                             Button("Remove TorBox Account", role: .destructive) {
-                                _ = TorBoxKeyStore.delete(); TorBoxLibraryStore.clear(); torBoxKey = ""; torBoxStatus = ""
+                                _ = TorBoxKeyStore.delete()
+                                TorBoxLibraryStore.clear()
+                                torBoxKey = ""
+                                torBoxStatus = ""
                             }
                         }
                     }
-                }.navigationTitle("TorBox Settings").navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { destination = nil } } }
-            }.preferredColorScheme(.dark)
-        case .offcloud:
-            NavigationStack {
-                Form {
-                    Section("Offcloud API") {
-                        SecureField("API Key", text: $offcloudKey).textContentType(.password)
-                        Text("The key is stored securely in the iPhone Keychain.").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Section {
-                        Button("Save API Key") { cloud.saveKey(offcloudKey); destination = nil }.disabled(offcloudKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if cloud.hasKey { Button("Remove API Key", role: .destructive) { cloud.clearKey(); offcloudKey = "" } }
-                    }
-                }.navigationTitle("Offcloud Settings").navigationBarTitleDisplayMode(.inline)
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { destination = nil } } }
-            }.preferredColorScheme(.dark)
+                }
+                .navigationTitle("TorBox Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { destination = nil } } }
+            }
+            .preferredColorScheme(.dark)
         }
     }
 
@@ -1411,6 +1477,85 @@ struct UnifiedSettingsView: View {
                 torBoxStatus = error.localizedDescription
                 isSavingTorBox = false
             }
+        }
+    }
+}
+
+private struct DirectLinksSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: AppViewModel
+    @State private var link = ""
+    @State private var message: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Add Link") {
+                    TextField("PikPak or direct video URL", text: $link, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+
+                    Button {
+                        if let value = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                            link = value
+                            message = nil
+                        } else {
+                            message = "Clipboard is empty"
+                        }
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+
+                    Button { saveLink() } label: {
+                        Label("Add to Library", systemImage: "plus.circle.fill")
+                    }
+                    .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if let message {
+                    Section { Text(message).font(.footnote).foregroundStyle(.secondary) }
+                }
+
+                Section {
+                    Text("Supports direct HTTP video streams, HLS, PikPak direct/share links, and magnet links.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Direct Links")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func saveLink() {
+        let raw = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind = LinkResolver.classify(raw)
+        let saved: SavedVideoLink?
+
+        switch kind {
+        case .magnet, .pikpakMagnet:
+            saved = vm.saveDirectLink(raw, source: .pikpak, title: "Magnet link")
+        case .pikpakShare:
+            saved = vm.saveDirectLink(raw, source: .pikpak, title: "PikPak Share")
+        case .pikpakDirect:
+            saved = vm.saveDirectLink(
+                raw,
+                resolvedStream: LinkResolver.resolvePikPakDirectStream(raw),
+                source: .pikpak,
+                title: LinkResolver.pikpakDirectDisplayTitle(raw)
+            )
+        default:
+            saved = vm.saveDirectLink(raw)
+        }
+
+        if saved != nil {
+            link = ""
+            message = "Link added to the library"
+        } else {
+            message = "Invalid link. Use a direct URL, PikPak link, HLS, or magnet."
         }
     }
 }
