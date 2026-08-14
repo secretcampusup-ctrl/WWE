@@ -125,6 +125,10 @@ struct HomeLibraryView: View {
                     }
                     .frame(width: UIScreen.main.bounds.width, height: 670, alignment: .top)
                     .clipped()
+                    // The NavigationStack lays its content below the status-bar
+                    // safe area. Pull only the pinned artwork back to the real
+                    // screen top; the hero controls keep their safe positioning.
+                    .offset(y: -homeTopSafeAreaInset)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .ignoresSafeArea(edges: .top)
                     .allowsHitTesting(false)
@@ -282,6 +286,14 @@ struct HomeLibraryView: View {
         }
         .padding(.horizontal, 16)
         .frame(width: UIScreen.main.bounds.width)
+    }
+
+    private var homeTopSafeAreaInset: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first(where: { $0.isKeyWindow })?
+            .safeAreaInsets.top ?? 0
     }
 
     @ViewBuilder
