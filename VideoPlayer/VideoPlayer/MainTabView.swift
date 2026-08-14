@@ -44,7 +44,7 @@ struct MainTabView: View {
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
         let isSelected = selectedTab == tab
-        Button {
+        return Button {
             guard selectedTab != tab else { return }
             UISelectionFeedbackGenerator().selectionChanged()
             withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
