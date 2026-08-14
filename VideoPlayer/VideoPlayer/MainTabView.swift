@@ -13,49 +13,79 @@ struct MainTabView: View {
         ZStack(alignment: .bottom) {
             HomeLibraryView(vm: vm, catalog: catalog, isActive: selectedTab == 0)
                 .opacity(selectedTab == 0 ? 1 : 0).allowsHitTesting(selectedTab == 0)
+                .animation(.easeOut(duration: 0.18), value: selectedTab)
             UnifiedContentView(vm: vm, model: catalog, isActive: selectedTab == 1)
                 .opacity(selectedTab == 1 ? 1 : 0).allowsHitTesting(selectedTab == 1)
+                .animation(.easeOut(duration: 0.18), value: selectedTab)
             PirateBayView(vm: vm)
                 .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
+                .animation(.easeOut(duration: 0.18), value: selectedTab)
             UnifiedSettingsView(vm: vm, showsDoneButton: false)
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
+                .animation(.easeOut(duration: 0.18), value: selectedTab)
 
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 dockButton("Home", "house.fill", 0)
                 dockButton("Content", "rectangle.stack.fill", 1)
                 dockButton("Discover", "sailboat.fill", 2)
                 dockButton("Settings", "gearshape.fill", 3)
             }
-            .padding(6)
+            .padding(4)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 0.7))
-            .shadow(color: .black.opacity(0.38), radius: 18, y: 8)
-            .padding(.horizontal, 20)
+            .shadow(color: .black.opacity(0.34), radius: 14, y: 6)
+            .padding(.horizontal, 34)
             .padding(.bottom, -6)
         }
-        .animation(.easeOut(duration: 0.18), value: selectedTab)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
         .preferredColorScheme(.dark)
     }
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
+        let isSelected = selectedTab == tab
         Button {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { selectedTab = tab }
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: icon).font(.system(size: 16, weight: .semibold))
-                Text(title).font(.system(size: 8.5, weight: .semibold)).lineLimit(1)
+            guard selectedTab != tab else { return }
+            UISelectionFeedbackGenerator().selectionChanged()
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
+                selectedTab = tab
             }
-            .foregroundStyle(selectedTab == tab ? Color.white : Color.white.opacity(0.48))
-            .frame(maxWidth: .infinity).padding(.vertical, 7)
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: icon)
+                    .font(.system(size: 14.5, weight: .semibold))
+                    .scaleEffect(isSelected ? 1.13 : 1)
+                    .offset(y: isSelected ? -1.5 : 0)
+                    .shadow(
+                        color: isSelected ? AppPalette.accent.opacity(0.5) : .clear,
+                        radius: 5
+                    )
+                Text(title)
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .lineLimit(1)
+                    .opacity(isSelected ? 1 : 0.78)
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.48))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5.5)
             .background {
-                if selectedTab == tab {
-                    Capsule().fill(Color.white.opacity(0.14))
+                if isSelected {
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.18), AppPalette.accent.opacity(0.13)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
                         .matchedGeometryEffect(id: "dock", in: dockSelection)
+                        .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 0.6))
                 }
             }
-        }.buttonStyle(.plain)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(.spring(response: 0.38, dampingFraction: 0.7), value: isSelected)
     }
 }
 
@@ -94,6 +124,7 @@ struct HomeLibraryView: View {
     @State private var heroIndex = 0
     @State private var heroRotationSlot = Int(Date().timeIntervalSince1970 / 7_200)
     @State private var showHeroPlayer = false
+    @State private var heroPlayingEntry: UnifiedMediaEntry?
     @State private var heroMotion = HomeHeroMotionModel()
 
     // Check the wall-clock slot periodically. The featured set itself only
@@ -261,7 +292,11 @@ struct HomeLibraryView: View {
                 FavoritesAllView(vm: vm)
             }
             .fullScreenCover(isPresented: $showHeroPlayer) {
-                ResolvedPlayerScreen(vm: vm)
+                ResolvedPlayerScreen(
+                    vm: vm,
+                    episodeOptions: heroPlayerEpisodeOptions,
+                    onSelectEpisode: switchHeroEpisode
+                )
             }
         }
         .preferredColorScheme(.dark)
@@ -305,7 +340,7 @@ struct HomeLibraryView: View {
                 VStack {
                     Spacer()
                     HStack(spacing: 7) {
-                        ForEach(featuredItems.indices, id: \.self) { index in
+                        ForEach(heroIndicatorIndices, id: \.self) { index in
                             Button {
                                 withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
                             } label: {
@@ -318,7 +353,7 @@ struct HomeLibraryView: View {
                         }
                     }
                     .animation(.easeOut(duration: 0.25), value: currentHeroIndex)
-                    .padding(.bottom, 52)
+                    .padding(.bottom, 24)
                 }
             }
             .frame(width: pageWidth, height: 610)
@@ -764,17 +799,49 @@ struct HomeLibraryView: View {
                 || entry.details?.imageURL != nil
                 || entry.posterURL != nil
         }
-        let sortedCandidates = candidates.sorted { lhs, rhs in
-            let leftDate = sourceDate(lhs)
-            let rightDate = sourceDate(rhs)
-            if leftDate != rightDate { return leftDate > rightDate }
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }
-        guard !sortedCandidates.isEmpty else { return [] }
 
-        let visibleCount = min(5, sortedCandidates.count)
-        let start = (heroRotationSlot * visibleCount) % sortedCandidates.count
-        return (0..<visibleCount).map { sortedCandidates[(start + $0) % sortedCandidates.count] }
+        let candidateIDs = Set(candidates.map(\.id))
+        var seenFavorites = Set<String>()
+        let favorites = vm.favoriteLinks.compactMap { link -> UnifiedMediaEntry? in
+            guard let matched = entry(matching: link),
+                  candidateIDs.contains(matched.id),
+                  seenFavorites.insert(matched.id).inserted else { return nil }
+            return matched
+        }
+
+        // Favorites always lead the Hero and are never capped. With fewer than
+        // five favorites, fill only the remaining slots from a deterministic
+        // two-hour shuffle so the carousel is stable while the user is browsing.
+        let orderedFavorites = heroShuffled(favorites, salt: heroRotationSlot &* 31 &+ 7)
+        guard orderedFavorites.count < 5 else { return orderedFavorites }
+
+        let favoriteIDs = Set(orderedFavorites.map(\.id))
+        let randomFill = heroShuffled(
+            candidates.filter { !favoriteIDs.contains($0.id) },
+            salt: heroRotationSlot
+        )
+        return orderedFavorites + Array(randomFill.prefix(5 - orderedFavorites.count))
+    }
+
+    private func heroShuffled(
+        _ entries: [UnifiedMediaEntry],
+        salt: Int
+    ) -> [UnifiedMediaEntry] {
+        entries.sorted { lhs, rhs in
+            let left = stableHeroScore(id: lhs.id, salt: salt)
+            let right = stableHeroScore(id: rhs.id, salt: salt)
+            if left != right { return left < right }
+            return lhs.id < rhs.id
+        }
+    }
+
+    private func stableHeroScore(id: String, salt: Int) -> UInt64 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in "\(salt)|\(id)".utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return hash
     }
 
     @MainActor
@@ -789,6 +856,13 @@ struct HomeLibraryView: View {
         let count = featuredItems.count
         guard count > 0 else { return 0 }
         return min(max(0, heroIndex), count - 1)
+    }
+
+    private var heroIndicatorIndices: [Int] {
+        let count = featuredItems.count
+        guard count > 9 else { return Array(0..<count) }
+        let start = min(max(0, currentHeroIndex - 4), count - 9)
+        return Array(start..<(start + 9))
     }
 
     private var historyByID: [String: PlaybackHistoryEntry] {
@@ -972,8 +1046,28 @@ struct HomeLibraryView: View {
     private func playHero(_ entry: UnifiedMediaEntry) {
         catalog.prioritizeEpisodeMetadata(for: entry)
         let episode = preferredHeroEpisode(for: entry)
+        heroPlayingEntry = entry
+        startHeroPlayback(entry: entry, episode: episode)
+    }
+
+    @MainActor
+    private func startHeroPlayback(entry: UnifiedMediaEntry, episode: UnifiedEpisode?) {
         let source = episode?.source ?? entry.source
         let playbackTitle = episode?.title ?? entry.rawTitle
+
+        // Hero playback bypasses VideoDetailsView, so it must attach the library
+        // identity itself. Without this, player progress had no pending history
+        // item and could never appear in Resume Playback.
+        vm.preparePlaybackHistory(
+            for: VideoDetailsItem(
+                id: episode?.id ?? entry.id,
+                title: episode?.title ?? entry.title,
+                url: episode?.url ?? entry.streamURL,
+                posterCacheKey: "unified|\(entry.id)",
+                fileExtension: (playbackTitle as NSString).pathExtension.uppercased(),
+                source: entry.sourceLabel
+            )
+        )
 
         switch source {
         case let .webDAV(server, file):
@@ -1000,6 +1094,29 @@ struct HomeLibraryView: View {
                 showHeroPlayer = true
             }
         }
+    }
+
+    private var heroPlayerEpisodeOptions: [PlayerEpisodeOption] {
+        guard let entry = heroPlayingEntry else { return [] }
+        return entry.episodes
+            .sorted {
+                $0.season == $1.season ? $0.episode < $1.episode : $0.season < $1.season
+            }
+            .map { episode in
+                PlayerEpisodeOption(
+                    id: episode.id,
+                    title: "S\(episode.season) · E\(episode.episode)",
+                    subtitle: VideoTitleFormatter.episodeTitle(from: episode.title)
+                )
+            }
+    }
+
+    @MainActor
+    private func switchHeroEpisode(_ episodeID: String) {
+        guard let entry = heroPlayingEntry,
+              let episode = entry.episodes.first(where: { $0.id == episodeID }) else { return }
+        vm.endPlaybackPresentation()
+        startHeroPlayback(entry: entry, episode: episode)
     }
 
     private func preferredHeroEpisode(for entry: UnifiedMediaEntry) -> UnifiedEpisode? {
@@ -1144,6 +1261,25 @@ private struct HomeSectionHeader: View {
     let hasItems: Bool
     let action: (() -> Void)?
 
+    private var iconName: String {
+        switch title {
+        case "Resume Playback": return "play.rectangle.fill"
+        case "Recently Added": return "plus.rectangle.on.rectangle"
+        case "Movies": return "film.stack.fill"
+        case "TV Shows": return "tv.fill"
+        case "Anime": return "sparkles"
+        case "Others": return "questionmark.folder.fill"
+        case "Unwatched": return "eye.slash.fill"
+        case "Watched": return "checkmark.circle.fill"
+        case "Favorites": return "heart.fill"
+        case "By Genre": return "theatermasks.fill"
+        case "By Rating": return "star.fill"
+        case "By Release Date": return "calendar"
+        case "By Age Rating": return "lock.shield.fill"
+        default: return "rectangle.stack.fill"
+        }
+    }
+
     init(title: String, hasItems: Bool, action: (() -> Void)?) {
         self.title = title
         self.hasItems = hasItems
@@ -1156,9 +1292,21 @@ private struct HomeSectionHeader: View {
 
     var body: some View {
         HStack {
-            Text(title)
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+            HStack(spacing: 9) {
+                Image(systemName: iconName)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(AppPalette.gradient)
+                    .frame(width: 29, height: 29)
+                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                    )
+
+                Text(title)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
             Spacer()
             if let action, hasItems {
                 Button(action: action) {

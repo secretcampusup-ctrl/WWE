@@ -133,8 +133,11 @@ final class UnifiedContentModel: ObservableObject {
             $0.id.uuidString + $0.displayAddress + WebDAVContentSelectionStore.revision(for: $0.id)
         }.joined(separator: "|") + "|metadata:" + metadataSignature
         var sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
-        // A cached library is immutable until the user explicitly refreshes.
-        if loaded && !force && sourceSignature == lastSourceSignature {
+        // A loaded library is immutable until the user explicitly refreshes.
+        // Saving a new WebDAV folder changes the selection revision immediately;
+        // it must not trigger an automatic scan that temporarily replaces/empties
+        // Home. The next manual refresh performs the append-only discovery pass.
+        if loaded && !force {
             if !startEpisodeEnrichmentIfNeeded(),
                ThePornDBSettings.hasValidAPIKey,
                unknown.contains(where: { $0.adultLookupCompleted != true }) {
@@ -215,20 +218,23 @@ final class UnifiedContentModel: ObservableObject {
             }
         }
 
-        if force {
-            // WebDAV refreshes are discovery-only. Preserve every previously
-            // indexed file and append newly scanned paths, even when one folder
-            // temporarily times out. Series aggregates are expanded back into
-            // their episode files before merging.
+        if loaded {
+            // Every scan of an existing library is discovery-only. Preserve every
+            // previously indexed WebDAV file and append newly scanned paths, even
+            // when a selected folder is new, empty, slow, or temporarily times out.
+            // Series aggregates are expanded back into their episode files first.
             let configuredServerIDs = Set(vm.servers.map(\.id))
             let preservedWebDAVEntries = existingLibraryEntries.flatMap { entry -> [UnifiedMediaEntry] in
                 if !entry.episodes.isEmpty {
                     return entry.episodes.compactMap { episode in
-                        guard case let .webDAV(server, _) = episode.source,
+                        guard case let .webDAV(server, file) = episode.source,
                               configuredServerIDs.contains(server.id) else { return nil }
                         return UnifiedMediaEntry(
                             id: episode.id,
-                            rawTitle: episode.title,
+                            // Episode enrichment may replace `episode.title` with
+                            // the localized API name. Classification must continue
+                            // using the original filename so SxxExx survives refresh.
+                            rawTitle: file.name,
                             title: entry.title,
                             sourceLabel: entry.sourceLabel,
                             source: episode.source,
@@ -1217,13 +1223,33 @@ struct UnifiedMediaDetailsHost: View {
             onSelectSuggestion: selectSuggestion
         )
         .id(activeEntry.id)
-        .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
+        .fullScreenCover(isPresented: $showPlayer) {
+            ResolvedPlayerScreen(
+                vm: vm,
+                episodeOptions: playerEpisodeOptions,
+                onSelectEpisode: switchPlayerEpisode
+            )
+        }
     }
 
     private var relatedEpisodes: [VideoEpisodeItem] {
         activeEntry.episodes.map {
             VideoEpisodeItem(id: $0.id, title: $0.title, season: $0.season, episode: $0.episode)
         }
+    }
+
+    private var playerEpisodeOptions: [PlayerEpisodeOption] {
+        activeEntry.episodes
+            .sorted {
+                $0.season == $1.season ? $0.episode < $1.episode : $0.season < $1.season
+            }
+            .map { episode in
+                PlayerEpisodeOption(
+                    id: episode.id,
+                    title: "S\(episode.season) · E\(episode.episode)",
+                    subtitle: VideoTitleFormatter.episodeTitle(from: episode.title)
+                )
+            }
     }
 
     private var currentDetailsItem: VideoDetailsItem {
@@ -1296,6 +1322,15 @@ struct UnifiedMediaDetailsHost: View {
             return
         }
         showPlayer = true
+    }
+
+    @MainActor
+    private func switchPlayerEpisode(_ episodeID: String) {
+        guard selection.id != episodeID,
+              activeEntry.episodes.contains(where: { $0.id == episodeID }) else { return }
+        vm.endPlaybackPresentation()
+        selection.id = episodeID
+        playCurrent()
     }
 
     private var suggestionsTitle: String {

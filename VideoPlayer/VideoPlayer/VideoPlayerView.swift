@@ -237,20 +237,27 @@ struct VideoPlayerView: View {
             }
 
             if let cue = activeExternalSubtitle, !playbackDidEnd {
-                VStack {
-                    Spacer()
-                    Text(cue.text)
-                        .font(.system(size: subtitleSize, weight: .semibold, design: subtitleFont.design))
-                        .foregroundColor(subtitleColor.color)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(subtitleBackground ? Color.black.opacity(0.58) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .shadow(color: subtitleShadow ? .black.opacity(0.9) : .clear, radius: subtitleShadow ? 4 : 0)
-                        .padding(.horizontal, 34)
-                        .padding(.bottom, (showControls ? 48 : 24) + subtitleHeight)
+                GeometryReader { proxy in
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        Text(cue.text)
+                            .font(.system(size: subtitleSize, weight: .semibold, design: subtitleFont.design))
+                            .foregroundColor(subtitleColor.color)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: subtitleScreenMaxWidth(for: proxy), alignment: .center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(subtitleBackground ? Color.black.opacity(0.58) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .shadow(color: subtitleShadow ? .black.opacity(0.9) : .clear, radius: subtitleShadow ? 4 : 0)
+                            .padding(.bottom, subtitleScreenBottomInset(for: proxy))
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottom)
                 }
+                .ignoresSafeArea()
                 .allowsHitTesting(false)
+                .zIndex(50)
             }
 
             if playbackDidEnd {
@@ -379,6 +386,13 @@ struct VideoPlayerView: View {
         .onChange(of: isScrubbing) { scrubbing in
             if scrubbing { hideTask?.cancel() } else { scheduleAutoHide() }
         }
+        .onChange(of: subtitleSize) { _ in applySubtitlePreferences() }
+        .onChange(of: subtitleColor) { _ in applySubtitlePreferences() }
+        .onChange(of: subtitleDelay) { _ in applySubtitlePreferences() }
+        .onChange(of: subtitleHeight) { _ in applySubtitlePreferences() }
+        .onChange(of: subtitleShadow) { _ in applySubtitlePreferences() }
+        .onChange(of: subtitleBackground) { _ in applySubtitlePreferences() }
+        .onChange(of: subtitleFont) { _ in applySubtitlePreferences() }
         .onChange(of: playbackDidEnd) { ended in
             if ended { beginEndCountdown() } else { endCountdownTask?.cancel() }
         }
@@ -539,6 +553,25 @@ struct VideoPlayerView: View {
         }
     }
 
+    private func subtitleScreenBottomInset(for proxy: GeometryProxy) -> CGFloat {
+        // Subtitle placement belongs to the device viewport, never to the
+        // fitted/cropped video rectangle. Keep it clear of the home indicator
+        // and lift it slightly while playback chrome is visible.
+        max(20, proxy.safeAreaInsets.bottom + 10)
+            + subtitleHeight
+            + (showControls ? 34 : 0)
+    }
+
+    private func subtitleScreenMaxWidth(for proxy: GeometryProxy) -> CGFloat {
+        max(
+            120,
+            proxy.size.width
+                - proxy.safeAreaInsets.leading
+                - proxy.safeAreaInsets.trailing
+                - 64
+        )
+    }
+
     private func loadExternalSubtitle(from fileURL: URL) {
         let scoped = fileURL.startAccessingSecurityScopedResource()
         defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
@@ -697,18 +730,20 @@ struct VideoPlayerView: View {
                     )
                     .playerPopoverAdaptation()
                 }
-                Button {
-                    showEpisodePicker = true
-                    scheduleAutoHide()
-                } label: {
-                    Image(systemName: "rectangle.stack.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 37, height: 37)
-                }
-                .popover(isPresented: $showEpisodePicker, arrowEdge: .bottom) {
-                    PlayerEpisodePicker(options: episodeOptions, onSelect: { id in
-                        showEpisodePicker = false; onSelectEpisode?(id)
-                    }).playerPopoverAdaptation()
+                if !episodeOptions.isEmpty {
+                    Button {
+                        showEpisodePicker = true
+                        scheduleAutoHide()
+                    } label: {
+                        Image(systemName: "rectangle.stack.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(width: 37, height: 37)
+                    }
+                    .popover(isPresented: $showEpisodePicker, arrowEdge: .bottom) {
+                        PlayerEpisodePicker(options: episodeOptions, onSelect: { id in
+                            showEpisodePicker = false; onSelectEpisode?(id)
+                        }).playerPopoverAdaptation()
+                    }
                 }
             }
             .foregroundColor(.white)
@@ -978,6 +1013,15 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         uiView.onSingleTap = onSingleTap
         uiView.setFillMode(isFillMode)
         uiView.resetZoomIfNeeded(token: resetZoomToken)
+        uiView.applySubtitleStyle(
+            fontSize: subtitleSize,
+            fontName: subtitleFontName,
+            color: subtitleColorValue,
+            background: subtitleBackground,
+            shadow: subtitleShadow,
+            margin: subtitleHeight,
+            delay: subtitleDelay
+        )
         uiView.playIfNeeded(url: url, httpHeaders: httpHeaders)
     }
 
@@ -1104,6 +1148,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         mediaPlayer.drawable = videoView
         mediaPlayer.media = media
         mediaPlayer.play()
+        applyCurrentSubtitleStyleToRenderer()
         if resumeAt > 3 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 guard let self, !self.isStopped, self.playbackGeneration == generation else { return }
@@ -1176,23 +1221,42 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let index = id.flatMap(Int32.init) ?? -1
         mediaPlayer.currentVideoSubTitleIndex = index
         controls?.selectedSubtitleTrackID = index >= 0 ? String(index) : nil
+        if index >= 0 { applyCurrentSubtitleStyleToRenderer() }
     }
 
     func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
+        let unchanged = subtitleStyle.fontSize == fontSize
+            && subtitleStyle.fontName == fontName
+            && subtitleStyle.color == color
+            && subtitleStyle.background == background
+            && subtitleStyle.shadow == shadow
+            && subtitleStyle.margin == margin
+            && subtitleStyle.delay == delay
+        guard !unchanged else { return }
+
         subtitleStyle = (fontSize: fontSize, fontName: fontName, color: color, background: background, shadow: shadow, margin: margin, delay: delay)
-        guard let url = currentURL else { return }
-        let resumeAt = Double(mediaPlayer.time.intValue) / 1000
-        let selectedAudio = controls?.selectedAudioTrackID
-        let selectedSubtitle = controls?.selectedSubtitleTrackID
-        let wasPlaying = mediaPlayer.isPlaying
-        play(url: url, resumeAt: resumeAt, httpHeaders: currentHTTPHeaders)
-        let generation = playbackGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self, !self.isStopped, self.playbackGeneration == generation else { return }
-            if let selectedAudio { self.selectAudioTrack(id: selectedAudio) }
-            self.selectSubtitleTrack(id: selectedSubtitle)
-            if !wasPlaying { self.mediaPlayer.pause() }
-        }
+
+        applyCurrentSubtitleStyleToRenderer()
+    }
+
+    private func applyCurrentSubtitleStyleToRenderer() {
+        // VLCKit exposes these renderer setters at runtime on iOS. Applying
+        // them to the existing media player changes the active subtitles in
+        // place; restarting `play(url:)` here used to reopen the remote media,
+        // rebuffer it and briefly lose the selected subtitle/audio tracks.
+        performTextRendererSelector("setTextRendererFont:", value: subtitleStyle.fontName as NSString)
+        performTextRendererSelector("setTextRendererFontSize:", value: NSNumber(value: Int(subtitleStyle.fontSize.rounded())))
+        performTextRendererSelector("setTextRendererFontColor:", value: NSNumber(value: subtitleStyle.color))
+        performTextRendererSelector("setTextRendererFontForceBold:", value: NSNumber(value: true))
+
+        // This is a public live property and is measured in microseconds.
+        mediaPlayer.currentVideoSubTitleDelay = Int(subtitleStyle.delay * 1_000_000)
+    }
+
+    private func performTextRendererSelector(_ name: String, value: AnyObject) {
+        let selector = NSSelectorFromString(name)
+        guard mediaPlayer.responds(to: selector) else { return }
+        _ = mediaPlayer.perform(selector, with: value)
     }
 
     func playIfNeeded(url: URL, httpHeaders: [String: String]? = nil) {
@@ -1567,18 +1631,27 @@ private struct PlayerQuickSettingsPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if page == .main { mainMenu } else { submenu }
+            if page == .main {
+                mainMenu
+            } else {
+                submenu
+                    .frame(height: submenuHeight, alignment: .top)
+            }
         }
-        .frame(width: 226)
+        .frame(width: 242)
         .padding(9)
         .background(Color(uiColor: .secondarySystemBackground))
+    }
+
+    private var submenuHeight: CGFloat {
+        min(420, max(230, UIScreen.main.bounds.height * 0.58))
     }
 
     private var mainMenu: some View {
         VStack(spacing: 0) {
             row("Playback Speed", icon: "speedometer", value: selectedSpeed == 1 ? "Normal" : "\(selectedSpeed)×") { page = .speed }
             row("Audio", icon: "music.note", value: selectedAudioTitle) { page = .audio }
-            row("Subtitles", icon: "captions.bubble.fill", value: subtitleFileName ?? "None") { page = .subtitles }
+            row("Subtitles", icon: "captions.bubble.fill", value: selectedSubtitleTitle) { page = .subtitles }
             Divider().padding(.vertical, 5)
             row("Advanced Options", icon: "gearshape.fill", value: nil, action: onAdvanced)
         }
@@ -1591,35 +1664,55 @@ private struct PlayerQuickSettingsPopover: View {
             }.font(.system(size: 13, weight: .semibold))
             .padding(.bottom, 5)
             Divider()
-            switch page {
-            case .speed:
-                ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { value in
-                    choice(value == 1 ? "Normal" : String(format: "%g×", value), selected: selectedSpeed == Float(value)) {
-                        selectedSpeed = Float(value); onRateChange(Float(value))
-                    }
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 5) {
+                    submenuChoices
                 }
-            case .audio:
-                if audioTracks.count > 1 {
-                    ForEach(audioTracks) { track in
-                        choice(track.title, selected: selectedAudioTrackID == track.id) { onAudioTrackChange(track.id) }
-                    }
-                } else { Text("One audio track").foregroundColor(.secondary).padding(10) }
-            case .subtitles:
-                choice("None", selected: subtitleFileName == nil && selectedSubtitleTrackID == nil, action: onDisableSubtitles)
-                ForEach(subtitleTracks) { track in
-                    choice(track.title, selected: subtitleFileName == nil && selectedSubtitleTrackID == track.id) { onSubtitleTrackChange(track.id) }
-                }
-                Button(action: onChooseSubtitleFile) {
-                    Label("Choose from Files", systemImage: "folder.fill")
-                        .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(7)
-                }.foregroundColor(.primary)
-            case .main: EmptyView()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
             }
+        }
+    }
+
+    @ViewBuilder private var submenuChoices: some View {
+        switch page {
+        case .speed:
+            ForEach([0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { value in
+                choice(value == 1 ? "Normal" : String(format: "%g×", value), selected: selectedSpeed == Float(value)) {
+                    selectedSpeed = Float(value); onRateChange(Float(value))
+                }
+            }
+        case .audio:
+            if audioTracks.count > 1 {
+                ForEach(audioTracks) { track in
+                    choice(track.title, selected: selectedAudioTrackID == track.id) { onAudioTrackChange(track.id) }
+                }
+            } else {
+                Text("One audio track").foregroundColor(.secondary).padding(10)
+            }
+        case .subtitles:
+            choice("None", selected: subtitleFileName == nil && selectedSubtitleTrackID == nil, action: onDisableSubtitles)
+            ForEach(subtitleTracks) { track in
+                choice(track.title, selected: subtitleFileName == nil && selectedSubtitleTrackID == track.id) { onSubtitleTrackChange(track.id) }
+            }
+            choice(
+                subtitleFileName ?? "Choose from Files",
+                selected: subtitleFileName != nil,
+                action: onChooseSubtitleFile
+            )
+        case .main:
+            EmptyView()
         }
     }
 
     private var selectedAudioTitle: String {
         audioTracks.first(where: { $0.id == selectedAudioTrackID })?.title ?? "Original"
+    }
+
+    private var selectedSubtitleTitle: String {
+        if let subtitleFileName { return subtitleFileName }
+        guard let selectedSubtitleTrackID else { return "None" }
+        return subtitleTracks.first(where: { $0.id == selectedSubtitleTrackID })?.title ?? "On"
     }
 
     private func row(_ title: String, icon: String, value: String?, action: @escaping () -> Void) -> some View {

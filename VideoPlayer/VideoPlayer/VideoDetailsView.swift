@@ -1226,8 +1226,7 @@ struct VideoDetailsView: View {
                         model: episodeArtworkModel,
                         seriesID: resolvedMovieDetails?.id,
                         season: episode.season,
-                        episode: episode.episode,
-                        fallback: movieBackdropFrame ?? displayedFrame
+                        episode: episode.episode
                     )
                     LinearGradient(
                         colors: [.clear, .black.opacity(0.78)],
@@ -1794,19 +1793,24 @@ private struct EpisodeStillArtwork: View {
     let seriesID: Int?
     let season: Int
     let episode: Int
-    let fallback: UIImage?
 
     var body: some View {
         ZStack {
-            if let fallback {
-                Image(uiImage: fallback)
-                    .resizable()
-                    .scaledToFill()
-            }
+            LinearGradient(
+                colors: [Color.white.opacity(0.09), Color.white.opacity(0.035)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
 
             if let stillURL = model.imageURL(seriesID: seriesID, season: season, episode: episode) {
                 CachedTMDBImage(url: stillURL, contentMode: .fill)
                     .transition(.opacity)
+            } else if model.hasFinishedLoading(seriesID: seriesID, season: season) {
+                Image(systemName: "photo.fill")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.24))
+            } else {
+                DetailsLoadingSpinner(size: 24, lineWidth: 2.2, color: AppPalette.accent)
             }
         }
     }
@@ -1815,7 +1819,7 @@ private struct EpisodeStillArtwork: View {
 private final class SeriesEpisodeArtworkModel: ObservableObject {
     @Published private var imageURLs: [String: URL] = [:]
     @Published private var episodeNames: [String: String] = [:]
-    private var loadedSeasons: Set<String> = []
+    @Published private var loadedSeasons: Set<String> = []
     private var loadingSeasons: Set<String> = []
 
     func imageURL(seriesID: Int?, season: Int, episode: Int) -> URL? {
@@ -1826,6 +1830,11 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
     func episodeName(seriesID: Int?, season: Int, episode: Int) -> String? {
         guard let seriesID else { return nil }
         return episodeNames[episodeKey(seriesID: seriesID, season: season, episode: episode)]
+    }
+
+    func hasFinishedLoading(seriesID: Int?, season: Int) -> Bool {
+        guard let seriesID else { return true }
+        return loadedSeasons.contains("\(seriesID)|s\(season)")
     }
 
     @MainActor
@@ -2048,6 +2057,7 @@ struct ResolvedPlayerScreen: View {
                     streamURL: url
                 )
             }
+            .id(url.absoluteString)
         } else {
             ImmediatePlayerLoadingView()
         }
