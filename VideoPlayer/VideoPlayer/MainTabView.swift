@@ -90,7 +90,7 @@ struct HomeLibraryView: View {
     @State private var showSettings = false
     @State private var showDownloads = false
     @State private var showRefreshOverlay = false
-    @State private var heroIndex = 0
+    @State private var heroPage = 1
     @State private var showHeroPlayer = false
 
     private let heroTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
@@ -107,6 +107,13 @@ struct HomeLibraryView: View {
                     endPoint: .bottomTrailing
                 )
                 .ignoresSafeArea()
+
+                if !featuredItems.isEmpty {
+                    heroPinnedBackground
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .ignoresSafeArea(edges: .top)
+                        .allowsHitTesting(false)
+                }
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
@@ -128,6 +135,7 @@ struct HomeLibraryView: View {
                             categorySection("By Age Rating", categories: ageRatingCategories)
                         }
                         .padding(.top, -34)
+                        .background(AppTheme.bg)
                     }
                     .padding(.bottom, 110)
                     .tint(AppPalette.accent)
@@ -153,12 +161,14 @@ struct HomeLibraryView: View {
             .onReceive(heroTimer) { _ in
                 guard isActive, featuredItems.count > 1 else { return }
                 withAnimation(.easeInOut(duration: 0.55)) {
-                    heroIndex = (heroIndex + 1) % featuredItems.count
+                    heroPage += 1
                 }
             }
             .onChange(of: featuredItems.map(\.id)) { items in
-                if items.isEmpty { heroIndex = 0 }
-                else if heroIndex >= items.count { heroIndex = 0 }
+                heroPage = items.count > 1 ? 1 : 0
+            }
+            .onChange(of: heroPage) { page in
+                normalizeHeroPageIfNeeded(page)
             }
             .fullScreenCover(item: $selectedEntry) { entry in
                 UnifiedMediaDetailsHost(
@@ -212,16 +222,19 @@ struct HomeLibraryView: View {
     }
 
     private var homeHeader: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("HOME")
                     .font(.system(size: 11, weight: .black, design: .rounded))
                     .tracking(2.2)
                     .foregroundStyle(AppPalette.accent)
                 Text("My Library")
-                    .font(.system(size: 29, weight: .bold, design: .rounded))
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
                     .foregroundStyle(AppTheme.titleGradient)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
             }
+            .layoutPriority(1)
             Spacer()
             homeHeaderButton("arrow.clockwise") {
                 Task { await refreshLibrary() }
@@ -240,8 +253,8 @@ struct HomeLibraryView: View {
                 .padding(.bottom, 22)
         } else {
             ZStack(alignment: .top) {
-                TabView(selection: $heroIndex) {
-                    ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
+                TabView(selection: $heroPage) {
+                    ForEach(Array(heroCarouselItems.enumerated()), id: \.offset) { index, entry in
                         heroSlide(entry)
                             .tag(index)
                     }
@@ -256,81 +269,75 @@ struct HomeLibraryView: View {
                     HStack(spacing: 7) {
                         ForEach(featuredItems.indices, id: \.self) { index in
                             Button {
-                                withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
+                                withAnimation(.easeInOut(duration: 0.42)) { heroPage = index + 1 }
                             } label: {
                                 Capsule()
-                                    .fill(index == heroIndex ? Color.white : Color.white.opacity(0.32))
-                                    .frame(width: index == heroIndex ? 22 : 6, height: 6)
+                                    .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
+                                    .frame(width: index == currentHeroIndex ? 22 : 6, height: 6)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Featured item \(index + 1)")
                         }
                     }
-                    .animation(.easeOut(duration: 0.25), value: heroIndex)
+                    .animation(.easeOut(duration: 0.25), value: currentHeroIndex)
                     .padding(.bottom, 52)
                 }
             }
+            .environment(\.layoutDirection, .leftToRight)
+            .frame(maxWidth: .infinity)
             .frame(height: 610)
         }
     }
 
-    private func heroSlide(_ entry: UnifiedMediaEntry) -> some View {
-        ZStack(alignment: .bottomLeading) {
-            if let imageURL = entry.details?.detailsBackdropURL ?? entry.details?.imageURL ?? entry.posterURL {
-                KFImage(imageURL)
-                    .placeholder {
-                        ZStack {
-                            AppTheme.bg
-                            ProgressView().tint(AppPalette.accent)
-                        }
+    private var heroPinnedBackground: some View {
+        ZStack {
+            ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
+                Group {
+                    if let imageURL = entry.details?.detailsBackdropURL ?? entry.details?.imageURL ?? entry.posterURL {
+                        KFImage(imageURL)
+                            .cacheOriginalImage()
+                            .fade(duration: 0.18)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        AppTheme.bg
                     }
-                    .cacheOriginalImage()
-                    .fade(duration: 0.22)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-            } else {
-                UnifiedPosterArtwork(entry: entry, section: section(for: entry))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+                .opacity(index == currentHeroIndex ? 1 : 0)
             }
 
             LinearGradient(
-                colors: [.black.opacity(0.82), .black.opacity(0.44), .clear],
+                colors: [.black.opacity(0.78), .black.opacity(0.38), .clear],
                 startPoint: .leading,
                 endPoint: .trailing
             )
             LinearGradient(
                 stops: [
-                    .init(color: .black.opacity(0.48), location: 0),
-                    .init(color: .clear, location: 0.28),
-                    .init(color: AppTheme.bg.opacity(0.28), location: 0.62),
-                    .init(color: AppTheme.bg.opacity(0.92), location: 0.86),
+                    .init(color: .black.opacity(0.42), location: 0),
+                    .init(color: .clear, location: 0.32),
+                    .init(color: AppTheme.bg.opacity(0.22), location: 0.62),
+                    .init(color: AppTheme.bg.opacity(0.9), location: 0.86),
                     .init(color: AppTheme.bg, location: 1)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
+        }
+        .frame(height: 670)
+        .animation(.easeInOut(duration: 0.5), value: currentHeroIndex)
+    }
 
+    private func heroSlide(_ entry: UnifiedMediaEntry) -> some View {
+        GeometryReader { proxy in
+            let contentWidth = max(260, min(470, proxy.size.width - 40))
             VStack(alignment: .leading, spacing: 12) {
-                if let logoURL = entry.details?.logoURL {
-                    KFImage(logoURL)
-                        .cacheOriginalImage()
-                        .fade(duration: 0.18)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 270, maxHeight: 92, alignment: .leading)
-                } else {
-                    Text(entry.title.uppercased())
-                        .font(.system(size: 42, weight: .black, design: .rounded))
-                        .tracking(-1.6)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.7)
-                        .frame(maxWidth: 430, alignment: .leading)
-                }
+                HomeHeroTitleTreatment(title: entry.title, logoURL: entry.details?.logoURL)
+                    .frame(width: contentWidth, alignment: .leading)
 
                 heroMetadata(entry)
+                    .frame(width: contentWidth, alignment: .leading)
 
                 if let overview = entry.details?.overview, !overview.isEmpty {
                     Text(overview)
@@ -338,7 +345,7 @@ struct HomeLibraryView: View {
                         .foregroundStyle(.white.opacity(0.76))
                         .lineLimit(2)
                         .lineSpacing(2)
-                        .frame(maxWidth: 470, alignment: .leading)
+                        .frame(width: contentWidth, alignment: .leading)
                 }
 
                 HStack(spacing: 10) {
@@ -346,7 +353,8 @@ struct HomeLibraryView: View {
                         Label("Play", systemImage: "play.fill")
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.black)
-                            .frame(width: 142, height: 46)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 46)
                             .background(Color.white, in: Capsule())
                     }
                     .buttonStyle(PremiumPressButtonStyle())
@@ -358,34 +366,30 @@ struct HomeLibraryView: View {
                         Label("More Info", systemImage: "info.circle")
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
-                            .frame(width: 142, height: 46)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 46)
                             .background(.ultraThinMaterial, in: Capsule())
                             .overlay(Capsule().stroke(Color.white.opacity(0.17)))
                     }
                     .buttonStyle(PremiumPressButtonStyle())
                 }
+                .frame(width: contentWidth)
             }
-            .padding(.horizontal, 20)
+            .frame(width: contentWidth, alignment: .leading)
+            .padding(.leading, 20)
             .padding(.bottom, 88)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
     }
 
     private func heroMetadata(_ entry: UnifiedMediaEntry) -> some View {
         let values = heroMetadataValues(entry)
-        return HStack(spacing: 8) {
-            ForEach(Array(values.enumerated()), id: \.offset) { index, value in
-                if index > 0 {
-                    Circle().fill(Color.white.opacity(0.42)).frame(width: 3, height: 3)
-                }
-                Text(value)
-                    .foregroundStyle(index == 0 && value.hasPrefix("★") ? Color.yellow : Color.white.opacity(0.88))
-            }
-        }
+        return Text(values.joined(separator: "  •  "))
+        .foregroundStyle(.white.opacity(0.9))
         .font(.system(size: 11, weight: .bold))
         .lineLimit(1)
-        .minimumScaleFactor(0.75)
+        .minimumScaleFactor(0.68)
     }
 
     private func heroMetadataValues(_ entry: UnifiedMediaEntry) -> [String] {
@@ -419,10 +423,11 @@ struct HomeLibraryView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(AppPalette.accent)
-                .frame(width: 42, height: 42)
-                .background(Color.white.opacity(0.065), in: Circle())
-                .overlay(Circle().stroke(Color.white.opacity(0.08)))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 0.8))
+                .shadow(color: .black.opacity(0.28), radius: 9, y: 4)
         }
         .buttonStyle(.plain)
     }
@@ -696,6 +701,34 @@ struct HomeLibraryView: View {
         }.prefix(5))
     }
 
+    private var heroCarouselItems: [UnifiedMediaEntry] {
+        guard featuredItems.count > 1,
+              let first = featuredItems.first,
+              let last = featuredItems.last else { return featuredItems }
+        return [last] + featuredItems + [first]
+    }
+
+    private var currentHeroIndex: Int {
+        let count = featuredItems.count
+        guard count > 1 else { return 0 }
+        if heroPage <= 0 { return count - 1 }
+        if heroPage > count { return 0 }
+        return heroPage - 1
+    }
+
+    private func normalizeHeroPageIfNeeded(_ page: Int) {
+        let count = featuredItems.count
+        guard count > 1, page == 0 || page == count + 1 else { return }
+        let target = page == 0 ? count : 1
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard heroPage == page else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { heroPage = target }
+        }
+    }
+
     private var historyByID: [String: PlaybackHistoryEntry] {
         Dictionary(uniqueKeysWithValues: vm.recentPlaybackHistory.map { ($0.id, $0) })
     }
@@ -906,6 +939,36 @@ struct HomeLibraryView: View {
         return entry.episodes.sorted {
             $0.season == $1.season ? $0.episode < $1.episode : $0.season < $1.season
         }.first
+    }
+}
+
+private struct HomeHeroTitleTreatment: View {
+    let title: String
+    let logoURL: URL?
+    @State private var logoLoaded = false
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if !logoLoaded {
+                Text(title.uppercased())
+                    .font(.system(size: 40, weight: .black, design: .rounded))
+                    .tracking(-1.4)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.62)
+            }
+
+            if let logoURL {
+                KFImage(logoURL)
+                    .onSuccess { _ in logoLoaded = true }
+                    .cacheOriginalImage()
+                    .fade(duration: 0.18)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 270, maxHeight: 92, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 72, maxHeight: 92, alignment: .leading)
+        .onChange(of: logoURL) { _ in logoLoaded = false }
     }
 }
 
