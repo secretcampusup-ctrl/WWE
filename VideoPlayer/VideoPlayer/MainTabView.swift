@@ -35,7 +35,7 @@ struct MainTabView: View {
             .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 0.7))
             .shadow(color: .black.opacity(0.34), radius: 14, y: 6)
             .padding(.horizontal, 34)
-            .padding(.bottom, -10)
+            .padding(.bottom, -12)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)

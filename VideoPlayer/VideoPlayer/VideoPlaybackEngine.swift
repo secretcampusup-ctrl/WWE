@@ -11,6 +11,22 @@ struct PlayerAudioTrackOption: Identifiable, Equatable {
 struct PlayerSubtitleTrackOption: Identifiable, Equatable {
     let id: String
     let title: String
+    let languageCode: String?
+
+    init(id: String, title: String, languageCode: String? = nil) {
+        self.id = id
+        self.title = title
+        self.languageCode = languageCode
+    }
+
+    var isEnglish: Bool {
+        let code = languageCode?.lowercased()
+        if code == "en" || code == "eng" { return true }
+        let normalizedTitle = title.lowercased()
+        if normalizedTitle.contains("english") { return true }
+        let tokens = normalizedTitle.components(separatedBy: CharacterSet.alphanumerics.inverted)
+        return tokens.contains("en") || tokens.contains("eng")
+    }
 }
 
 struct PlayerChapterMarker: Identifiable, Equatable {
@@ -400,7 +416,11 @@ final class VideoPlaybackEngine: ObservableObject {
         var map: [String: AVMediaSelectionOption] = [:]
         subtitleTracks = group.options.enumerated().map { index, option in
             let id = "subtitle-\(index)"; map[id] = option
-            return PlayerSubtitleTrackOption(id: id, title: option.displayName)
+            return PlayerSubtitleTrackOption(
+                id: id,
+                title: option.displayName,
+                languageCode: option.locale?.languageCode
+            )
         }
         subtitleOptionsByID = map
         if let selected = item.currentMediaSelection.selectedMediaOption(in: group),

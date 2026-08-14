@@ -87,7 +87,7 @@ struct VideoPlayerView: View {
                     resetZoomToken: mkvResetZoomToken,
                     httpHeaders: httpHeaders,
                     subtitleSize: subtitleSize,
-                    subtitleFontName: subtitleFont.vlcFontName,
+                    subtitleFontName: effectiveEmbeddedSubtitleVLCFontName,
                     subtitleColorValue: subtitleColor.vlcColorValue,
                     subtitleBackground: subtitleBackground,
                     subtitleShadow: subtitleShadow,
@@ -244,7 +244,7 @@ struct VideoPlayerView: View {
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
                         Text(cue.text)
-                            .font(.system(size: subtitleSize, weight: .semibold, design: subtitleFont.design))
+                            .font(externalSubtitleFont(for: cue.text))
                             .foregroundColor(subtitleColor.color)
                             .multilineTextAlignment(.center)
                             .lineLimit(nil)
@@ -343,7 +343,7 @@ struct VideoPlayerView: View {
                     guard !Task.isCancelled else { return }
                     engine.applySubtitleStyle(
                         fontSize: subtitleSize,
-                        fontFamily: subtitleFont.appleFontFamily,
+                        fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
                         color: subtitleColor.uiColor,
                         background: subtitleBackground
                     )
@@ -402,6 +402,8 @@ struct VideoPlayerView: View {
         .onChange(of: subtitleShadow) { _ in applySubtitlePreferences() }
         .onChange(of: subtitleBackground) { _ in applySubtitlePreferences() }
         .onChange(of: subtitleFont) { _ in applySubtitlePreferences() }
+        .onChange(of: engine.selectedSubtitleTrackID) { _ in applySubtitlePreferences() }
+        .onChange(of: mkvControls.selectedSubtitleTrackID) { _ in applySubtitlePreferences() }
         .onChange(of: playbackDidEnd) { ended in
             if ended { beginEndCountdown() } else { endCountdownTask?.cancel() }
         }
@@ -595,6 +597,32 @@ struct VideoPlayerView: View {
         }
     }
 
+    private var selectedEmbeddedSubtitle: PlayerSubtitleTrackOption? {
+        let tracks = usesMKVPlayer ? mkvControls.subtitleTracks : engine.subtitleTracks
+        let selectedID = usesMKVPlayer ? mkvControls.selectedSubtitleTrackID : engine.selectedSubtitleTrackID
+        guard let selectedID else { return nil }
+        return tracks.first { $0.id == selectedID }
+    }
+
+    private var effectiveEmbeddedSubtitleAppleFontFamily: String {
+        selectedEmbeddedSubtitle?.isEnglish == true
+            ? PlayerSubtitleTypeface.englishFamilyName
+            : subtitleFont.appleFontFamily
+    }
+
+    private var effectiveEmbeddedSubtitleVLCFontName: String {
+        selectedEmbeddedSubtitle?.isEnglish == true
+            ? PlayerSubtitleTypeface.englishVLCFontName
+            : subtitleFont.vlcFontName
+    }
+
+    private func externalSubtitleFont(for text: String) -> Font {
+        if SubtitleLanguageDetector.isPredominantlyLatin(text) {
+            return .custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(subtitleSize))
+        }
+        return .system(size: subtitleSize, weight: .semibold, design: subtitleFont.design)
+    }
+
     private func subtitleScreenBottomInset(for proxy: GeometryProxy) -> CGFloat {
         // Subtitle placement belongs to the device viewport, never to the
         // fitted/cropped video rectangle. Keep it clear of the home indicator
@@ -660,13 +688,13 @@ struct VideoPlayerView: View {
 
         engine.applySubtitleStyle(
             fontSize: subtitleSize,
-            fontFamily: subtitleFont.appleFontFamily,
+            fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
             color: subtitleColor.uiColor,
             background: subtitleBackground
         )
         mkvControls.applySubtitleStyle(
             fontSize: subtitleSize,
-            fontName: subtitleFont.vlcFontName,
+            fontName: effectiveEmbeddedSubtitleVLCFontName,
             color: subtitleColor.vlcColorValue,
             background: subtitleBackground,
             shadow: subtitleShadow,
@@ -720,10 +748,10 @@ struct VideoPlayerView: View {
                         .lineLimit(1)
                 }
                 Text(seriesDisplayName)
-                    .font(.system(size: 23, weight: .bold, design: .rounded))
+                    .font(.custom("HiRollivBold", fixedSize: 25))
                     .foregroundColor(.white)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.72)
+                    .minimumScaleFactor(0.68)
             }
             Spacer(minLength: 8)
             HStack(spacing: 3) {
@@ -755,6 +783,7 @@ struct VideoPlayerView: View {
                             externalSubtitleFileName = nil
                             if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: id) }
                             else { engine.selectSubtitleTrack(id: id) }
+                            DispatchQueue.main.async { applySubtitlePreferences() }
                         },
                         onChooseSubtitleFile: {
                             showQuickSettings = false
@@ -1194,7 +1223,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         media.addOption(":file-caching=500")
         media.addOption(":drop-late-frames")
         media.addOption(":freetype-font=\(subtitleStyle.fontName)")
-        media.addOption(":freetype-fontsize=\(Int(subtitleStyle.fontSize))")
+        media.addOption(":freetype-rel-fontsize=\(vlcRelativeFontSize(for: subtitleStyle.fontSize))")
         media.addOption(":freetype-color=\(subtitleStyle.color)")
         media.addOption(":freetype-background-opacity=\(subtitleStyle.background ? 155 : 0)")
         media.addOption(":freetype-shadow-opacity=\(subtitleStyle.shadow ? 255 : 0)")
@@ -1300,12 +1329,31 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         // place; restarting `play(url:)` here used to reopen the remote media,
         // rebuffer it and briefly lose the selected subtitle/audio tracks.
         performTextRendererSelector("setTextRendererFont:", value: subtitleStyle.fontName as NSString)
-        performTextRendererSelector("setTextRendererFontSize:", value: NSNumber(value: Int(subtitleStyle.fontSize.rounded())))
+        performTextRendererSelector(
+            "setTextRendererFontSize:",
+            value: NSNumber(value: vlcRelativeFontSize(for: subtitleStyle.fontSize))
+        )
         performTextRendererSelector("setTextRendererFontColor:", value: NSNumber(value: subtitleStyle.color))
         performTextRendererSelector("setTextRendererFontForceBold:", value: NSNumber(value: true))
 
         // This is a public live property and is measured in microseconds.
         mediaPlayer.currentVideoSubTitleDelay = Int(subtitleStyle.delay * 1_000_000)
+    }
+
+    /// VLC's live text-renderer API uses an inverse relative scale: smaller
+    /// numbers produce larger subtitles. Keep this mapping aligned with the
+    /// four point-size presets used by SwiftUI and AVFoundation.
+    private func vlcRelativeFontSize(for pointSize: Double) -> Int {
+        switch pointSize {
+        case ..<18:
+            return 130       // Very Small (16 pt)
+        case ..<22:
+            return 100       // Small (20 pt)
+        case ..<28:
+            return 80        // Medium (24 pt)
+        default:
+            return 60        // Large (32 pt)
+        }
     }
 
     private func performTextRendererSelector(_ name: String, value: AnyObject) {
@@ -1649,6 +1697,30 @@ private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
         switch self { case .rounded: return "Arial Rounded MT Bold"; case .standard: return "Helvetica Neue"; case .monospaced: return "Menlo" }
     }
     var vlcFontName: String { appleFontFamily }
+}
+
+private enum PlayerSubtitleTypeface {
+    static let englishPostScriptName = "NunitoSans-SemiBold"
+    static let englishFamilyName = "Nunito Sans"
+    static let englishVLCFontName = "Nunito Sans SemiBold"
+}
+
+private enum SubtitleLanguageDetector {
+    static func isPredominantlyLatin(_ text: String) -> Bool {
+        var latinLetters = 0
+        var otherLetters = 0
+
+        for scalar in text.unicodeScalars where CharacterSet.letters.contains(scalar) {
+            switch scalar.value {
+            case 0x0041...0x024F, 0x1E00...0x1EFF:
+                latinLetters += 1
+            default:
+                otherLetters += 1
+            }
+        }
+
+        return latinLetters > 0 && latinLetters >= otherLetters * 2
+    }
 }
 
 private enum QuickSettingsPage { case main, speed, audio, subtitles }
@@ -2004,8 +2076,12 @@ private struct PlayerAdvancedSettingsSheet: View {
     private var subtitlePreview: some View {
         ZStack {
             LinearGradient(colors: [Color.indigo.opacity(0.55), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
-            Text("Arabic subtitle preview\nمرحباً، ستظهر الترجمة العربية بشكل صحيح")
-                .font(.system(size: min(subtitleSize, 28), weight: .semibold, design: subtitleFont.design))
+            VStack(spacing: 3) {
+                Text("English subtitle preview")
+                    .font(.custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(min(subtitleSize, 28))))
+                Text("مرحباً، ستظهر الترجمة العربية بشكل صحيح")
+                    .font(.system(size: min(subtitleSize, 28), weight: .semibold, design: subtitleFont.design))
+            }
                 .foregroundStyle(subtitleColor.color)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 12).padding(.vertical, 7)

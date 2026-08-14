@@ -23,6 +23,8 @@
 		AA000007 /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000007 /* FileBrowserView.swift */; };
 		AA000008 /* WebDAVClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000008 /* WebDAVClient.swift */; };
 		AA000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB000009 /* Assets.xcassets */; };
+		AA000057 /* HiRolliv-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = BB000057 /* HiRolliv-Bold.ttf */; };
+		AA000058 /* NunitoSans-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = BB000058 /* NunitoSans-SemiBold.ttf */; };
 		AA000010 /* VideoPlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000011 /* VideoPlaybackEngine.swift */; };
 		AA000011 /* VideoThumbnailLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000012 /* VideoThumbnailLoader.swift */; };
 		AA000012 /* LinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000013 /* LinkResolver.swift */; };
@@ -79,6 +81,8 @@
 		BB000008 /* WebDAVClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebDAVClient.swift; sourceTree = "<group>"; };
 		BB000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB000057 /* HiRolliv-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "HiRolliv-Bold.ttf"; path = "Fonts/HiRolliv-Bold.ttf"; sourceTree = "<group>"; };
+		BB000058 /* NunitoSans-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "NunitoSans-SemiBold.ttf"; path = "Fonts/NunitoSans-SemiBold.ttf"; sourceTree = "<group>"; };
 		BB000011 /* VideoPlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlaybackEngine.swift; sourceTree = "<group>"; };
 		BB000012 /* VideoThumbnailLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoThumbnailLoader.swift; sourceTree = "<group>"; };
 		BB000013 /* LinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkResolver.swift; sourceTree = "<group>"; };
@@ -190,6 +194,8 @@
 				BB000048 /* TMDBSettingsView.swift */,
 				BB000045 /* SplashScreenView.swift */,
 				BB000009 /* Assets.xcassets */,
+				BB000057 /* HiRolliv-Bold.ttf */,
+				BB000058 /* NunitoSans-SemiBold.ttf */,
 				BB000010 /* Info.plist */,
 			);
 			path = VideoPlayer;
@@ -262,6 +268,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA000009 /* Assets.xcassets in Resources */,
+				AA000057 /* HiRolliv-Bold.ttf in Resources */,
+				AA000058 /* NunitoSans-SemiBold.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
