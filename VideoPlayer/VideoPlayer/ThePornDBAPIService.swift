@@ -156,14 +156,55 @@ actor ThePornDBAPIService {
     }
 
     func searchPerformers(query: String, limit: Int = 20) async throws -> ThePornDBPerformersResponse {
-        let parameters = ["q": query, "limit": String(limit)]
+        let parameters = ["q": query, "per_page": String(limit)]
         return try await performRequest(endpoint: "/performers", parameters: parameters)
     }
 
     func searchScenes(query: String, limit: Int = 20, year: Int? = nil) async throws -> ThePornDBScenesResponse {
-        var parameters = ["q": query, "limit": String(limit)]
+        var parameters = ["q": query, "per_page": String(limit)]
         if let year = year { parameters["year"] = String(year) }
         return try await performRequest(endpoint: "/scenes", parameters: parameters)
+    }
+
+    /// Searches ThePornDB's dedicated JAV catalogue. Its free-text index resolves
+    /// catalogue identifiers such as `JUR-174`; SKU remains a secondary fallback
+    /// because not every JAV record exposes its catalogue code in the SKU field.
+    func searchJav(query: String, limit: Int = 20) async throws -> ThePornDBScenesResponse {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier = VideoTitleFormatter.catalogIdentifier(from: trimmed) ?? trimmed
+        let pageSize = String(limit)
+        let uppercasedIdentifier = identifier.uppercased()
+
+        // File/folder names commonly append a release variant (`-U`, `-UC`, `-C`),
+        // while ThePornDB indexes the base catalogue code. Keep the original title
+        // untouched for display and remove the suffix only from the search candidate.
+        let baseIdentifier = uppercasedIdentifier.replacingOccurrences(
+            of: #"(?<=\d)[-_][A-Z]{1,4}$"#,
+            with: "",
+            options: .regularExpression
+        )
+        var candidates = [baseIdentifier]
+        if uppercasedIdentifier != baseIdentifier { candidates.append(uppercasedIdentifier) }
+
+        var lastEmpty = ThePornDBScenesResponse(data: [], scenes: nil, results: nil)
+        for candidate in candidates {
+            let matched: ThePornDBScenesResponse = try await performRequest(
+                endpoint: "/jav",
+                parameters: ["q": candidate, "per_page": pageSize]
+            )
+            if !matched.list.isEmpty { return matched }
+            lastEmpty = matched
+        }
+
+        for candidate in candidates {
+            let matched: ThePornDBScenesResponse = try await performRequest(
+                endpoint: "/jav",
+                parameters: ["sku": candidate, "per_page": pageSize]
+            )
+            if !matched.list.isEmpty { return matched }
+            lastEmpty = matched
+        }
+        return lastEmpty
     }
 
     func downloadImage(from urlString: String) async throws -> UIImage {

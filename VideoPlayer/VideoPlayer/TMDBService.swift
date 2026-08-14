@@ -233,10 +233,14 @@ actor TMDBService {
                 // TMDB's No Language section is represented by iso_639_1 = null.
                 // Preserve API order and use its first backdrop exactly.
                 noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath,
-                // Details now uses portrait posters: No Language first, then
-                // the first English poster. Never substitute a backdrop here.
-                detailsPosterPath: payload.images?.posters?.first(where: { $0.iso6391 == nil })?.filePath
-                    ?? payload.images?.posters?.first(where: { $0.iso6391 == "en" })?.filePath
+                // Prefer any high-quality portrait poster from No Language;
+                // API ordering is not treated as meaningful. English is next.
+                detailsPosterPath: payload.images?.posters?
+                    .filter { $0.iso6391 == nil }
+                    .max { $0.qualityScore < $1.qualityScore }?.filePath
+                    ?? payload.images?.posters?
+                        .filter { $0.iso6391 == "en" }
+                        .max { $0.qualityScore < $1.qualityScore }?.filePath
                     ?? payload.posterPath
             )
             // One successful response is shared by the Content scan and Details
@@ -500,7 +504,21 @@ private struct TMDBImagesPayload: Decodable {
     let posters: [TMDBBackdropPayload]?
 }
 private struct TMDBLogoPayload: Decodable { let filePath: String; let iso6391: String? }
-private struct TMDBBackdropPayload: Decodable { let filePath: String; let iso6391: String? }
+private struct TMDBBackdropPayload: Decodable {
+    let filePath: String
+    let iso6391: String?
+    let voteAverage: Double?
+    let voteCount: Int?
+    let width: Int?
+    let height: Int?
+
+    var qualityScore: Double {
+        let rating = (voteAverage ?? 0) * 1_000_000
+        let votes = Double(voteCount ?? 0) * 1_000
+        let pixels = Double(width ?? 0) * Double(height ?? 0) / 1_000_000
+        return rating + votes + pixels
+    }
+}
 private struct Videos: Decodable { let results: [Video] }
 private struct Video: Decodable { let key: String; let site: String; let type: String; let official: Bool? }
 

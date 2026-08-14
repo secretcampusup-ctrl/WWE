@@ -15,6 +15,32 @@ enum VideoLibraryVisibility {
 enum VideoTitleFormatter {
     private static let seasonEpisodePattern = #"(?i)(?<![A-Z0-9])S(\d{1,3})[\s._-]*E(\d{1,3})(?!\d)"#
 
+    /// Preserves catalogue-style identifiers such as JUR-174, DASS-787-UC,
+    /// SAME-195, and FC2-PPV-1234567. These are semantic titles, not release
+    /// years or encoding tags, so removing their digits destroys metadata search.
+    static func catalogIdentifier(from rawTitle: String) -> String? {
+        var value = (rawTitle.removingPercentEncoding ?? rawTitle)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        value = value
+            .replacingOccurrences(of: "–", with: "-")
+            .replacingOccurrences(of: "—", with: "-")
+
+        let pattern = #"(?i)(?<![A-Z0-9])((?:FC2[-_]PPV[-_]\d{4,10}|[A-Z]{2,12}[-_]\d{2,7}(?:[-_][A-Z]{1,4})?))(?![A-Z0-9])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range(at: 1), in: value) else { return nil }
+
+        let identifier = String(value[range])
+        let components = identifier.split(whereSeparator: { $0 == "-" || $0 == "_" })
+        if components.count == 2,
+           let number = Int(components[1]),
+           components[1].count == 4 {
+            let latestPlausibleYear = Calendar.current.component(.year, from: Date()) + 2
+            if (1900...latestPlausibleYear).contains(number) { return nil }
+        }
+        return identifier
+    }
+
     static func episodeComponents(from rawTitle: String) -> (season: Int, episode: Int)? {
         guard let regex = try? NSRegularExpression(pattern: seasonEpisodePattern),
               let match = regex.firstMatch(in: rawTitle, range: NSRange(rawTitle.startIndex..., in: rawTitle)),
@@ -123,6 +149,11 @@ enum VideoTitleFormatter {
         let decoded = rawTitle.removingPercentEncoding ?? rawTitle
         var value = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return "Video" }
+
+        // Catalogue codes must bypass the generic "remove every number" rule.
+        if let identifier = catalogIdentifier(from: value) {
+            return identifier
+        }
 
         // خطوة أولى: لو العنوان مطابق لنمط Studio.Date.Actors.Title.Junk، استخرجه مباشرة
         // (اسم الاستوديو يبقى ضمن الناتج الآن — فلتر 1)

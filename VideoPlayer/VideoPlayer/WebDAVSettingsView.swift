@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Dedicated WebDAV integration / settings screen.
 struct WebDAVSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
     @State private var showAddServer = false
     @State private var testingId: UUID?
@@ -40,7 +41,7 @@ struct WebDAVSettingsView: View {
                     } else {
                         ForEach(vm.servers) { server in
                             NavigationLink {
-                                WebDAVFolderSelectionView(server: server)
+                                WebDAVFolderSelectionView(server: server, closesWhenSaved: true)
                             } label: {
                                 WebDAVAccountRow(server: server)
                             }
@@ -124,6 +125,9 @@ struct WebDAVSettingsView: View {
             }
             .navigationTitle("WebDAV")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Close") { dismiss() }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showAddServer = true

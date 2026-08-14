@@ -5,7 +5,7 @@ import Kingfisher
 enum UnifiedMediaSection: String, CaseIterable, Identifiable {
     case movies = "Movies"
     case shows = "TV Shows"
-    case unknown = "Unknown"
+    case unknown = "Others"
     var id: String { rawValue }
     var icon: String {
         switch self { case .movies: return "film.fill"; case .shows: return "tv.fill"; case .unknown: return "questionmark.folder.fill" }
@@ -350,9 +350,17 @@ final class UnifiedContentModel: ObservableObject {
                 movieItems.append(entry)
             } else {
                 if let previous = previousEntriesByID[entry.id] {
-                    entry.adultScene = previous.adultScene
-                    entry.adultLookupCompleted = previous.adultLookupCompleted
-                    if previous.adultScene != nil { entry.title = previous.title }
+                    let retryPreservedIdentifier = previous.manualMetadataProvider == nil
+                        && metadataSignature != lastMetadataSignature
+                        && VideoTitleFormatter.catalogIdentifier(from: entry.rawTitle) != nil
+                    if retryPreservedIdentifier {
+                        entry.adultScene = nil
+                        entry.adultLookupCompleted = false
+                    } else {
+                        entry.adultScene = previous.adultScene
+                        entry.adultLookupCompleted = previous.adultLookupCompleted
+                        if previous.adultScene != nil { entry.title = previous.title }
+                    }
                 }
                 unknownItems.append(entry)
             }
@@ -468,7 +476,11 @@ final class UnifiedContentModel: ObservableObject {
                 items[index].adultLookupCompleted = true
                 continue
             }
-            if let response = try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5) {
+            let isJavCode = VideoTitleFormatter.catalogIdentifier(from: query) != nil
+            let response = isJavCode
+                ? try? await ThePornDBAPIService.shared.searchJav(query: query, limit: 5)
+                : try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5)
+            if let response {
                 guard !Task.isCancelled else { return }
                 items[index].adultLookupCompleted = true
                 if let scene = bestAdultMatch(response.list, query: query) ?? response.list.first {
@@ -512,7 +524,7 @@ final class UnifiedContentModel: ObservableObject {
     private static func currentMetadataSignature() -> String {
         "tmdb:" + stableSignature(TMDBSettings.readAccessToken)
             + "|tpdb:" + stableSignature(ThePornDBSettings.apiKey)
-            + "|matcher:release-v2-adult-v1-details-poster-v1"
+            + "|matcher:release-v2-adult-v3-jav-details-poster-v1"
     }
 
     func applyManualTMDB(_ details: TMDBTitleDetails, to entry: UnifiedMediaEntry) {
@@ -715,10 +727,15 @@ struct UnifiedContentView: View {
     @State private var manualSearch: UnifiedManualSearchRequest?
     @Namespace private var selectionAnimation
 
-    private let columns = Array(
-        repeating: GridItem(.flexible(), spacing: 12, alignment: .top),
-        count: 3
-    )
+    private var posterCardWidth: CGFloat {
+        max(88, floor((UIScreen.main.bounds.width - 52) / 3))
+    }
+
+    private var posterCardHeight: CGFloat { posterCardWidth * 1.5 }
+
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.fixed(posterCardWidth), spacing: 12, alignment: .top), count: 3)
+    }
 
     var body: some View {
         NavigationStack {
@@ -796,20 +813,37 @@ struct UnifiedContentView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.07))
                     UnifiedPosterArtwork(entry: entry, section: section)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(width: posterCardWidth, height: posterCardHeight)
                         .clipped()
                 }
-                .aspectRatio(2/3, contentMode: .fit)
-                .frame(maxWidth: .infinity)
+                .frame(width: posterCardWidth, height: posterCardHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.white.opacity(0.13), lineWidth: 0.8)
+                )
                 Text(entry.title)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if !entry.episodes.isEmpty { Text("\(entry.episodes.count) episodes").font(.caption2).foregroundStyle(AppPalette.accent) }
+                    .frame(width: posterCardWidth, height: 16, alignment: .leading)
+                Group {
+                    if !entry.episodes.isEmpty {
+                        Text("\(entry.episodes.count) episodes")
+                            .font(.caption2)
+                            .foregroundStyle(AppPalette.accent)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: posterCardWidth, height: 13, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(
+                width: posterCardWidth,
+                height: posterCardHeight + 43,
+                alignment: .topLeading
+            )
+            .clipped()
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -864,7 +898,7 @@ struct UnifiedContentView: View {
             Image(systemName: section.icon)
                 .font(.system(size: 42, weight: .semibold))
                 .foregroundStyle(AppPalette.gradient)
-            Text(section == .unknown ? "No Unknown Content" : "No \(section.rawValue)")
+            Text(section == .unknown ? "No Other Content" : "No \(section.rawValue)")
                 .font(.title3.weight(.bold))
             Text("Pull to refresh after adding WebDAV, Offcloud, or TorBox in Home settings.")
                 .font(.subheadline)
@@ -1241,6 +1275,11 @@ struct UnifiedMediaDetailsHost: View {
     }
 
     private func playCurrent() {
+        // Keep the exact unified-library identity attached to playback. Adult/JAV
+        // metadata can change the displayed title while the details screen is open,
+        // so relying on title/source reconstruction made some Others entries miss
+        // Resume Playback even though their progress tick was received.
+        vm.preparePlaybackHistory(for: currentDetailsItem)
         let source = selectedEpisode?.source ?? activeEntry.source
         switch source {
         case let .webDAV(server, file): vm.play(file: file, server: server)
@@ -1263,7 +1302,7 @@ struct UnifiedMediaDetailsHost: View {
         switch section {
         case .movies: return "Unwatched Movies"
         case .shows: return "Unwatched TV Shows"
-        case .unknown: return "Unwatched Unknown"
+        case .unknown: return "Unwatched Others"
         }
     }
 
@@ -1306,31 +1345,74 @@ struct UnifiedSettingsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Settings") {
-                    settingsRow("Servers", "WebDAV, Offcloud and TorBox accounts", "server.rack", .servers)
-                    settingsRow("Downloads", "Current downloads and downloaded videos", "arrow.down.circle.fill", .downloads)
-                    settingsRow("Direct Links", "Add PikPak or any direct video link", "link.badge.plus", .directLinks)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Image(systemName: "gearshape.2.fill")
+                            .font(.system(size: 34, weight: .semibold))
+                            .foregroundStyle(AppPalette.gradient)
+                        Text("Control Center")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("Manage your sources, downloads, and direct links.")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+
+                    VStack(spacing: 12) {
+                        settingsRow("Servers", "WebDAV, Offcloud and TorBox accounts", "server.rack", .servers)
+                        settingsRow("Downloads", "Current downloads and downloaded videos", "arrow.down.circle.fill", .downloads)
+                        settingsRow("Direct Links", "Add PikPak or any direct video link", "link.badge.plus", .directLinks)
+                    }
                 }
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 120)
             }
+            .background(
+                LinearGradient(
+                    colors: [AppTheme.bg, AppPalette.accent.opacity(0.08), AppTheme.bg],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            )
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if showsDoneButton {
                     ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
                 }
             }
-            .sheet(item: $destination) { item in destinationView(item) }
+            .fullScreenCover(item: $destination) { item in destinationView(item) }
         }.preferredColorScheme(.dark)
     }
 
     private func settingsRow(_ title: String, _ subtitle: String, _ icon: String, _ target: SettingsDestination) -> some View {
         Button { destination = target } label: {
             HStack(spacing: 13) {
-                Image(systemName: icon).frame(width: 28).foregroundStyle(AppPalette.gradient)
-                VStack(alignment: .leading, spacing: 3) { Text(title).foregroundStyle(.primary); Text(subtitle).font(.caption).foregroundStyle(.secondary) }
-                Spacer(); Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
-            }.padding(.vertical, 3)
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(AppPalette.gradient)
+                    .frame(width: 46, height: 46)
+                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline).foregroundStyle(.white)
+                    Text(subtitle).font(.caption).foregroundStyle(.white.opacity(0.48)).lineLimit(2)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .padding(14)
+            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
+            )
         }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder private func destinationView(_ item: SettingsDestination) -> some View {
@@ -1369,7 +1451,7 @@ private struct ServerAccountsSettingsView: View {
             .navigationTitle("Servers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-            .sheet(item: $destination) { destinationView($0) }
+            .fullScreenCover(item: $destination) { destinationView($0) }
             .onAppear {
                 offcloudKey = cloud.apiKey
                 torBoxKey = TorBoxKeyStore.load()
@@ -1486,6 +1568,9 @@ private struct DirectLinksSettingsView: View {
     @ObservedObject var vm: AppViewModel
     @State private var link = ""
     @State private var message: String?
+    @State private var isResolving = false
+    @State private var showPlayer = false
+    @State private var showDownloads = false
 
     var body: some View {
         NavigationStack {
@@ -1510,7 +1595,31 @@ private struct DirectLinksSettingsView: View {
                     Button { saveLink() } label: {
                         Label("Add to Library", systemImage: "plus.circle.fill")
                     }
-                    .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!hasLink || isResolving)
+
+                    HStack(spacing: 10) {
+                        Button { watchLink() } label: {
+                            Label("Watch", systemImage: "play.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button { downloadLink() } label: {
+                            Label("Download", systemImage: "arrow.down.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .disabled(!hasLink || isResolving)
+
+                    if isResolving {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Resolving link…")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 if let message {
@@ -1528,6 +1637,16 @@ private struct DirectLinksSettingsView: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
         }
         .preferredColorScheme(.dark)
+        .fullScreenCover(isPresented: $showPlayer) {
+            ResolvedPlayerScreen(vm: vm)
+        }
+        .fullScreenCover(isPresented: $showDownloads) {
+            DownloadManagerView()
+        }
+    }
+
+    private var hasLink: Bool {
+        !link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func saveLink() {
@@ -1556,6 +1675,58 @@ private struct DirectLinksSettingsView: View {
             message = "Link added to the library"
         } else {
             message = "Invalid link. Use a direct URL, PikPak link, HLS, or magnet."
+        }
+    }
+
+    private func watchLink() {
+        let raw = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        isResolving = true
+        message = nil
+
+        Task {
+            let error = await vm.openUserLink(raw)
+            await MainActor.run {
+                isResolving = false
+                if let error {
+                    message = error
+                } else if vm.nowPlayingURL != nil {
+                    showPlayer = true
+                } else {
+                    message = "Could not resolve this link for playback."
+                }
+            }
+        }
+    }
+
+    private func downloadLink() {
+        let raw = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        isResolving = true
+        message = nil
+
+        Task {
+            let error = await vm.openUserLink(raw)
+            await MainActor.run {
+                isResolving = false
+                guard error == nil, let streamURL = vm.nowPlayingURL else {
+                    message = error ?? "Could not resolve this link for download."
+                    return
+                }
+
+                let resolvedTitle = vm.nowPlaying?.name ?? VideoTitleFormatter.title(from: streamURL.lastPathComponent)
+                let title = resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Video" : resolvedTitle
+                let fileName = streamURL.lastPathComponent.isEmpty ? "\(title).mp4" : streamURL.lastPathComponent
+                VideoDownloadManager.shared.startDownload(
+                    url: streamURL,
+                    stableKey: "direct-link|\(raw)",
+                    title: title,
+                    suggestedFileName: fileName,
+                    headers: vm.nowPlayingHeaders ?? [:]
+                )
+                message = "Download started"
+                showDownloads = true
+            }
         }
     }
 }

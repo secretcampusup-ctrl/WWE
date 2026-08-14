@@ -1304,7 +1304,13 @@ struct VideoDetailsView: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(0.6))
-                Text(metadata.source == .scene ? "ThePornDB · Scene" : "ThePornDB · Performer")
+                Text({
+                    switch metadata.source {
+                    case .scene: return "ThePornDB · Scene"
+                    case .jav: return "ThePornDB · JAV"
+                    case .performer: return "ThePornDB · Performer"
+                    }
+                }())
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.white.opacity(0.6))
             }
@@ -1636,8 +1642,11 @@ private struct CinematicDetailsHeader: View {
             let heroHeight = max(320, proxy.size.height * 0.54)
             let pullDistance = max(0, motion.offset)
             let upwardDistance = max(0, -motion.offset)
-            let scale = 1 + min(pullDistance / max(heroHeight, 1), 0.18)
-            let yOffset = motion.offset < 0 ? motion.offset * 0.22 : 0
+            // Keep permanent overscan below the viewport. The parallax offset is
+            // intentionally capped so the artwork's lower edge can never enter
+            // the visible area during a long upward scroll.
+            let scale = 1.06 + min(pullDistance / max(heroHeight, 1), 0.18)
+            let yOffset = motion.offset < 0 ? max(motion.offset * 0.08, -32) : 0
             let fade = min(1.0, Double(upwardDistance / 210))
 
             ZStack {
@@ -1693,8 +1702,8 @@ private struct StandardDetailsHeaderArtwork: View {
         GeometryReader { proxy in
             let pullDistance = max(0, motion.offset)
             let upwardDistance = max(0, -motion.offset)
-            let scale = 1 + min(pullDistance / max(proxy.size.height, 1), 0.18)
-            let yOffset = motion.offset < 0 ? motion.offset * 0.22 : 0
+            let scale = 1.06 + min(pullDistance / max(proxy.size.height, 1), 0.18)
+            let yOffset = motion.offset < 0 ? max(motion.offset * 0.08, -32) : 0
             let fade = min(0.52, Double(upwardDistance / 230) * 0.52)
 
             ZStack {
@@ -1733,10 +1742,24 @@ private struct FullPosterDetailsBackdrop: View {
 
     var body: some View {
         GeometryReader { proxy in
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+            ZStack(alignment: .top) {
+                // A filled copy guarantees continuous artwork behind the full
+                // poster instead of exposing its physical bottom edge.
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .scaleEffect(1.04)
+                    .opacity(0.72)
+                    .clipped()
+
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+            .clipped()
         }
         .transaction { $0.animation = nil }
     }

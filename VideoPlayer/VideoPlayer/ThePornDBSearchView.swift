@@ -13,6 +13,7 @@ struct ThePornDBSearchView: View {
     enum SearchMode {
         case performers
         case scenes
+        case jav
     }
 
     let initialQuery: String
@@ -40,7 +41,11 @@ struct ThePornDBSearchView: View {
         self.onPick = onPick
         self.onPickScene = onPickScene
         _query = State(initialValue: initialQuery)
-        _mode = State(initialValue: initialMode)
+        _mode = State(
+            initialValue: VideoTitleFormatter.catalogIdentifier(from: initialQuery) == nil
+                ? initialMode
+                : .jav
+        )
     }
 
     private let performerColumns = [
@@ -86,6 +91,7 @@ struct ThePornDBSearchView: View {
         HStack(spacing: 4) {
             modeButton("Performers", tag: .performers)
             modeButton("Scenes", tag: .scenes)
+            modeButton("JAV", tag: .jav)
         }
         .padding(4)
         .background(AppTheme.card, in: Capsule())
@@ -193,8 +199,8 @@ struct ThePornDBSearchView: View {
         if scenes.isEmpty {
             emptyState(
                 icon: "film",
-                title: "Search for a scene",
-                message: "Enter a scene or performer name"
+                title: mode == .jav ? "Search the JAV catalogue" : "Search for a scene",
+                message: mode == .jav ? "Enter a code such as JUR-174" : "Enter a scene or performer name"
             )
         } else {
             LazyVStack(spacing: 10) {
@@ -299,7 +305,7 @@ struct ThePornDBSearchView: View {
                         performers = response.list
                         isSearching = false
                     }
-                } else {
+                } else if mode == .scenes {
                     var year: Int?
                     if ThePornDBSettings.SceneSearch.filterByYear {
                         year = ThePornDBSettings.SceneSearch.year
@@ -310,6 +316,17 @@ struct ThePornDBSearchView: View {
                         query: searchQuery,
                         limit: limit,
                         year: year
+                    )
+
+                    await MainActor.run {
+                        scenes = response.list
+                        isSearching = false
+                    }
+                } else {
+                    let limit = ThePornDBSettings.SceneSearch.defaultLimit
+                    let response = try await ThePornDBAPIService.shared.searchJav(
+                        query: searchQuery,
+                        limit: limit
                     )
 
                     await MainActor.run {

@@ -959,7 +959,7 @@ enum VideoThumbnailLoader {
     /// Combined metadata pulled from ThePornDB for a video: whichever of a scene or a
     /// performer matched first, plus the cover image already downloaded.
     struct ThePornDBMetadata {
-        enum Source { case scene, performer }
+        enum Source { case scene, jav, performer }
         let source: Source
         let title: String?
         let performers: [String]
@@ -982,7 +982,23 @@ enum VideoThumbnailLoader {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, ThePornDBSettings.hasValidAPIKey else { return nil }
 
-        // 1) Scenes first.
+        // 1) Catalogue codes belong to ThePornDB's dedicated JAV endpoint. Sending
+        // them only to /scenes is why valid codes such as JUR-174 returned nothing.
+        if VideoTitleFormatter.catalogIdentifier(from: text) != nil {
+            do {
+                let response = try await ThePornDBAPIService.shared.searchJav(
+                    query: text,
+                    limit: ThePornDBSettings.SceneSearch.defaultLimit
+                )
+                if let scene = response.list.first {
+                    return await metadata(from: scene, source: .jav)
+                }
+            } catch {
+                logDiagnostic("[ThePornDB] JAV search failed for query=\"\(text)\" error=\(error.localizedDescription)", level: .warning)
+            }
+        }
+
+        // 2) General scenes (also kept as a fallback when a JAV SKU has no match).
         do {
             let limit = ThePornDBSettings.SceneSearch.defaultLimit
             var year: Int?
@@ -995,19 +1011,7 @@ enum VideoThumbnailLoader {
                 year: year
             )
             if let scene = response.list.first {
-                var cover: UIImage?
-                if let imageURL = scene.bestImage {
-                    cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
-                }
-                return ThePornDBMetadata(
-                    source: .scene,
-                    title: scene.title,
-                    performers: (scene.performers ?? []).compactMap { $0.name },
-                    tags: scene.tagNames,
-                    date: scene.date,
-                    siteName: scene.site,
-                    coverImage: cover
-                )
+                return await metadata(from: scene, source: .scene)
             }
         } catch {
             logDiagnostic("[ThePornDB] scene search failed for query=\"\(text)\" error=\(error.localizedDescription)", level: .warning)
@@ -1220,6 +1224,25 @@ enum VideoThumbnailLoader {
                 continuation.resume(returning: loadCustomPoster(fileName: fileName))
             }
         }
+    }
+
+    private static func metadata(
+        from scene: ThePornDBScene,
+        source: ThePornDBMetadata.Source
+    ) async -> ThePornDBMetadata {
+        var cover: UIImage?
+        if let imageURL = scene.bestImage {
+            cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
+        }
+        return ThePornDBMetadata(
+            source: source,
+            title: scene.title,
+            performers: (scene.performers ?? []).compactMap { $0.name },
+            tags: scene.tagNames,
+            date: scene.date,
+            siteName: scene.site,
+            coverImage: cover
+        )
     }
 
     static func deleteCustomPoster(fileName: String) {

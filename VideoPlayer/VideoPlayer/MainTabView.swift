@@ -31,7 +31,7 @@ struct MainTabView: View {
             .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 0.7))
             .shadow(color: .black.opacity(0.38), radius: 18, y: 8)
             .padding(.horizontal, 20)
-            .padding(.bottom, 1)
+            .padding(.bottom, -6)
         }
         .animation(.easeOut(duration: 0.18), value: selectedTab)
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -358,7 +358,10 @@ struct HomeLibraryView: View {
         ZStack {
             ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
                 Group {
-                    if let imageURL = entry.details?.detailsBackdropURL ?? entry.details?.imageURL ?? entry.posterURL {
+                    if let imageURL = entry.details?.detailsPosterURL
+                        ?? entry.posterURL
+                        ?? entry.details?.detailsBackdropURL
+                        ?? entry.details?.imageURL {
                         KFImage(imageURL)
                             .cacheOriginalImage()
                             .fade(duration: 0.18)
@@ -789,12 +792,22 @@ struct HomeLibraryView: View {
     }
 
     private var historyByID: [String: PlaybackHistoryEntry] {
-        Dictionary(uniqueKeysWithValues: vm.recentPlaybackHistory.map { ($0.id, $0) })
+        vm.playbackHistory
     }
 
     private func history(for entry: UnifiedMediaEntry) -> PlaybackHistoryEntry? {
         if let direct = historyByID[entry.id] { return direct }
-        return entry.episodes.compactMap { historyByID[$0.id] }.max { $0.watchedAt < $1.watchedAt }
+        if let episode = entry.episodes.compactMap({ historyByID[$0.id] }).max(by: { $0.watchedAt < $1.watchedAt }) {
+            return episode
+        }
+
+        // Snapshot refreshes and adult metadata enrichment may rebuild an Others
+        // entry while playback is presented. Its unified poster key remains stable,
+        // so use it as a safe identity fallback instead of comparing mutable titles.
+        let posterKey = "unified|\(entry.id)"
+        return vm.playbackHistory.values
+            .filter { $0.posterCacheKey == posterKey }
+            .max { $0.watchedAt < $1.watchedAt }
     }
 
     private var resumeItems: [HomeMediaItem] {
@@ -803,6 +816,8 @@ struct HomeLibraryView: View {
             return HomeMediaItem(entry: entry, history: history)
         }
         .sorted { ($0.history?.watchedAt ?? .distantPast) > ($1.history?.watchedAt ?? .distantPast) }
+        .prefix(12)
+        .map { $0 }
     }
 
     private var recentlyAdded: [UnifiedMediaEntry] {
