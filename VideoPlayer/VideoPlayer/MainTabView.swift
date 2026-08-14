@@ -90,7 +90,7 @@ struct HomeLibraryView: View {
     @State private var showSettings = false
     @State private var showDownloads = false
     @State private var showRefreshOverlay = false
-    @State private var heroPage = 1
+    @State private var heroIndex = 0
     @State private var showHeroPlayer = false
     @State private var heroMotion = HomeHeroMotionModel()
 
@@ -154,6 +154,11 @@ struct HomeLibraryView: View {
                 .tint(.clear)
                 .refreshable { await refreshLibrary() }
 
+                homeHeader
+                    .padding(.top, 12)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .zIndex(15)
+
                 if showRefreshOverlay {
                     MediaOrbitRefreshView()
                         .transition(.scale(scale: 0.86).combined(with: .opacity))
@@ -169,14 +174,11 @@ struct HomeLibraryView: View {
             .onReceive(heroTimer) { _ in
                 guard isActive, featuredItems.count > 1 else { return }
                 withAnimation(.easeInOut(duration: 0.55)) {
-                    heroPage += 1
+                    heroIndex = (heroIndex + 1) % featuredItems.count
                 }
             }
             .onChange(of: featuredItems.map(\.id)) { items in
-                heroPage = items.count > 1 ? 1 : 0
-            }
-            .onChange(of: heroPage) { page in
-                normalizeHeroPageIfNeeded(page)
+                if items.isEmpty || heroIndex >= items.count { heroIndex = 0 }
             }
             .fullScreenCover(item: $selectedEntry) { entry in
                 UnifiedMediaDetailsHost(
@@ -256,34 +258,26 @@ struct HomeLibraryView: View {
     @ViewBuilder
     private var heroSection: some View {
         if featuredItems.isEmpty {
-            homeHeader
-                .padding(.top, 12)
-                .padding(.bottom, 22)
+            Color.clear.frame(height: 96)
         } else {
             GeometryReader { viewport in
                 let pageWidth = viewport.size.width
                 ZStack(alignment: .top) {
-                    TabView(selection: $heroPage) {
-                        ForEach(Array(heroCarouselItems.enumerated()), id: \.offset) { index, entry in
-                            heroSlide(entry, viewportWidth: pageWidth)
-                                .frame(width: pageWidth, height: 610)
-                                .clipped()
-                                .tag(index)
-                        }
-                    }
+                    heroSlide(featuredItems[currentHeroIndex], viewportWidth: pageWidth)
+                        .id(featuredItems[currentHeroIndex].id)
                     .frame(width: pageWidth, height: 610)
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-
-                    homeHeader
-                        .frame(width: pageWidth)
-                        .padding(.top, 12)
+                    .clipped()
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    ))
 
                     VStack {
                         Spacer()
                         HStack(spacing: 7) {
                             ForEach(featuredItems.indices, id: \.self) { index in
                                 Button {
-                                    withAnimation(.easeInOut(duration: 0.42)) { heroPage = index + 1 }
+                                    withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
                                 } label: {
                                     Capsule()
                                         .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
@@ -298,6 +292,22 @@ struct HomeLibraryView: View {
                     }
                 }
                 .frame(width: pageWidth, height: 610)
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 20)
+                        .onEnded { value in
+                            guard abs(value.translation.width) > abs(value.translation.height),
+                                  abs(value.translation.width) > 42,
+                                  featuredItems.count > 1 else { return }
+                            withAnimation(.easeInOut(duration: 0.42)) {
+                                if value.translation.width < 0 {
+                                    heroIndex = (heroIndex + 1) % featuredItems.count
+                                } else {
+                                    heroIndex = (heroIndex - 1 + featuredItems.count) % featuredItems.count
+                                }
+                            }
+                        }
+                )
             }
             .environment(\.layoutDirection, .leftToRight)
             .frame(height: 610)
@@ -725,32 +735,10 @@ struct HomeLibraryView: View {
         }.prefix(5))
     }
 
-    private var heroCarouselItems: [UnifiedMediaEntry] {
-        guard featuredItems.count > 1,
-              let first = featuredItems.first,
-              let last = featuredItems.last else { return featuredItems }
-        return [last] + featuredItems + [first]
-    }
-
     private var currentHeroIndex: Int {
         let count = featuredItems.count
-        guard count > 1 else { return 0 }
-        if heroPage <= 0 { return count - 1 }
-        if heroPage > count { return 0 }
-        return heroPage - 1
-    }
-
-    private func normalizeHeroPageIfNeeded(_ page: Int) {
-        let count = featuredItems.count
-        guard count > 1, page == 0 || page == count + 1 else { return }
-        let target = page == 0 ? count : 1
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 450_000_000)
-            guard heroPage == page else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { heroPage = target }
-        }
+        guard count > 0 else { return 0 }
+        return min(max(0, heroIndex), count - 1)
     }
 
     private var historyByID: [String: PlaybackHistoryEntry] {
