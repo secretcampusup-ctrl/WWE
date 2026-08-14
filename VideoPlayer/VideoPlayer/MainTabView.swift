@@ -99,6 +99,13 @@ struct HomeLibraryView: View {
     private let posterWidth: CGFloat = 112
     private let posterHeight: CGFloat = 168
 
+    init(vm: AppViewModel, catalog: UnifiedContentModel, isActive: Bool) {
+        self.vm = vm
+        self.catalog = catalog
+        self.isActive = isActive
+        UIRefreshControl.appearance().tintColor = .clear
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -113,6 +120,8 @@ struct HomeLibraryView: View {
                     HomeHeroZoomContainer(motion: heroMotion) {
                         heroPinnedBackground
                     }
+                    .frame(width: UIScreen.main.bounds.width, height: 670, alignment: .top)
+                    .clipped()
                     .frame(maxHeight: .infinity, alignment: .top)
                     .ignoresSafeArea(edges: .top)
                     .allowsHitTesting(false)
@@ -138,9 +147,11 @@ struct HomeLibraryView: View {
                             categorySection("By Release Date", categories: releaseCategories)
                             categorySection("By Age Rating", categories: ageRatingCategories)
                         }
-                        .padding(.top, -34)
+                        .padding(.top, 0)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .background(AppTheme.bg)
                     }
+                    .frame(width: UIScreen.main.bounds.width, alignment: .leading)
                     .padding(.bottom, 110)
                     .tint(AppPalette.accent)
                 }
@@ -156,7 +167,7 @@ struct HomeLibraryView: View {
 
                 homeHeader
                     .padding(.top, 12)
-                    .frame(maxHeight: .infinity, alignment: .top)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .zIndex(15)
 
                 if showRefreshOverlay {
@@ -253,6 +264,7 @@ struct HomeLibraryView: View {
             homeHeaderButton("gearshape.fill") { showSettings = true }
         }
         .padding(.horizontal, 16)
+        .frame(width: UIScreen.main.bounds.width)
     }
 
     @ViewBuilder
@@ -260,11 +272,10 @@ struct HomeLibraryView: View {
         if featuredItems.isEmpty {
             Color.clear.frame(height: 96)
         } else {
-            GeometryReader { viewport in
-                let pageWidth = viewport.size.width
-                ZStack(alignment: .top) {
-                    heroSlide(featuredItems[currentHeroIndex], viewportWidth: pageWidth)
-                        .id(featuredItems[currentHeroIndex].id)
+            let pageWidth = UIScreen.main.bounds.width
+            ZStack(alignment: .top) {
+                heroSlide(featuredItems[currentHeroIndex], viewportWidth: pageWidth)
+                    .id(featuredItems[currentHeroIndex].id)
                     .frame(width: pageWidth, height: 610)
                     .clipped()
                     .transition(.asymmetric(
@@ -272,43 +283,43 @@ struct HomeLibraryView: View {
                         removal: .move(edge: .leading).combined(with: .opacity)
                     ))
 
-                    VStack {
-                        Spacer()
-                        HStack(spacing: 7) {
-                            ForEach(featuredItems.indices, id: \.self) { index in
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
-                                } label: {
-                                    Capsule()
-                                        .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
-                                        .frame(width: index == currentHeroIndex ? 22 : 6, height: 6)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Featured item \(index + 1)")
+                VStack {
+                    Spacer()
+                    HStack(spacing: 7) {
+                        ForEach(featuredItems.indices, id: \.self) { index in
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
+                            } label: {
+                                Capsule()
+                                    .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
+                                    .frame(width: index == currentHeroIndex ? 22 : 6, height: 6)
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Featured item \(index + 1)")
                         }
-                        .animation(.easeOut(duration: 0.25), value: currentHeroIndex)
-                        .padding(.bottom, 52)
                     }
+                    .animation(.easeOut(duration: 0.25), value: currentHeroIndex)
+                    .padding(.bottom, 52)
                 }
-                .frame(width: pageWidth, height: 610)
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 20)
-                        .onEnded { value in
-                            guard abs(value.translation.width) > abs(value.translation.height),
-                                  abs(value.translation.width) > 42,
-                                  featuredItems.count > 1 else { return }
-                            withAnimation(.easeInOut(duration: 0.42)) {
-                                if value.translation.width < 0 {
-                                    heroIndex = (heroIndex + 1) % featuredItems.count
-                                } else {
-                                    heroIndex = (heroIndex - 1 + featuredItems.count) % featuredItems.count
-                                }
+            }
+            .frame(width: pageWidth, height: 610)
+            .clipped()
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 20)
+                    .onEnded { value in
+                        guard abs(value.translation.width) > abs(value.translation.height),
+                              abs(value.translation.width) > 42,
+                              featuredItems.count > 1 else { return }
+                        withAnimation(.easeInOut(duration: 0.42)) {
+                            if value.translation.width < 0 {
+                                heroIndex = (heroIndex + 1) % featuredItems.count
+                            } else {
+                                heroIndex = (heroIndex - 1 + featuredItems.count) % featuredItems.count
                             }
                         }
-                )
-            }
+                    }
+            )
             .environment(\.layoutDirection, .leftToRight)
             .frame(height: 610)
         }
@@ -360,13 +371,16 @@ struct HomeLibraryView: View {
                 endPoint: .bottom
             )
         }
-        .frame(height: 670)
+        .frame(width: UIScreen.main.bounds.width, height: 670)
+        .clipped()
         .animation(.easeInOut(duration: 0.5), value: currentHeroIndex)
     }
 
     private func heroSlide(_ entry: UnifiedMediaEntry, viewportWidth: CGFloat) -> some View {
-        let contentWidth = max(260, min(470, viewportWidth - 40))
-        return VStack(alignment: .leading, spacing: 12) {
+        let contentWidth = max(240, viewportWidth - 32)
+        return VStack {
+            Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 12) {
                 HomeHeroTitleTreatment(title: entry.title, logoURL: entry.details?.logoURL)
                     .frame(width: contentWidth, alignment: .leading)
 
@@ -408,11 +422,11 @@ struct HomeLibraryView: View {
                     .buttonStyle(PremiumPressButtonStyle())
                 }
                 .frame(width: contentWidth)
+            }
+            .frame(width: contentWidth, alignment: .leading)
+            .padding(.bottom, 88)
         }
-        .frame(width: contentWidth, alignment: .leading)
-        .padding(.leading, 20)
-        .padding(.bottom, 88)
-        .frame(width: viewportWidth, height: 610, alignment: .bottomLeading)
+        .frame(width: viewportWidth, height: 610, alignment: .center)
         .clipped()
         .contentShape(Rectangle())
     }
@@ -977,7 +991,7 @@ private struct HomeHeroZoomContainer<Content: View>: View {
     var body: some View {
         let pull = min(max(0, motion.pullDistance), 220)
         content
-            .scaleEffect(1 + pull / 680, anchor: .top)
+            .scaleEffect(1 + pull / 1_850, anchor: .top)
             .transaction { transaction in transaction.animation = nil }
     }
 }
@@ -1111,6 +1125,7 @@ private struct HomeSectionHeader: View {
             }
         }
         .padding(.horizontal, 16)
+        .frame(width: UIScreen.main.bounds.width)
     }
 }
 
