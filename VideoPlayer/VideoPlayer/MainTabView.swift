@@ -91,10 +91,13 @@ struct HomeLibraryView: View {
     @State private var showDownloads = false
     @State private var showRefreshOverlay = false
     @State private var heroIndex = 0
+    @State private var heroRotationSlot = Int(Date().timeIntervalSince1970 / 7_200)
     @State private var showHeroPlayer = false
     @State private var heroMotion = HomeHeroMotionModel()
 
-    private let heroTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
+    // Check the wall-clock slot periodically. The featured set itself only
+    // changes when a new two-hour window begins.
+    private let heroRotationTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     private let posterWidth: CGFloat = 112
     private let posterHeight: CGFloat = 168
@@ -150,6 +153,21 @@ struct HomeLibraryView: View {
                         .padding(.top, 0)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(AppTheme.bg)
+                        .overlay(alignment: .top) {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: AppTheme.bg.opacity(0), location: 0),
+                                    .init(color: AppTheme.bg.opacity(0.14), location: 0.24),
+                                    .init(color: AppTheme.bg.opacity(0.58), location: 0.62),
+                                    .init(color: AppTheme.bg, location: 1)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 220)
+                            .offset(y: -220)
+                            .allowsHitTesting(false)
+                        }
                     }
                     .frame(width: UIScreen.main.bounds.width, alignment: .leading)
                     .padding(.bottom, 110)
@@ -180,13 +198,12 @@ struct HomeLibraryView: View {
             .toolbar(.hidden, for: .navigationBar)
             .task(id: homeRefreshID) {
                 guard isActive else { return }
+                updateHeroRotationIfNeeded()
                 await catalog.load(vm: vm, force: false)
             }
-            .onReceive(heroTimer) { _ in
-                guard isActive, featuredItems.count > 1 else { return }
-                withAnimation(.easeInOut(duration: 0.55)) {
-                    heroIndex = (heroIndex + 1) % featuredItems.count
-                }
+            .onReceive(heroRotationTimer) { date in
+                guard isActive else { return }
+                updateHeroRotationIfNeeded(at: date)
             }
             .onChange(of: featuredItems.map(\.id)) { items in
                 if items.isEmpty || heroIndex >= items.count { heroIndex = 0 }
@@ -363,8 +380,9 @@ struct HomeLibraryView: View {
                 stops: [
                     .init(color: .black.opacity(0.42), location: 0),
                     .init(color: .clear, location: 0.32),
-                    .init(color: AppTheme.bg.opacity(0.22), location: 0.62),
-                    .init(color: AppTheme.bg.opacity(0.9), location: 0.86),
+                    .init(color: AppTheme.bg.opacity(0.28), location: 0.54),
+                    .init(color: AppTheme.bg.opacity(0.9), location: 0.72),
+                    .init(color: AppTheme.bg, location: 0.82),
                     .init(color: AppTheme.bg, location: 1)
                 ],
                 startPoint: .top,
@@ -741,12 +759,25 @@ struct HomeLibraryView: View {
                 || entry.details?.imageURL != nil
                 || entry.posterURL != nil
         }
-        return Array(candidates.sorted { lhs, rhs in
+        let sortedCandidates = candidates.sorted { lhs, rhs in
             let leftDate = sourceDate(lhs)
             let rightDate = sourceDate(rhs)
             if leftDate != rightDate { return leftDate > rightDate }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }.prefix(5))
+        }
+        guard !sortedCandidates.isEmpty else { return [] }
+
+        let visibleCount = min(5, sortedCandidates.count)
+        let start = (heroRotationSlot * visibleCount) % sortedCandidates.count
+        return (0..<visibleCount).map { sortedCandidates[(start + $0) % sortedCandidates.count] }
+    }
+
+    @MainActor
+    private func updateHeroRotationIfNeeded(at date: Date = Date()) {
+        let slot = Int(date.timeIntervalSince1970 / 7_200)
+        guard slot != heroRotationSlot else { return }
+        heroRotationSlot = slot
+        heroIndex = 0
     }
 
     private var currentHeroIndex: Int {
