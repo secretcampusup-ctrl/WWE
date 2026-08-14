@@ -35,7 +35,7 @@ struct MainTabView: View {
             .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 0.7))
             .shadow(color: .black.opacity(0.34), radius: 14, y: 6)
             .padding(.horizontal, 34)
-            .padding(.bottom, -6)
+            .padding(.bottom, -10)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
@@ -482,7 +482,10 @@ struct HomeLibraryView: View {
                 .frame(width: contentWidth)
             }
             .frame(width: contentWidth, alignment: .leading)
-            .padding(.bottom, 88)
+            // Keep the CTA group visually connected to the page indicators.
+            // The previous 88pt lift left a large dead band between the
+            // buttons and dots on current iPhone aspect ratios.
+            .padding(.bottom, 50)
         }
         .frame(width: viewportWidth, height: 610, alignment: .center)
         .clipped()

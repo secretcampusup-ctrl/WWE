@@ -39,6 +39,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 enum ScreenOrientationLock {
     static var allowedOrientations: UIInterfaceOrientationMask = .portrait
 
+    static var isInterfacePortrait: Bool {
+        guard let orientation = activeScene?.interfaceOrientation else { return false }
+        return orientation == .portrait || orientation == .portraitUpsideDown
+    }
+
     @discardableResult
     static func lockToCurrentOrientation() -> Bool {
         guard let scene = activeScene else { return false }

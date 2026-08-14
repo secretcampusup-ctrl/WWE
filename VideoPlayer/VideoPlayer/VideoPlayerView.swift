@@ -57,6 +57,7 @@ struct VideoPlayerView: View {
     @State private var didTearDownPlayback = false
     @State private var didResetNetworkAfterPlayback = false
     @State private var isPlayerLandscape = false
+    @State private var isClosingPlayer = false
 
     // Temporary test mode: every file uses the main Apple player only.
     // The MKV player remains in the project but is not selected.
@@ -91,7 +92,8 @@ struct VideoPlayerView: View {
                     subtitleBackground: subtitleBackground,
                     subtitleShadow: subtitleShadow,
                     subtitleHeight: Int(subtitleHeight),
-                    subtitleDelay: subtitleDelay
+                    subtitleDelay: subtitleDelay,
+                    anchorEmbeddedSubtitlesToViewport: mkvControls.selectedSubtitleTrackID != nil && externalSubtitleFileName == nil
                 )
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
@@ -103,6 +105,7 @@ struct VideoPlayerView: View {
                     fillModeToken: fillModeToken,
                     isFillMode: isFillMode,
                     videoSize: CGSize(width: engine.resolutionWidth, height: engine.resolutionHeight),
+                    anchorEmbeddedSubtitlesToViewport: engine.selectedSubtitleTrackID != nil && externalSubtitleFileName == nil,
                     onSingleTap: {
                         withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
                         scheduleAutoHide()
@@ -269,6 +272,13 @@ struct VideoPlayerView: View {
                 )
                 .transition(.opacity)
             }
+
+            if isClosingPlayer {
+                Color.black
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .zIndex(1_000)
+            }
         }
         .fullScreenCover(isPresented: $showPlaybackSettings, onDismiss: {
             applySubtitlePreferences()
@@ -286,9 +296,6 @@ struct VideoPlayerView: View {
                 brightness: $screenBrightness,
                 audioTracks: usesMKVPlayer ? mkvControls.audioTracks : engine.audioTracks,
                 selectedAudioTrackID: usesMKVPlayer ? mkvControls.selectedAudioTrackID : engine.selectedAudioTrackID,
-                subtitleTracks: usesMKVPlayer ? mkvControls.subtitleTracks : engine.subtitleTracks,
-                selectedSubtitleTrackID: usesMKVPlayer ? mkvControls.selectedSubtitleTrackID : engine.selectedSubtitleTrackID,
-                subtitleFileName: externalSubtitleFileName,
                 isFillMode: usesMKVPlayer ? mkvFillMode : isFillMode,
                 onAspectRatioToggle: {
                     if usesMKVPlayer { mkvFillMode.toggle() }
@@ -302,22 +309,6 @@ struct VideoPlayerView: View {
                             if usesMKVPlayer { mkvControls.selectAudioTrack(id: id) }
                             else { engine.selectAudioTrack(id: id) }
                         },
-                onSubtitleTrackChange: { id in
-                    externalSubtitleCues = []
-                    externalSubtitleFileName = nil
-                    if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: id) }
-                    else { engine.selectSubtitleTrack(id: id) }
-                },
-                onChooseSubtitleFile: {
-                    showPlaybackSettings = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showSubtitleImporter = true }
-                },
-                onDisableSubtitles: {
-                    externalSubtitleCues = []
-                    externalSubtitleFileName = nil
-                    if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
-                    else { engine.selectSubtitleTrack(id: nil) }
-                },
                 onRateChange: { rate in
                     if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
                 }
@@ -381,7 +372,25 @@ struct VideoPlayerView: View {
             playbackRunningChanged(playing)
         }
         .onChange(of: showControls) { visible in
-            if !visible { showQuickSettings = false; showPlaybackSettings = false; showEpisodePicker = false }
+            if !visible {
+                showQuickSettings = false
+                showEpisodePicker = false
+            }
+        }
+        .onChange(of: showPlaybackSettings) { presented in
+            if presented {
+                hideTask?.cancel()
+                hideTask = nil
+                showControls = true
+            }
+        }
+        .onChange(of: showQuickSettings) { presented in
+            if presented { hideTask?.cancel(); hideTask = nil }
+            else if !showPlaybackSettings { scheduleAutoHide() }
+        }
+        .onChange(of: showEpisodePicker) { presented in
+            if presented { hideTask?.cancel(); hideTask = nil }
+            else if !showPlaybackSettings { scheduleAutoHide() }
         }
         .onChange(of: isScrubbing) { scrubbing in
             if scrubbing { hideTask?.cancel() } else { scheduleAutoHide() }
@@ -401,9 +410,42 @@ struct VideoPlayerView: View {
     // MARK: - Top chrome
 
     private func closePlayer() {
-        ScreenOrientationLock.setPlayerLandscape(false)
-        tearDownPlayback()
-        dismiss()
+        guard !isClosingPlayer else { return }
+
+        // When the player is landscape, dismissing immediately exposes the
+        // portrait details screen while iOS is still animating its rotation.
+        // Keep the player presentation covered until the scene is portrait,
+        // then dismiss so the underlying page is never shown sideways.
+        guard isPlayerLandscape || !ScreenOrientationLock.isInterfacePortrait else {
+            ScreenOrientationLock.setPlayerLandscape(false)
+            tearDownPlayback()
+            dismiss()
+            return
+        }
+
+        // Make the cover opaque before asking UIKit to rotate. Animating the
+        // cover and the interface at the same time can expose triangular
+        // corners of the details page during the rotation snapshot.
+        isClosingPlayer = true
+        showControls = false
+        hideTask?.cancel()
+        hideTask = nil
+        if usesMKVPlayer { mkvControls.pause() }
+        else { engine.player.pause() }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            ScreenOrientationLock.setPlayerLandscape(false)
+            for _ in 0..<20 {
+                if ScreenOrientationLock.isInterfacePortrait { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            // `interfaceOrientation` changes just before the system's visual
+            // rotation finishes; leave the opaque cover up through that tail.
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            tearDownPlayback()
+            dismiss()
+        }
     }
 
     /// Both the close button and SwiftUI's dismissal callback reach this path.
@@ -687,7 +729,8 @@ struct VideoPlayerView: View {
             HStack(spacing: 3) {
                 Button {
                     showQuickSettings = true
-                    scheduleAutoHide()
+                    hideTask?.cancel()
+                    hideTask = nil
                 } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 17, weight: .semibold))
@@ -733,7 +776,8 @@ struct VideoPlayerView: View {
                 if !episodeOptions.isEmpty {
                     Button {
                         showEpisodePicker = true
-                        scheduleAutoHide()
+                        hideTask?.cancel()
+                        hideTask = nil
                     } label: {
                         Image(systemName: "rectangle.stack.fill")
                             .font(.system(size: 17, weight: .semibold))
@@ -858,6 +902,10 @@ struct VideoPlayerView: View {
 
     private func scheduleAutoHide() {
         hideTask?.cancel()
+        guard !showPlaybackSettings, !showQuickSettings, !showEpisodePicker else {
+            hideTask = nil
+            return
+        }
         guard showControls, playbackIsActuallyRunning else {
             // Before playback begins there is no auto-hide timer. This keeps the
             // loading ring visible for as long as the stream is still opening.
@@ -868,16 +916,17 @@ struct VideoPlayerView: View {
         }
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 8_000_000_000)
-            guard !Task.isCancelled, !isScrubbing else { return }
+            guard !Task.isCancelled, !isScrubbing,
+                  !showPlaybackSettings, !showQuickSettings, !showEpisodePicker else { return }
             await MainActor.run {
-                guard playbackIsActuallyRunning else {
+                guard playbackIsActuallyRunning,
+                      !showPlaybackSettings, !showQuickSettings, !showEpisodePicker else {
                     showControls = true
                     return
                 }
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showControls = false
                     showQuickSettings = false
-                    showPlaybackSettings = false
                     showEpisodePicker = false
                 }
             }
@@ -914,6 +963,7 @@ private final class MKVPlaybackControls: ObservableObject {
     }
 
     func togglePlayback() { surface?.togglePlaybackFromControls() }
+    func pause() { surface?.pauseForDismissal() }
     func seek(to fraction: Double) {
         let target = min(1, max(0, fraction))
         didReachEnd = false
@@ -996,6 +1046,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
     let subtitleShadow: Bool
     let subtitleHeight: Int
     let subtitleDelay: Double
+    let anchorEmbeddedSubtitlesToViewport: Bool
     var onSingleTap: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> MKVPlayerSurface {
@@ -1003,6 +1054,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         view.controls = controls
         view.onSingleTap = onSingleTap
         view.setFillMode(isFillMode)
+        view.setEmbeddedSubtitleViewportAnchoring(anchorEmbeddedSubtitlesToViewport)
         view.configureInitialSubtitleStyle(fontSize: subtitleSize, fontName: subtitleFontName, color: subtitleColorValue, background: subtitleBackground, shadow: subtitleShadow, margin: subtitleHeight, delay: subtitleDelay)
         view.play(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
         return view
@@ -1012,6 +1064,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         uiView.controls = controls
         uiView.onSingleTap = onSingleTap
         uiView.setFillMode(isFillMode)
+        uiView.setEmbeddedSubtitleViewportAnchoring(anchorEmbeddedSubtitlesToViewport)
         uiView.resetZoomIfNeeded(token: resetZoomToken)
         uiView.applySubtitleStyle(
             fontSize: subtitleSize,
@@ -1042,6 +1095,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var videoSize: CGSize = .zero
     private var sourceFormat = "Video"
     private var isFillMode = false
+    private var anchorsEmbeddedSubtitlesToViewport = false
     private var resetZoomToken = 0
     private var embeddedTrackRefreshAttempts = 0
     private var didLoadEmbeddedTracks = false
@@ -1107,6 +1161,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         scrollView.contentSize = fittedSize
         updateScrollableArea()
         clampOffset()
+        anchorEmbeddedSubtitlesIfNeeded()
         updateVideoRenderScale()
     }
 
@@ -1339,6 +1394,23 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         setNeedsLayout()
     }
 
+    func setEmbeddedSubtitleViewportAnchoring(_ enabled: Bool) {
+        guard anchorsEmbeddedSubtitlesToViewport != enabled else { return }
+        anchorsEmbeddedSubtitlesToViewport = enabled
+        guard enabled, isFillMode else { return }
+        layoutIfNeeded()
+        anchorEmbeddedSubtitlesIfNeeded()
+    }
+
+    private func anchorEmbeddedSubtitlesIfNeeded() {
+        guard anchorsEmbeddedSubtitlesToViewport, isFillMode else { return }
+        let inset = scrollView.adjustedContentInset
+        let minY = -inset.top
+        let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height + inset.bottom)
+        guard maxY > minY else { return }
+        scrollView.contentOffset.y = maxY
+    }
+
     func resetZoomIfNeeded(token: Int) {
         guard token != resetZoomToken else { return }
         resetZoomToken = token
@@ -1406,6 +1478,12 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func togglePlaybackFromControls() { togglePlaybackState() }
+
+    func pauseForDismissal() {
+        guard mediaPlayer.isPlaying else { return }
+        mediaPlayer.pause()
+        controls?.isPlaying = false
+    }
 
     func seek(to fraction: Double) {
         mediaPlayer.position = Float(min(1, max(0, fraction)))
@@ -1735,6 +1813,12 @@ private struct PlayerQuickSettingsPopover: View {
     }
 }
 
+private struct SubtitleSizePreset: Identifiable {
+    let id: String
+    let title: String
+    let value: Double
+}
+
 private struct PlayerAdvancedSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var selectedAudioTrack: String
@@ -1748,20 +1832,25 @@ private struct PlayerAdvancedSettingsSheet: View {
     @Binding var brightness: Double
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
-    let subtitleTracks: [PlayerSubtitleTrackOption]
-    let selectedSubtitleTrackID: String?
-    let subtitleFileName: String?
     let isFillMode: Bool
     let onAspectRatioToggle: () -> Void
     let onBrightnessChange: (Double) -> Void
     let onAudioTrackChange: (String) -> Void
-    let onSubtitleTrackChange: (String) -> Void
-    let onChooseSubtitleFile: () -> Void
-    let onDisableSubtitles: () -> Void
     let onRateChange: (Float) -> Void
     @State private var section = 2
 
-    private let subtitleSizes: [Double] = [16, 18, 20, 22, 24, 26, 28, 32, 36, 40]
+    private let subtitleSizes: [SubtitleSizePreset] = [
+        SubtitleSizePreset(id: "very-small", title: "Very Small", value: 16),
+        SubtitleSizePreset(id: "small", title: "Small", value: 20),
+        SubtitleSizePreset(id: "medium", title: "Medium", value: 24),
+        SubtitleSizePreset(id: "large", title: "Large", value: 32)
+    ]
+
+    private var selectedSubtitleSizePresetID: String? {
+        subtitleSizes.min {
+            abs($0.value - subtitleSize) < abs($1.value - subtitleSize)
+        }?.id
+    }
 
     var body: some View {
         NavigationStack {
@@ -1864,15 +1953,6 @@ private struct PlayerAdvancedSettingsSheet: View {
     private var subtitleSection: some View {
         VStack(spacing: 14) {
             subtitlePreview
-            card("Subtitle Source", icon: "captions.bubble.fill") {
-                optionRow("None", detail: nil, selected: selectedSubtitleTrackID == nil && subtitleFileName == nil, action: onDisableSubtitles)
-                ForEach(subtitleTracks) { track in
-                    optionRow(track.title, detail: "Embedded", selected: selectedSubtitleTrackID == track.id && subtitleFileName == nil) {
-                        onSubtitleTrackChange(track.id)
-                    }
-                }
-                optionRow(subtitleFileName ?? "Choose from Files", detail: subtitleFileName == nil ? "SRT or VTT" : "External file", selected: subtitleFileName != nil, action: onChooseSubtitleFile)
-            }
             card("Font", icon: "textformat") {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 9) {
                     ForEach(PlayerSubtitleFont.allCases) { font in
@@ -1881,9 +1961,14 @@ private struct PlayerAdvancedSettingsSheet: View {
                 }
             }
             card("Font Size", icon: "textformat.size") {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
-                    ForEach(subtitleSizes, id: \.self) { size in
-                        numberButton(Int(size), selected: subtitleSize == size) { subtitleSize = size }
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2), spacing: 8) {
+                    ForEach(subtitleSizes) { preset in
+                        sizePresetButton(
+                            preset.title,
+                            selected: selectedSubtitleSizePresetID == preset.id
+                        ) {
+                            subtitleSize = preset.value
+                        }
                     }
                 }
             }
@@ -1982,9 +2067,9 @@ private struct PlayerAdvancedSettingsSheet: View {
         }.buttonStyle(.plain)
     }
 
-    private func numberButton(_ number: Int, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func sizePresetButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text("\(number)").font(.system(size: 14, weight: .bold, design: .rounded)).monospacedDigit()
+            Text(title).font(.system(size: 13, weight: .bold, design: .rounded))
                 .frame(maxWidth: .infinity).frame(height: 40)
                 .foregroundStyle(selected ? Color.white : Color.white.opacity(0.55))
                 .background(selected ? AppPalette.diagonalGradient : LinearGradient(colors: [.clear, .clear], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 11))
@@ -2176,6 +2261,7 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
     var fillModeToken: Int = 0
     var isFillMode = false
     var videoSize: CGSize = .zero
+    var anchorEmbeddedSubtitlesToViewport = false
     var onSingleTap: (() -> Void)?
     var onInteractionChange: ((Bool) -> Void)?
     var onDoubleTap: (() -> Void)?
@@ -2194,7 +2280,8 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
         lhs.resetToken == rhs.resetToken &&
         lhs.fillModeToken == rhs.fillModeToken &&
         lhs.isFillMode == rhs.isFillMode &&
-        lhs.videoSize == rhs.videoSize
+        lhs.videoSize == rhs.videoSize &&
+        lhs.anchorEmbeddedSubtitlesToViewport == rhs.anchorEmbeddedSubtitlesToViewport
     }
 
     func makeUIView(context: Context) -> ZoomablePlayerSurface {
@@ -2203,6 +2290,7 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
         view.onInteractionChange = onInteractionChange
         view.onDoubleTap = onDoubleTap
         view.updateVideoSize(videoSize)
+        view.setEmbeddedSubtitleViewportAnchoring(anchorEmbeddedSubtitlesToViewport)
         view.setFillMode(isFillMode)
         return view
     }
@@ -2213,6 +2301,7 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
         view.onInteractionChange = onInteractionChange
         view.onDoubleTap = onDoubleTap
         view.updateVideoSize(videoSize)
+        view.setEmbeddedSubtitleViewportAnchoring(anchorEmbeddedSubtitlesToViewport)
         if context.coordinator.resetToken != resetToken {
             context.coordinator.resetToken = resetToken
             view.resetZoom()
@@ -2253,6 +2342,7 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
     private var singleTap: UITapGestureRecognizer!
     private var videoSize: CGSize = .zero
     private var isFillMode = false
+    private var anchorsEmbeddedSubtitlesToViewport = false
     private var lastRenderScaleZoomScale: CGFloat = -1
     private var isZooming = false { didSet { reportInteractionIfNeeded() } }
     private var isPanning = false { didSet { reportInteractionIfNeeded() } }
@@ -2346,6 +2436,10 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
                 updateScrollableArea()
                 clampOffset()
             }
+            if anchorsEmbeddedSubtitlesToViewport {
+                scrollView.contentOffset = bottomAlignedOffset()
+                clampOffset()
+            }
         }
     }
 
@@ -2385,6 +2479,14 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
         applyZoomBounds(animated: true)
     }
 
+    func setEmbeddedSubtitleViewportAnchoring(_ enabled: Bool) {
+        guard anchorsEmbeddedSubtitlesToViewport != enabled else { return }
+        anchorsEmbeddedSubtitlesToViewport = enabled
+        guard isFillMode else { return }
+        scrollView.contentOffset = enabled ? bottomAlignedOffset() : centeredOffset()
+        clampOffset()
+    }
+
     func resetZoom() {
         applyZoomBounds(animated: false)
     }
@@ -2399,7 +2501,9 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
         scrollView.maximumZoomScale = max(10, baseline)
         scrollView.setZoomScale(baseline, animated: animated)
         updateScrollableArea()
-        scrollView.contentOffset = centeredOffset()
+        scrollView.contentOffset = anchorsEmbeddedSubtitlesToViewport && isFillMode
+            ? bottomAlignedOffset()
+            : centeredOffset()
         clampOffset()
         updateVideoRenderScaleIfNeeded()
     }
@@ -2430,6 +2534,16 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
         let scaledH = displayed.height * zoom
         return CGPoint(x: marginX + (scaledW - boundsSize.width) / 2,
                        y: marginY + (scaledH - boundsSize.height) / 2)
+    }
+
+    private func bottomAlignedOffset() -> CGPoint {
+        let centered = centeredOffset()
+        let zoom = scrollView.zoomScale
+        let displayed = displayedVideoSize()
+        let boundsSize = scrollView.bounds.size
+        let marginY = max(0, (contentView.bounds.height - displayed.height) / 2) * zoom
+        let maxY = max(0, marginY + displayed.height * zoom - boundsSize.height)
+        return CGPoint(x: centered.x, y: maxY)
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { contentView }
