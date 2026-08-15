@@ -45,11 +45,16 @@ enum MatroskaSubtitleExtractor {
         httpHeaders: [String: String]? = nil,
         subtitleIndices: Set<Int>? = nil,
         preferredTrackOnly: Bool = false,
+        priorityTime: Double? = nil,
         onTrackExtracted: (@MainActor (MatroskaTextSubtitleTrack) -> Void)? = nil
     ) async throws -> [MatroskaTextSubtitleTrack] {
         let source = MatroskaByteSource(url: url, headers: httpHeaders ?? [:])
         let fileSize = try await source.fileSize()
-        let initialCount = Int(min(fileSize, 8 * 1_024 * 1_024))
+        // Tracks/SeekHead live at the front of normal Matroska files (the
+        // supplied 2.3 GB PikPak sample stores them around byte 4 KB). One MB
+        // is ample for the front index while avoiding an unnecessary 8 MB
+        // transfer competing with playback startup.
+        let initialCount = Int(min(fileSize, 1 * 1_024 * 1_024))
         let initial = try await source.read(offset: 0, count: initialCount)
         let metadata = try parseMetadata(initial)
 
@@ -92,12 +97,34 @@ enum MatroskaSubtitleExtractor {
         for (subtitleIndex, track) in textTracks {
             try Task.checkCancellation()
             let trackReferences = references.filter { $0.trackNumber == track.number }
+            let makeExtractedTrack: ([MatroskaSubtitleCue]) -> MatroskaTextSubtitleTrack = { cues in
+                MatroskaTextSubtitleTrack(
+                    id: "mkv-text:\(track.number)",
+                    trackNumber: track.number,
+                    containerSubtitleIndex: subtitleIndex,
+                    title: displayTitle(for: track),
+                    languageCode: track.language,
+                    isDefault: track.isDefault,
+                    isForced: track.isForced,
+                    cues: normalizeCueEnds(cues)
+                )
+            }
+            let progressHandler: (([MatroskaSubtitleCue]) async -> Void)?
+            if let onTrackExtracted {
+                progressHandler = { partialCues in
+                    await onTrackExtracted(makeExtractedTrack(partialCues))
+                }
+            } else {
+                progressHandler = nil
+            }
             var cues = try await extractIndexedCues(
                 track: track,
                 references: trackReferences,
                 segmentContentOffset: resolvedMetadata.segmentContentOffset,
                 timecodeScale: scale,
-                source: source
+                source: source,
+                priorityTime: priorityTime,
+                onProgress: progressHandler
             )
 
             // Older/local MKVs sometimes omit subtitle entries from Cues.
@@ -114,16 +141,7 @@ enum MatroskaSubtitleExtractor {
             }
             guard !cues.isEmpty else { continue }
 
-            let extracted = MatroskaTextSubtitleTrack(
-                id: "mkv-text:\(track.number)",
-                trackNumber: track.number,
-                containerSubtitleIndex: subtitleIndex,
-                title: displayTitle(for: track),
-                languageCode: track.language,
-                isDefault: track.isDefault,
-                isForced: track.isForced,
-                cues: normalizeCueEnds(cues)
-            )
+            let extracted = makeExtractedTrack(cues)
             output.append(extracted)
             if let onTrackExtracted { await onTrackExtracted(extracted) }
         }
@@ -447,11 +465,24 @@ private func extractIndexedCues(
     references: [MatroskaCueReference],
     segmentContentOffset: UInt64,
     timecodeScale: UInt64,
-    source: MatroskaByteSource
+    source: MatroskaByteSource,
+    priorityTime: Double?,
+    onProgress: (([MatroskaSubtitleCue]) async -> Void)?
 ) async throws -> [MatroskaSubtitleCue] {
     guard !references.isEmpty else { return [] }
-    let ordered = references.sorted { $0.start < $1.start }
+    let chronological = references.sorted { $0.start < $1.start }
+    let ordered: [MatroskaCueReference]
+    if let priorityTime, priorityTime > 0,
+       let currentIndex = chronological.lastIndex(where: { $0.start <= priorityTime }) {
+        // Start a little before the resume point so an already-visible cue is
+        // included, then continue forward before filling the older history.
+        let startIndex = max(0, currentIndex - 2)
+        ordered = Array(chronological[startIndex...]) + Array(chronological[..<startIndex])
+    } else {
+        ordered = chronological
+    }
     var indexed: [(Int, MatroskaSubtitleCue)] = []
+    var lastPublishedCueCount = 0
     let directlyAddressable = ordered.enumerated().filter { $0.element.relativePosition != nil }
 
     // Bound concurrency so a long movie does not flood a remote WebDAV/CDN.
@@ -485,6 +516,13 @@ private func extractIndexedCues(
             return result
         }
         indexed.append(contentsOf: values.compactMap { index, cue in cue.map { (index, $0) } })
+        let shouldPublish = indexed.count <= 4
+            || indexed.count - lastPublishedCueCount >= 64
+            || batchEnd == directlyAddressable.count
+        if let onProgress, !indexed.isEmpty, shouldPublish {
+            await onProgress(indexed.map(\.1).sorted { $0.start < $1.start })
+            lastPublishedCueCount = indexed.count
+        }
     }
 
     // CueRelativePosition is optional and many perfectly valid MKVs omit it.
@@ -508,6 +546,12 @@ private func extractIndexedCues(
                 source: source
             ) {
                 clusterCues.append(cue)
+                let totalCueCount = indexed.count + clusterCues.count
+                if let onProgress,
+                   (totalCueCount - lastPublishedCueCount >= 64 || totalCueCount == 1) {
+                    await onProgress((indexed.map(\.1) + clusterCues).sorted { $0.start < $1.start })
+                    lastPublishedCueCount = totalCueCount
+                }
             }
         } catch is CancellationError {
             throw CancellationError()

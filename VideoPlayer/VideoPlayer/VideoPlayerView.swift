@@ -734,7 +734,8 @@ struct VideoPlayerView: View {
                 let tracks = try await MatroskaSubtitleExtractor.extract(
                     from: mediaURL,
                     httpHeaders: headers,
-                    preferredTrackOnly: true
+                    preferredTrackOnly: true,
+                    priorityTime: resumeAt
                 ) { track in
                     guard !Task.isCancelled else { return }
                     acceptExtractedMKVSubtitleTrack(track)
@@ -769,8 +770,17 @@ struct VideoPlayerView: View {
     }
 
     private func acceptExtractedMKVSubtitleTrack(_ track: MatroskaTextSubtitleTrack) {
-        if !embeddedMKVSubtitleTracks.contains(where: { $0.id == track.id }) {
+        if let index = embeddedMKVSubtitleTracks.firstIndex(where: { $0.id == track.id }) {
+            embeddedMKVSubtitleTracks[index] = track
+        } else {
             embeddedMKVSubtitleTracks.append(track)
+        }
+        if selectedEmbeddedMKVSubtitleTrackID == track.id {
+            // Progressive extraction publishes growing cue batches. Refresh
+            // the fixed overlay without toggling or restarting playback.
+            externalSubtitleCues = track.cues.map {
+                ExternalSubtitleCue(start: $0.start, end: $0.end, text: $0.text)
+            }
         }
         guard externalSubtitleFileName == nil,
               !subtitleSelectionWasUserDriven else { return }
@@ -838,7 +848,8 @@ struct VideoPlayerView: View {
                 let tracks = try await MatroskaSubtitleExtractor.extract(
                     from: mediaURL,
                     httpHeaders: headers,
-                    subtitleIndices: [subtitleIndex]
+                    subtitleIndices: [subtitleIndex],
+                    priorityTime: currentPlaybackSeconds
                 ) { track in
                     guard !Task.isCancelled else { return }
                     acceptExtractedMKVSubtitleTrack(track)
