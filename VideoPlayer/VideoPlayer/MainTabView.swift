@@ -486,6 +486,17 @@ struct HomeLibraryView: View {
 
             LinearGradient(
                 stops: [
+                    .init(color: .black.opacity(0.16), location: 0),
+                    .init(color: .black.opacity(0.06), location: 0.30),
+                    .init(color: .clear, location: 0.58),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+
+            LinearGradient(
+                stops: [
                     .init(color: .black.opacity(0.42), location: 0),
                     .init(color: .clear, location: 0.32),
                     .init(color: AppTheme.bg.opacity(0.28), location: 0.54),

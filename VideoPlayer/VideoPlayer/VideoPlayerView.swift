@@ -607,9 +607,8 @@ struct VideoPlayerView: View {
         }
     }
 
-    /// A single viewport-level subtitle source. External files already arrive
-    /// as parsed cues; AVPlayer embedded captions are now emitted by a legible
-    /// output. Both are drawn above (not inside) the zoomable video view.
+    /// A single viewport-level subtitle source. External files and successfully
+    /// extracted text tracks share the exact same fixed rendering path.
     private var activeViewportSubtitleText: String? {
         if let cue = activeExternalSubtitle { return cue.text }
         guard !usesMKVPlayer else { return nil }
@@ -618,14 +617,12 @@ struct VideoPlayerView: View {
 
     private var playerSubtitleTracks: [PlayerSubtitleTrackOption] {
         if usesMKVPlayer {
-            // Keep VLC's native list available while text extraction is still
-            // running or when this Matroska uses an unsupported bitmap codec.
-            if embeddedMKVSubtitleTracks.isEmpty || mkvControls.selectedSubtitleTrackID != nil {
-                return mkvControls.subtitleTracks
+            if !embeddedMKVSubtitleTracks.isEmpty {
+                return embeddedMKVSubtitleTracks.map {
+                    PlayerSubtitleTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode)
+                }
             }
-            return embeddedMKVSubtitleTracks.map {
-                PlayerSubtitleTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode)
-            }
+            return mkvControls.subtitleTracks
         }
         return engine.subtitleTracks
     }
@@ -715,13 +712,20 @@ struct VideoPlayerView: View {
                 embeddedMKVSubtitleTracks = tracks
                 DiagnosticLogger.log("MKV subtitles: extracted \(tracks.count) text track(s) from \(mediaURL.lastPathComponent)")
 
-                // Match normal player behavior: automatically enable only a
-                // track explicitly marked Default/Forced by the container.
-                if !subtitleSelectionWasUserDriven,
-                   externalSubtitleFileName == nil,
-                   selectedEmbeddedMKVSubtitleTrackID == nil,
-                   let preferred = tracks.first(where: { $0.isForced }) ?? tracks.first(where: { $0.isDefault }) {
-                    selectEmbeddedMKVSubtitleTrack(id: preferred.id)
+                if externalSubtitleFileName == nil, selectedEmbeddedMKVSubtitleTrackID == nil {
+                    // If VLC already selected a track, preserve the user's
+                    // intent by mapping its list position to the extracted text
+                    // list. Otherwise honor Forced/Default metadata.
+                    let nativeIndex = mkvControls.selectedSubtitleTrackID.flatMap { selectedID in
+                        mkvControls.subtitleTracks.firstIndex(where: { $0.id == selectedID })
+                    }
+                    let mapped = nativeIndex.flatMap { $0 < tracks.count ? tracks[$0] : nil }
+                    let preferred = mapped
+                        ?? tracks.first(where: { $0.isForced })
+                        ?? tracks.first(where: { $0.isDefault })
+                    if let preferred, !subtitleSelectionWasUserDriven || mapped != nil {
+                        selectEmbeddedMKVSubtitleTrack(id: preferred.id)
+                    }
                 }
             } catch is CancellationError {
                 return

@@ -35,8 +35,6 @@ struct PlayerChapterMarker: Identifiable, Equatable {
     let fraction: Double
 }
 
-/// Receives AVFoundation's timed legible text without letting AVPlayerLayer
-/// composite it into the zoomable video surface.
 private final class PlayerLegibleTextReceiver: NSObject, AVPlayerItemLegibleOutputPushDelegate {
     var onTextChange: ((AVPlayerItemLegibleOutput, String?) -> Void)?
 
@@ -46,8 +44,7 @@ private final class PlayerLegibleTextReceiver: NSObject, AVPlayerItemLegibleOutp
         nativeSampleBuffers: [Any],
         forItemTime itemTime: CMTime
     ) {
-        let text = strings
-            .map(\.string)
+        let text = strings.map(\.string)
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         onTextChange?(output, text.isEmpty ? nil : text)
@@ -190,17 +187,11 @@ final class VideoPlaybackEngine: ObservableObject {
 
     init() {
         legibleTextReceiver.onTextChange = { [weak self] output, text in
-            // The output delegate runs on main, but keep the actor boundary
-            // explicit so published UI state can never be changed off-main.
             Task { @MainActor [weak self] in
                 guard let self, self.legibleOutput === output else { return }
-                // Only suppress AVPlayerLayer's native caption renderer after
-                // AVFoundation has proved this track can be delivered as text.
-                // Bitmap/PGS tracks produce no attributed string and must keep
-                // using the native renderer or they disappear completely.
-                if text != nil {
-                    output.suppressesPlayerRendering = true
-                }
+                // Keep native rendering until an actual textual cue proves the
+                // selected embedded track can use the fixed SwiftUI overlay.
+                if text != nil { output.suppressesPlayerRendering = true }
                 self.renderedSubtitleText = text
             }
         }
@@ -420,9 +411,6 @@ final class VideoPlaybackEngine: ObservableObject {
     func selectSubtitleTrack(id: String?) {
         guard let item = player.currentItem,
               let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
-        // Start every newly selected track in native fallback mode. Text-based
-        // tracks switch to the fixed viewport overlay on their first cue;
-        // image-based tracks remain visible through AVPlayerLayer.
         legibleOutput?.suppressesPlayerRendering = false
         renderedSubtitleText = nil
         if let id, let option = subtitleOptionsByID[id] {
@@ -617,9 +605,6 @@ final class VideoPlaybackEngine: ObservableObject {
     private func makePlayerItem(asset: AVURLAsset) -> AVPlayerItem {
         let item = AVPlayerItem(asset: asset)
 
-        // Native captions are rendered inside AVPlayerLayer. Keep them enabled
-        // as a fallback until a text cue is received; then the delegate switches
-        // this output to suppression and VideoPlayerView draws the fixed overlay.
         let output = AVPlayerItemLegibleOutput()
         output.suppressesPlayerRendering = false
         output.setDelegate(legibleTextReceiver, queue: .main)
