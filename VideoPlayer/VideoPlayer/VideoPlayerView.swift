@@ -105,7 +105,9 @@ struct VideoPlayerView: View {
                     fillModeToken: fillModeToken,
                     isFillMode: isFillMode,
                     videoSize: CGSize(width: engine.resolutionWidth, height: engine.resolutionHeight),
-                    anchorEmbeddedSubtitlesToViewport: engine.selectedSubtitleTrackID != nil && externalSubtitleFileName == nil,
+                    // AVFoundation captions are emitted as timed text and drawn
+                    // by the fixed overlay below, outside this zoomable surface.
+                    anchorEmbeddedSubtitlesToViewport: false,
                     onSingleTap: {
                         withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
                         scheduleAutoHide()
@@ -239,12 +241,12 @@ struct VideoPlayerView: View {
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
 
-            if let cue = activeExternalSubtitle, !playbackDidEnd {
+            if let subtitleText = activeViewportSubtitleText, !playbackDidEnd {
                 GeometryReader { proxy in
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
-                        Text(cue.text)
-                            .font(externalSubtitleFont(for: cue.text, viewport: proxy.size))
+                        Text(subtitleText)
+                            .font(externalSubtitleFont(for: subtitleText, viewport: proxy.size))
                             .foregroundColor(subtitleColor.color)
                             .multilineTextAlignment(.center)
                             .lineLimit(nil)
@@ -595,6 +597,15 @@ struct VideoPlayerView: View {
             let adjustedTime = currentPlaybackSeconds - subtitleDelay
             return adjustedTime >= $0.start && adjustedTime <= $0.end
         }
+    }
+
+    /// A single viewport-level subtitle source. External files already arrive
+    /// as parsed cues; AVPlayer embedded captions are now emitted by a legible
+    /// output. Both are drawn above (not inside) the zoomable video view.
+    private var activeViewportSubtitleText: String? {
+        if let cue = activeExternalSubtitle { return cue.text }
+        guard !usesMKVPlayer, engine.selectedSubtitleTrackID != nil else { return nil }
+        return engine.renderedSubtitleText
     }
 
     private var selectedEmbeddedSubtitle: PlayerSubtitleTrackOption? {
@@ -1228,7 +1239,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         media.addOption(":file-caching=500")
         media.addOption(":drop-late-frames")
         media.addOption(":freetype-font=\(subtitleStyle.fontName)")
-        media.addOption(":freetype-rel-fontsize=\(vlcRelativeFontSize(for: subtitleStyle.fontSize))")
+        media.addOption(":sub-text-scale=\(vlcTextScale(for: subtitleStyle.fontSize))")
         media.addOption(":freetype-color=\(subtitleStyle.color)")
         media.addOption(":freetype-background-opacity=\(subtitleStyle.background ? 155 : 0)")
         media.addOption(":freetype-shadow-opacity=\(subtitleStyle.shadow ? 255 : 0)")
@@ -1336,7 +1347,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         performTextRendererSelector("setTextRendererFont:", value: subtitleStyle.fontName as NSString)
         performTextRendererSelector(
             "setTextRendererFontSize:",
-            value: NSNumber(value: vlcRelativeFontSize(for: subtitleStyle.fontSize))
+            value: NSNumber(value: vlcTextScale(for: subtitleStyle.fontSize))
         )
         performTextRendererSelector("setTextRendererFontColor:", value: NSNumber(value: subtitleStyle.color))
         performTextRendererSelector("setTextRendererFontForceBold:", value: NSNumber(value: true))
@@ -1345,12 +1356,12 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         mediaPlayer.currentVideoSubTitleDelay = Int(subtitleStyle.delay * 1_000_000)
     }
 
-    /// VLC's live text-renderer API uses an inverse relative scale: smaller
-    /// numbers produce larger subtitles. Convert the adaptive iPhone point
-    /// size continuously so every screen and every preset stays proportional.
-    private func vlcRelativeFontSize(for pointSize: Double) -> Int {
-        let relativeSize = 1_920 / max(14, pointSize)
-        return Int(min(130, max(45, relativeSize)).rounded())
+    /// MobileVLCKit expects the live subtitle size as a percentage where
+    /// 100 is normal. Sending point values such as 24 or an inverse value
+    /// such as 50 makes even the largest preset render at a tiny scale.
+    private func vlcTextScale(for pointSize: Double) -> Int {
+        let scale = pointSize / 24 * 100
+        return Int(min(180, max(70, scale)).rounded())
     }
 
     private func performTextRendererSelector(_ name: String, value: AnyObject) {

@@ -546,7 +546,7 @@ struct VideoDetailsView: View {
             }
 
             HStack {
-                movieTopButton(icon: "chevron.left") { dismiss() }
+                movieTopButton(icon: "chevron.left") { dismissDetailsWithFeedback() }
                 Spacer()
                 Menu {
                     Button(action: startDownload) { Label("Download", systemImage: "arrow.down.circle") }
@@ -729,7 +729,7 @@ struct VideoDetailsView: View {
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(Circle().stroke(Color.white.opacity(0.18)))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DetailsBackButtonStyle())
     }
 
     private func movieCastAndCrew(_ details: TMDBTitleDetails) -> some View {
@@ -847,7 +847,7 @@ struct VideoDetailsView: View {
 
                 VStack {
                     HStack {
-                        Button { dismiss() } label: {
+                        Button { dismissDetailsWithFeedback() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundColor(.white)
@@ -858,7 +858,7 @@ struct VideoDetailsView: View {
                                         .stroke(Color.white.opacity(0.14), lineWidth: 1)
                                 )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(DetailsBackButtonStyle())
 
                         Spacer()
                     }
@@ -876,6 +876,11 @@ struct VideoDetailsView: View {
 
     private var heroHeight: CGFloat {
         max(360, UIScreen.main.bounds.height * 0.44)
+    }
+
+    private func dismissDetailsWithFeedback() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        dismiss()
     }
 
     private var displayedFrame: UIImage? {
@@ -1545,6 +1550,25 @@ struct VideoDetailsView: View {
 
     private func isDownloadVideoExtension(_ ext: String) -> Bool {
         ["mp4", "m4v", "mov", "mkv", "avi", "webm", "wmv", "flv", "ts", "m3u8"].contains(ext.lowercased())
+    }
+}
+
+/// Deliberately stronger than the shared card press animation: navigation
+/// controls need immediate, unmistakable touch feedback before dismissal.
+private struct DetailsBackButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.84 : 1)
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .brightness(configuration.isPressed ? 0.14 : 0)
+            .shadow(
+                color: AppPalette.accent.opacity(configuration.isPressed ? 0.55 : 0),
+                radius: configuration.isPressed ? 9 : 0
+            )
+            .animation(
+                .spring(response: 0.20, dampingFraction: 0.58),
+                value: configuration.isPressed
+            )
     }
 }
 

@@ -31,11 +31,31 @@ struct MainTabView: View {
                 dockButton("Settings", "gearshape.fill", 3)
             }
             .padding(4)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 0.7))
-            .shadow(color: .black.opacity(0.34), radius: 14, y: 6)
+            .background {
+                ZStack {
+                    // Keep the content visibly passing behind the dock while
+                    // retaining enough blur for the icons to stay readable.
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.56)
+                    Capsule()
+                        .fill(Color.black.opacity(0.16))
+                }
+            }
+            .overlay {
+                Capsule()
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.28), Color.white.opacity(0.08)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.8
+                    )
+            }
+            .shadow(color: .black.opacity(0.26), radius: 14, y: 6)
             .padding(.horizontal, 34)
-            .padding(.bottom, -14)
+            .padding(.bottom, -16)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
@@ -73,13 +93,13 @@ struct MainTabView: View {
                     Capsule()
                         .fill(
                             LinearGradient(
-                                colors: [Color.white.opacity(0.18), AppPalette.accent.opacity(0.13)],
+                                colors: [Color.white.opacity(0.12), AppPalette.accent.opacity(0.07)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                         .matchedGeometryEffect(id: "dock", in: dockSelection)
-                        .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 0.6))
+                        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.6))
                 }
             }
             .contentShape(Capsule())
@@ -169,7 +189,8 @@ struct HomeLibraryView: View {
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        heroPullOffsetReader
+                        HomeHeroScrollOffsetObserver(motion: heroMotion)
+                            .frame(height: 0)
                         heroSection
 
                         LazyVStack(alignment: .leading, spacing: 28) {
@@ -209,10 +230,6 @@ struct HomeLibraryView: View {
                     .frame(width: UIScreen.main.bounds.width, alignment: .leading)
                     .padding(.bottom, 110)
                     .tint(AppPalette.accent)
-                }
-                .coordinateSpace(name: "home-hero-scroll")
-                .onPreferenceChange(HomeHeroPullPreferenceKey.self) { offset in
-                    heroMotion.pullDistance = max(0, offset)
                 }
                 .scrollIndicators(.hidden)
                 // The native refresh control still supplies the familiar pull
@@ -377,16 +394,6 @@ struct HomeLibraryView: View {
             .environment(\.layoutDirection, .leftToRight)
             .frame(height: 610)
         }
-    }
-
-    private var heroPullOffsetReader: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: HomeHeroPullPreferenceKey.self,
-                value: proxy.frame(in: .named("home-hero-scroll")).minY
-            )
-        }
-        .frame(height: 0)
     }
 
     private var heroPinnedBackground: some View {
@@ -1137,13 +1144,83 @@ struct HomeLibraryView: View {
 }
 
 private final class HomeHeroMotionModel: ObservableObject {
-    @Published var pullDistance: CGFloat = 0
+    @Published var offset: CGFloat = 0
 }
 
-private struct HomeHeroPullPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+/// Reads the real UIScrollView offset, matching the reliable motion path used
+/// by the video-details header. A SwiftUI GeometryReader preference can skip
+/// frames while refreshable owns the pull gesture, which made the Hero appear
+/// static or update late.
+private struct HomeHeroScrollOffsetObserver: UIViewRepresentable {
+    let motion: HomeHeroMotionModel
+
+    func makeCoordinator() -> Coordinator { Coordinator(motion: motion) }
+
+    func makeUIView(context: Context) -> UIView {
+        let probe = UIView(frame: .zero)
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        DispatchQueue.main.async { context.coordinator.attach(from: probe) }
+        return probe
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        guard !context.coordinator.isAttached else { return }
+        DispatchQueue.main.async { context.coordinator.attach(from: uiView) }
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject {
+        private let motion: HomeHeroMotionModel
+        private weak var scrollView: UIScrollView?
+        private var observation: NSKeyValueObservation?
+        private var attachAttempts = 0
+        var isAttached: Bool { scrollView != nil }
+
+        init(motion: HomeHeroMotionModel) {
+            self.motion = motion
+        }
+
+        func attach(from probe: UIView) {
+            var ancestor = probe.superview
+            while let view = ancestor, !(view is UIScrollView) {
+                ancestor = view.superview
+            }
+            guard let found = ancestor as? UIScrollView else {
+                guard attachAttempts < 8 else { return }
+                attachAttempts += 1
+                DispatchQueue.main.async { [weak self, weak probe] in
+                    guard let self, let probe else { return }
+                    self.attach(from: probe)
+                }
+                return
+            }
+            guard scrollView !== found else { return }
+            attachAttempts = 0
+            detach()
+            scrollView = found
+            publish(from: found)
+            observation = found.observe(\.contentOffset, options: [.new]) { [weak self, weak found] _, _ in
+                guard let self, let found else { return }
+                self.publish(from: found)
+            }
+        }
+
+        func detach() {
+            observation?.invalidate()
+            observation = nil
+            scrollView = nil
+        }
+
+        private func publish(from scrollView: UIScrollView) {
+            let value = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+            if abs(motion.offset - value) > 0.35 {
+                motion.offset = value
+            }
+        }
     }
 }
 
@@ -1157,9 +1234,12 @@ private struct HomeHeroZoomContainer<Content: View>: View {
     }
 
     var body: some View {
-        let pull = min(max(0, motion.pullDistance), 220)
+        let pull = max(0, motion.offset)
+        // Same pull-down zoom curve as the details artwork: responsive at the
+        // start of the gesture and capped at 18% to keep the crop controlled.
+        let scale = 1 + min(pull / 670, 0.18)
         content
-            .scaleEffect(1 + pull / 1_850, anchor: .top)
+            .scaleEffect(scale, anchor: .top)
             .transaction { transaction in transaction.animation = nil }
     }
 }

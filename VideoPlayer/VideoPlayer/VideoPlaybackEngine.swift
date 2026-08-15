@@ -35,6 +35,25 @@ struct PlayerChapterMarker: Identifiable, Equatable {
     let fraction: Double
 }
 
+/// Receives AVFoundation's timed legible text without letting AVPlayerLayer
+/// composite it into the zoomable video surface.
+private final class PlayerLegibleTextReceiver: NSObject, AVPlayerItemLegibleOutputPushDelegate {
+    var onTextChange: ((AVPlayerItemLegibleOutput, String?) -> Void)?
+
+    func legibleOutput(
+        _ output: AVPlayerItemLegibleOutput,
+        didOutputAttributedStrings strings: [NSAttributedString],
+        nativeSampleBuffers: [Any],
+        forItemTime itemTime: CMTime
+    ) {
+        let text = strings
+            .map(\.string)
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        onTextChange?(output, text.isEmpty ? nil : text)
+    }
+}
+
 struct IntroMarker: Codable, Equatable {
     let start: Double
     let end: Double
@@ -97,6 +116,7 @@ final class VideoPlaybackEngine: ObservableObject {
     @Published private(set) var introMarker: IntroMarker?
     @Published private(set) var subtitleTracks: [PlayerSubtitleTrackOption] = []
     @Published private(set) var selectedSubtitleTrackID: String?
+    @Published private(set) var renderedSubtitleText: String?
     @Published private(set) var chapters: [PlayerChapterMarker] = []
     @Published var resetZoomToken = 0
 
@@ -140,6 +160,8 @@ final class VideoPlaybackEngine: ObservableObject {
     private var isInteracting = false
     private var audioOptionsByID: [String: AVMediaSelectionOption] = [:]
     private var subtitleOptionsByID: [String: AVMediaSelectionOption] = [:]
+    private let legibleTextReceiver = PlayerLegibleTextReceiver()
+    private var legibleOutput: AVPlayerItemLegibleOutput?
 
     /// Background queue for asset I/O and non-UI work (not main thread).
     private let assetQueue = DispatchQueue(
@@ -167,6 +189,14 @@ final class VideoPlaybackEngine: ObservableObject {
     private let thermalThrottledPeakBitRate: Double = 40_000_000
 
     init() {
+        legibleTextReceiver.onTextChange = { [weak self] output, text in
+            // The output delegate runs on main, but keep the actor boundary
+            // explicit so published UI state can never be changed off-main.
+            Task { @MainActor [weak self] in
+                guard let self, self.legibleOutput === output else { return }
+                self.renderedSubtitleText = text
+            }
+        }
         configurePlayer()
         configureAudioSession()
         observeSystemPressure()
@@ -186,6 +216,7 @@ final class VideoPlaybackEngine: ObservableObject {
         introMarker = title.isEmpty ? nil : IntroMarkerStore.marker(for: title)
         subtitleTracks = []
         selectedSubtitleTrackID = nil
+        renderedSubtitleText = nil
         chapters = []
         isBuffering = true
         pendingResumeSeconds = max(0, resumeAt)
@@ -200,6 +231,7 @@ final class VideoPlaybackEngine: ObservableObject {
         tearDownItemObservers()
         removeTimeObserver()
         player.pause()
+        detachLegibleOutput()
         player.replaceCurrentItem(with: nil)
         loadedAsset = nil
 
@@ -267,6 +299,7 @@ final class VideoPlaybackEngine: ObservableObject {
         player.currentItem?.asset.cancelLoading()
         loadedAsset?.cancelLoading()
         pendingMetadataAsset?.cancelLoading()
+        detachLegibleOutput()
         player.replaceCurrentItem(with: nil)
         loadedAsset = nil
         pendingMetadataAsset = nil
@@ -278,6 +311,7 @@ final class VideoPlaybackEngine: ObservableObject {
         subtitleTracks = []
         subtitleOptionsByID = [:]
         selectedSubtitleTrackID = nil
+        renderedSubtitleText = nil
         chapters = []
         onProgressTick = nil
         UIApplication.shared.isIdleTimerDisabled = false
@@ -380,11 +414,13 @@ final class VideoPlaybackEngine: ObservableObject {
         guard let item = player.currentItem,
               let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
         if let id, let option = subtitleOptionsByID[id] {
+            renderedSubtitleText = nil
             item.select(option, in: group)
             selectedSubtitleTrackID = id
         } else {
             item.select(nil, in: group)
             selectedSubtitleTrackID = nil
+            renderedSubtitleText = nil
         }
     }
 
@@ -393,9 +429,10 @@ final class VideoPlaybackEngine: ObservableObject {
         guard let item = player.currentItem else { return }
         var red: CGFloat = 1, green: CGFloat = 1, blue: CGFloat = 1, alpha: CGFloat = 1
         color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        let videoHeightPercentage = max(3, min(7.5, fontSize / 6))
         var attributes: [String: Any] = [
             kCMTextMarkupAttribute_ForegroundColorARGB as String: [alpha, red, green, blue],
-            kCMTextMarkupAttribute_RelativeFontSize as String: max(50, min(220, fontSize / 24 * 100)),
+            kCMTextMarkupAttribute_BaseFontSizePercentageRelativeToVideoHeight as String: videoHeightPercentage,
             kCMTextMarkupAttribute_FontFamilyName as String: fontFamily,
             kCMTextMarkupAttribute_BoldStyle as String: true
         ]
@@ -564,6 +601,15 @@ final class VideoPlaybackEngine: ObservableObject {
     private func makePlayerItem(asset: AVURLAsset) -> AVPlayerItem {
         let item = AVPlayerItem(asset: asset)
 
+        // Native captions are rendered inside AVPlayerLayer, so UIScrollView
+        // pinch/pan transforms move and scale them with the picture. Request
+        // timed text instead and render it in VideoPlayerView's fixed overlay.
+        let output = AVPlayerItemLegibleOutput()
+        output.suppressesPlayerRendering = true
+        output.setDelegate(legibleTextReceiver, queue: .main)
+        item.add(output)
+        legibleOutput = output
+
         // Keep several minutes ready ahead for smooth seeking and 4K playback.
         item.preferredForwardBufferDuration = startupForwardBufferSeconds
 
@@ -588,6 +634,14 @@ final class VideoPlaybackEngine: ObservableObject {
         }
 
         return item
+    }
+
+    private func detachLegibleOutput() {
+        guard let output = legibleOutput else { return }
+        output.setDelegate(nil, queue: nil)
+        player.currentItem?.remove(output)
+        legibleOutput = nil
+        renderedSubtitleText = nil
     }
 
     private func attach(item: AVPlayerItem) {
