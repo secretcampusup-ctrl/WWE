@@ -194,6 +194,13 @@ final class VideoPlaybackEngine: ObservableObject {
             // explicit so published UI state can never be changed off-main.
             Task { @MainActor [weak self] in
                 guard let self, self.legibleOutput === output else { return }
+                // Only suppress AVPlayerLayer's native caption renderer after
+                // AVFoundation has proved this track can be delivered as text.
+                // Bitmap/PGS tracks produce no attributed string and must keep
+                // using the native renderer or they disappear completely.
+                if text != nil {
+                    output.suppressesPlayerRendering = true
+                }
                 self.renderedSubtitleText = text
             }
         }
@@ -413,14 +420,17 @@ final class VideoPlaybackEngine: ObservableObject {
     func selectSubtitleTrack(id: String?) {
         guard let item = player.currentItem,
               let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
+        // Start every newly selected track in native fallback mode. Text-based
+        // tracks switch to the fixed viewport overlay on their first cue;
+        // image-based tracks remain visible through AVPlayerLayer.
+        legibleOutput?.suppressesPlayerRendering = false
+        renderedSubtitleText = nil
         if let id, let option = subtitleOptionsByID[id] {
-            renderedSubtitleText = nil
             item.select(option, in: group)
             selectedSubtitleTrackID = id
         } else {
             item.select(nil, in: group)
             selectedSubtitleTrackID = nil
-            renderedSubtitleText = nil
         }
     }
 
@@ -607,11 +617,11 @@ final class VideoPlaybackEngine: ObservableObject {
     private func makePlayerItem(asset: AVURLAsset) -> AVPlayerItem {
         let item = AVPlayerItem(asset: asset)
 
-        // Native captions are rendered inside AVPlayerLayer, so UIScrollView
-        // pinch/pan transforms move and scale them with the picture. Request
-        // timed text instead and render it in VideoPlayerView's fixed overlay.
+        // Native captions are rendered inside AVPlayerLayer. Keep them enabled
+        // as a fallback until a text cue is received; then the delegate switches
+        // this output to suppression and VideoPlayerView draws the fixed overlay.
         let output = AVPlayerItemLegibleOutput()
-        output.suppressesPlayerRendering = true
+        output.suppressesPlayerRendering = false
         output.setDelegate(legibleTextReceiver, queue: .main)
         item.add(output)
         legibleOutput = output

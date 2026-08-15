@@ -7,6 +7,7 @@ struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
     @StateObject private var catalog = UnifiedContentModel()
     @State private var selectedTab = 0
+    @State private var dockIsCompact = false
     @Namespace private var dockSelection
 
     var body: some View {
@@ -24,12 +25,7 @@ struct MainTabView: View {
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
 
-            HStack(spacing: 3) {
-                dockButton("Home", "house.fill", 0)
-                dockButton("Content", "rectangle.stack.fill", 1)
-                dockButton("Discover", "sailboat.fill", 2)
-                dockButton("Settings", "gearshape.fill", 3)
-            }
+            dockContent
             .padding(4)
             .background {
                 ZStack {
@@ -54,12 +50,76 @@ struct MainTabView: View {
                     )
             }
             .shadow(color: .black.opacity(0.26), radius: 14, y: 6)
-            .padding(.horizontal, 34)
+            .padding(.horizontal, dockIsCompact ? 0 : 34)
             .padding(.bottom, -16)
+            .animation(.spring(response: 0.42, dampingFraction: 0.76), value: dockIsCompact)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        .simultaneousGesture(dockScrollGesture)
         .tint(AppPalette.accent)
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var dockContent: some View {
+        if dockIsCompact {
+            Button {
+                UISelectionFeedbackGenerator().selectionChanged()
+                setDockCompact(false)
+            } label: {
+                Image(systemName: selectedDockIcon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 38)
+                    .background(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.12), AppPalette.accent.opacity(0.07)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: Capsule()
+                    )
+                    .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+                    .shadow(color: AppPalette.accent.opacity(0.42), radius: 6)
+                    .matchedGeometryEffect(id: "dock-icon-\(selectedTab)", in: dockSelection)
+            }
+            .buttonStyle(.plain)
+            .transition(.scale(scale: 0.72).combined(with: .opacity))
+            .accessibilityLabel(selectedDockTitle)
+        } else {
+            HStack(spacing: 3) {
+                dockButton("Home", "house.fill", 0)
+                dockButton("Content", "rectangle.stack.fill", 1)
+                dockButton("Discover", "sailboat.fill", 2)
+                dockButton("Settings", "gearshape.fill", 3)
+            }
+            .transition(.scale(scale: 0.92).combined(with: .opacity))
+        }
+    }
+
+    private var selectedDockIcon: String {
+        ["house.fill", "rectangle.stack.fill", "sailboat.fill", "gearshape.fill"][min(3, max(0, selectedTab))]
+    }
+
+    private var selectedDockTitle: String {
+        ["Home", "Content", "Discover", "Settings"][min(3, max(0, selectedTab))]
+    }
+
+    private var dockScrollGesture: some Gesture {
+        DragGesture(minimumDistance: 14, coordinateSpace: .global)
+            .onChanged { value in
+                let horizontal = abs(value.translation.width)
+                let vertical = abs(value.translation.height)
+                guard vertical > horizontal * 1.15, vertical > 20 else { return }
+                setDockCompact(value.translation.height < 0)
+            }
+    }
+
+    private func setDockCompact(_ compact: Bool) {
+        guard dockIsCompact != compact else { return }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.76)) {
+            dockIsCompact = compact
+        }
     }
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
@@ -80,6 +140,7 @@ struct MainTabView: View {
                         color: isSelected ? AppPalette.accent.opacity(0.5) : .clear,
                         radius: 5
                     )
+                    .matchedGeometryEffect(id: "dock-icon-\(tab)", in: dockSelection)
                 Text(title)
                     .font(.system(size: 7.5, weight: .semibold))
                     .lineLimit(1)
@@ -175,7 +236,14 @@ struct HomeLibraryView: View {
                     HomeHeroZoomContainer(motion: heroMotion) {
                         heroPinnedBackground
                     }
-                    .frame(width: UIScreen.main.bounds.width, height: 670, alignment: .top)
+                    // Compensate for pulling the artwork above the safe area;
+                    // otherwise that offset silently consumes the lower
+                    // overscan reserved for the pull-down animation.
+                    .frame(
+                        width: UIScreen.main.bounds.width,
+                        height: 670 + homeTopSafeAreaInset,
+                        alignment: .top
+                    )
                     .clipped()
                     // The NavigationStack lays its content below the status-bar
                     // safe area. Pull only the pinned artwork back to the real
@@ -191,6 +259,9 @@ struct HomeLibraryView: View {
                         HomeHeroScrollOffsetObserver(motion: heroMotion)
                             .frame(height: 0)
                         heroSection
+                            // The list's upward fade belongs over the artwork,
+                            // never over the title or CTA controls.
+                            .zIndex(2)
 
                         LazyVStack(alignment: .leading, spacing: 28) {
                             resumeSection
@@ -414,11 +485,6 @@ struct HomeLibraryView: View {
             }
 
             LinearGradient(
-                colors: [.black.opacity(0.78), .black.opacity(0.38), .clear],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            LinearGradient(
                 stops: [
                     .init(color: .black.opacity(0.42), location: 0),
                     .init(color: .clear, location: 0.32),
@@ -431,7 +497,7 @@ struct HomeLibraryView: View {
                 endPoint: .bottom
             )
         }
-        .frame(width: UIScreen.main.bounds.width, height: 670)
+        .frame(width: UIScreen.main.bounds.width, height: 670 + homeTopSafeAreaInset)
         .clipped()
         .animation(.easeInOut(duration: 0.5), value: currentHeroIndex)
     }
@@ -487,7 +553,9 @@ struct HomeLibraryView: View {
             // Keep the CTA group visually connected to the page indicators.
             // The previous 88pt lift left a large dead band between the
             // buttons and dots on current iPhone aspect ratios.
-            .padding(.bottom, 50)
+            // Lift the information/CTA group slightly above the strongest
+            // lower fade while keeping a balanced gap to the page indicators.
+            .padding(.bottom, 64)
         }
         .frame(width: viewportWidth, height: 610, alignment: .center)
         .clipped()
@@ -1168,6 +1236,9 @@ private struct HomeHeroScrollOffsetObserver: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject {
+        /// Hero content is 610pt high over 670pt of artwork. Retain an 8pt
+        /// overscan buffer so the artwork's lower edge can never be exposed.
+        private let maximumPullDistance: CGFloat = 52
         private let motion: HomeHeroMotionModel
         private weak var scrollView: UIScrollView?
         private var observation: NSKeyValueObservation?
@@ -1210,7 +1281,18 @@ private struct HomeHeroScrollOffsetObserver: UIViewRepresentable {
         }
 
         private func publish(from scrollView: UIScrollView) {
-            let value = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+            let rawValue = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+            let value = min(maximumPullDistance, rawValue)
+
+            // Limit the actual elastic pull as well as the visual zoom. Merely
+            // capping the scale still lets ScrollView move the foreground past
+            // the 670pt artwork and reveal the poster's lower boundary.
+            if rawValue > maximumPullDistance {
+                let limitedY = -scrollView.adjustedContentInset.top - maximumPullDistance
+                if abs(scrollView.contentOffset.y - limitedY) > 0.5 {
+                    scrollView.contentOffset.y = limitedY
+                }
+            }
             if abs(motion.offset - value) > 0.35 {
                 motion.offset = value
             }
