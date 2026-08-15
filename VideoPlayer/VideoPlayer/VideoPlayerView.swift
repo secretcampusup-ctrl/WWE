@@ -39,8 +39,8 @@ struct VideoPlayerView: View {
     @State private var showPlaybackSettings = false
     @State private var showQuickSettings = false
     @State private var showEpisodePicker = false
-    @State private var subtitleSize: Double = UserDefaults.standard.object(forKey: "player.subtitle.size") as? Double ?? 24
-    @State private var subtitleColor: PlayerSubtitleColor = PlayerSubtitleColor(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.color") ?? "") ?? .white
+    @State private var subtitleSize: Double = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.size) as? Double ?? 24
+    @State private var subtitleColor: PlayerSubtitleColor = PlayerSubtitleColor(rawValue: UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.color) ?? "") ?? .white
     @State private var selectedAudioTrack = ""
     @State private var selectedSubtitleTrack = "Off"
     @State private var showSubtitleImporter = false
@@ -49,13 +49,15 @@ struct VideoPlayerView: View {
     @State private var embeddedMKVSubtitleTracks: [MatroskaTextSubtitleTrack] = []
     @State private var selectedEmbeddedMKVSubtitleTrackID: String?
     @State private var mkvSubtitleExtractionTask: Task<Void, Never>?
+    @State private var automaticSubtitleTask: Task<Void, Never>?
+    @State private var didAttemptAutomaticSubtitle = false
     @State private var subtitleSelectionWasUserDriven = false
     @State private var screenBrightness: Double = 0.5
-    @State private var subtitleDelay: Double = UserDefaults.standard.object(forKey: "player.subtitle.delay") as? Double ?? 0
-    @State private var subtitleHeight: Double = UserDefaults.standard.object(forKey: "player.subtitle.height") as? Double ?? 0
-    @State private var subtitleShadow = UserDefaults.standard.object(forKey: "player.subtitle.shadow") as? Bool ?? true
-    @State private var subtitleBackground = UserDefaults.standard.object(forKey: "player.subtitle.background") as? Bool ?? true
-    @State private var subtitleFont: PlayerSubtitleFont = PlayerSubtitleFont(rawValue: UserDefaults.standard.string(forKey: "player.subtitle.font") ?? "") ?? .rounded
+    @State private var subtitleDelay: Double = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.delay) as? Double ?? 0
+    @State private var subtitleHeight: Double = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.height) as? Double ?? 0
+    @State private var subtitleShadow = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.shadow) as? Bool ?? true
+    @State private var subtitleBackground = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.background) as? Bool ?? true
+    @State private var subtitleFont: PlayerSubtitleFont = PlayerSubtitleFont(rawValue: UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.font) ?? "") ?? .rounded
     @State private var nextEpisodeCountdown = 5
     @State private var endCountdownTask: Task<Void, Never>?
     @State private var didTearDownPlayback = false
@@ -300,6 +302,7 @@ struct VideoPlayerView: View {
                 subtitleBackground: $subtitleBackground,
                 subtitleFont: $subtitleFont,
                 brightness: $screenBrightness,
+                mediaTitle: title,
                 audioTracks: usesMKVPlayer ? mkvControls.audioTracks : engine.audioTracks,
                 selectedAudioTrackID: usesMKVPlayer ? mkvControls.selectedAudioTrackID : engine.selectedAudioTrackID,
                 isFillMode: usesMKVPlayer ? mkvFillMode : isFillMode,
@@ -317,6 +320,9 @@ struct VideoPlayerView: View {
                         },
                 onRateChange: { rate in
                     if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
+                },
+                onSubtitleSelected: { subtitle in
+                    loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
                 }
             )
         }
@@ -357,6 +363,7 @@ struct VideoPlayerView: View {
             } else {
                 beginEmbeddedMKVSubtitleExtraction()
             }
+            beginAutomaticSubtitleDownloadIfNeeded()
             scheduleAutoHide()
         }
         .onDisappear {
@@ -411,6 +418,9 @@ struct VideoPlayerView: View {
         .onChange(of: subtitleBackground) { _ in applySubtitlePreferences() }
         .onChange(of: subtitleFont) { _ in applySubtitlePreferences() }
         .onChange(of: engine.selectedSubtitleTrackID) { _ in applySubtitlePreferences() }
+        .onChange(of: engine.subtitleTracks) { tracks in
+            selectPreferredAppleSubtitleIfNeeded(from: tracks)
+        }
         .onChange(of: mkvControls.selectedSubtitleTrackID) { _ in applySubtitlePreferences() }
         .onChange(of: playbackDidEnd) { ended in
             if ended { beginEndCountdown() } else { endCountdownTask?.cancel() }
@@ -470,6 +480,8 @@ struct VideoPlayerView: View {
         endCountdownTask = nil
         mkvSubtitleExtractionTask?.cancel()
         mkvSubtitleExtractionTask = nil
+        automaticSubtitleTask?.cancel()
+        automaticSubtitleTask = nil
 
         if usesMKVPlayer {
             if mkvControls.durationSeconds > 0 {
@@ -706,19 +718,54 @@ struct VideoPlayerView: View {
     private func loadExternalSubtitle(from fileURL: URL) {
         let scoped = fileURL.startAccessingSecurityScopedResource()
         defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: fileURL),
-              let content = decodeSubtitleText(data) else { return }
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        loadExternalSubtitle(data: data, fileName: fileURL.lastPathComponent)
+    }
+
+    private func loadExternalSubtitle(data: Data, fileName: String) {
+        guard let content = decodeSubtitleText(data) else { return }
         let cues = ExternalSubtitleParser.parse(content)
         guard !cues.isEmpty else { return }
         mkvSubtitleExtractionTask?.cancel()
         mkvSubtitleExtractionTask = nil
         externalSubtitleCues = cues
-        externalSubtitleFileName = fileURL.lastPathComponent
+        externalSubtitleFileName = fileName
         selectedEmbeddedMKVSubtitleTrackID = nil
         subtitleSelectionWasUserDriven = true
-        selectedSubtitleTrack = fileURL.lastPathComponent
+        selectedSubtitleTrack = fileName
         if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
         else { engine.selectSubtitleTrack(id: nil) }
+    }
+
+    private func beginAutomaticSubtitleDownloadIfNeeded() {
+        guard SubtitlePreferences.automaticDownloadEnabled,
+              !didAttemptAutomaticSubtitle else { return }
+        didAttemptAutomaticSubtitle = true
+        automaticSubtitleTask?.cancel()
+        let mediaTitle = title
+        automaticSubtitleTask = Task {
+            do {
+                guard let subtitle = try await SubDLSubtitleService.automaticDownload(mediaTitle: mediaTitle),
+                      !Task.isCancelled,
+                      !subtitleSelectionWasUserDriven else { return }
+                loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
+            } catch is CancellationError {
+                return
+            } catch {
+                DiagnosticLogger.log("Automatic subtitles: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func selectPreferredAppleSubtitleIfNeeded(from tracks: [PlayerSubtitleTrackOption]) {
+        guard !usesMKVPlayer,
+              externalSubtitleFileName == nil,
+              !subtitleSelectionWasUserDriven,
+              let preferred = tracks.first(where: {
+                  SubtitlePreferences.languageMatches(code: $0.languageCode, title: $0.title)
+              }) else { return }
+        engine.selectSubtitleTrack(id: preferred.id)
+        selectedSubtitleTrack = preferred.title
     }
 
     private func beginEmbeddedMKVSubtitleExtraction() {
@@ -735,6 +782,7 @@ struct VideoPlayerView: View {
                     from: mediaURL,
                     httpHeaders: headers,
                     preferredTrackOnly: true,
+                    preferredLanguageCode: SubtitlePreferences.preferredLanguageCode,
                     priorityTime: resumeAt
                 ) { track in
                     guard !Task.isCancelled else { return }
@@ -903,13 +951,13 @@ struct VideoPlayerView: View {
 
     private func applySubtitlePreferences() {
         let defaults = UserDefaults.standard
-        defaults.set(subtitleSize, forKey: "player.subtitle.size")
-        defaults.set(subtitleColor.rawValue, forKey: "player.subtitle.color")
-        defaults.set(subtitleDelay, forKey: "player.subtitle.delay")
-        defaults.set(subtitleHeight, forKey: "player.subtitle.height")
-        defaults.set(subtitleShadow, forKey: "player.subtitle.shadow")
-        defaults.set(subtitleBackground, forKey: "player.subtitle.background")
-        defaults.set(subtitleFont.rawValue, forKey: "player.subtitle.font")
+        defaults.set(subtitleSize, forKey: SubtitlePreferenceKeys.size)
+        defaults.set(subtitleColor.rawValue, forKey: SubtitlePreferenceKeys.color)
+        defaults.set(subtitleDelay, forKey: SubtitlePreferenceKeys.delay)
+        defaults.set(subtitleHeight, forKey: SubtitlePreferenceKeys.height)
+        defaults.set(subtitleShadow, forKey: SubtitlePreferenceKeys.shadow)
+        defaults.set(subtitleBackground, forKey: SubtitlePreferenceKeys.background)
+        defaults.set(subtitleFont.rawValue, forKey: SubtitlePreferenceKeys.font)
 
         engine.applySubtitleStyle(
             fontSize: subtitleSize,
@@ -1007,7 +1055,10 @@ struct VideoPlayerView: View {
                             externalSubtitleCues = []
                             externalSubtitleFileName = nil
                             if usesMKVPlayer { selectMKVSubtitleTrack(id: id) }
-                            else { engine.selectSubtitleTrack(id: id) }
+                            else {
+                                subtitleSelectionWasUserDriven = true
+                                engine.selectSubtitleTrack(id: id)
+                            }
                             DispatchQueue.main.async { applySubtitlePreferences() }
                         },
                         onChooseSubtitleFile: {
@@ -1783,21 +1834,54 @@ private enum ExternalSubtitleParser {
         let normalized = source
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        return normalized.components(separatedBy: "\n\n").compactMap { block in
+        if normalized.split(separator: "\n").contains(where: {
+            $0.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("dialogue:")
+        }) {
+            return parseASS(normalized)
+        }
+        return parseTimedText(normalized)
+    }
+
+    private static func parseTimedText(_ source: String) -> [ExternalSubtitleCue] {
+        source.components(separatedBy: "\n\n").compactMap { block in
             let lines = block.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             guard let timingIndex = lines.firstIndex(where: { $0.contains("-->") }) else { return nil }
             let times = lines[timingIndex].components(separatedBy: "-->")
             guard times.count == 2,
                   let start = time(times[0]),
                   let end = time(times[1]) else { return nil }
-            let text = lines.dropFirst(timingIndex + 1)
-                .joined(separator: "\n")
-                .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = cleanText(lines.dropFirst(timingIndex + 1).joined(separator: "\n"))
             guard !text.isEmpty else { return nil }
             return ExternalSubtitleCue(start: start, end: end, text: text)
         }
         .sorted { $0.start < $1.start }
+    }
+
+    private static func parseASS(_ source: String) -> [ExternalSubtitleCue] {
+        source.components(separatedBy: "\n").compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("dialogue:"),
+                  let colon = trimmed.firstIndex(of: ":") else { return nil }
+            let payload = trimmed[trimmed.index(after: colon)...]
+            let fields = payload.split(separator: ",", maxSplits: 9, omittingEmptySubsequences: false)
+            guard fields.count == 10,
+                  let start = time(String(fields[1])),
+                  let end = time(String(fields[2])) else { return nil }
+            let text = cleanText(String(fields[9]))
+            guard !text.isEmpty else { return nil }
+            return ExternalSubtitleCue(start: start, end: end, text: text)
+        }
+        .sorted { $0.start < $1.start }
+    }
+
+    private static func cleanText(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: #"\{[^}]*\}"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\N"#, with: "\n")
+            .replacingOccurrences(of: #"\n"#, with: "\n")
+            .replacingOccurrences(of: #"\h"#, with: " ")
+            .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func time(_ raw: String) -> Double? {
@@ -1885,7 +1969,7 @@ private struct PlayerQualityBadge: View {
     }
 }
 
-private enum PlayerSubtitleColor: String, CaseIterable, Identifiable {
+enum PlayerSubtitleColor: String, CaseIterable, Identifiable {
     case white = "White"
     case yellow = "Yellow"
     case cyan = "Cyan"
@@ -1901,7 +1985,7 @@ private enum PlayerSubtitleColor: String, CaseIterable, Identifiable {
     }
 }
 
-private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
+enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
     case rounded = "Rounded"
     case standard = "Standard"
     case monospaced = "Monospaced"
@@ -1915,13 +1999,13 @@ private enum PlayerSubtitleFont: String, CaseIterable, Identifiable {
     var vlcFontName: String { appleFontFamily }
 }
 
-private enum PlayerSubtitleTypeface {
+enum PlayerSubtitleTypeface {
     static let englishPostScriptName = "NunitoSans-SemiBold"
     static let englishFamilyName = "Nunito Sans"
     static let englishVLCFontName = "Nunito Sans SemiBold"
 }
 
-private enum PlayerSubtitleSizing {
+enum PlayerSubtitleSizing {
     /// 390 pt is the common modern iPhone width. Scaling from the viewport's
     /// short side keeps subtitle sizing stable in portrait and landscape.
     private static let referenceWidth: CGFloat = 390
@@ -2132,6 +2216,7 @@ private struct PlayerAdvancedSettingsSheet: View {
     @Binding var subtitleBackground: Bool
     @Binding var subtitleFont: PlayerSubtitleFont
     @Binding var brightness: Double
+    let mediaTitle: String
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
     let isFillMode: Bool
@@ -2139,7 +2224,9 @@ private struct PlayerAdvancedSettingsSheet: View {
     let onBrightnessChange: (Double) -> Void
     let onAudioTrackChange: (String) -> Void
     let onRateChange: (Float) -> Void
+    let onSubtitleSelected: (DownloadedSubtitle) -> Void
     @State private var section = 2
+    @State private var showSubtitleSearch = false
 
     private let subtitleSizes: [SubtitleSizePreset] = [
         SubtitleSizePreset(id: "very-small", title: "Very Small", value: 18),
@@ -2199,6 +2286,9 @@ private struct PlayerAdvancedSettingsSheet: View {
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
+        .fullScreenCover(isPresented: $showSubtitleSearch) {
+            SubtitleSearchView(mediaTitle: mediaTitle, onSubtitleSelected: onSubtitleSelected)
+        }
     }
 
     private var sectionPicker: some View {
@@ -2255,6 +2345,26 @@ private struct PlayerAdvancedSettingsSheet: View {
 
     private var subtitleSection: some View {
         VStack(spacing: 14) {
+            card("Online Subtitles", icon: "magnifyingglass") {
+                Button { showSubtitleSearch = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "magnifyingglass.circle.fill")
+                            .font(.system(size: 25))
+                            .foregroundStyle(AppPalette.accent)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Find Subtitles").font(.system(size: 14, weight: .bold))
+                            Text("Search and apply a subtitle without leaving the player")
+                                .font(.caption).foregroundStyle(.white.opacity(0.48))
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.white.opacity(0.35))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12).frame(minHeight: 58)
+                    .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+            }
             subtitlePreview
             card("Font", icon: "textformat") {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 9) {

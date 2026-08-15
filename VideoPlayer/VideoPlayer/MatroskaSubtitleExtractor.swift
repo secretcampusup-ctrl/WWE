@@ -45,6 +45,7 @@ enum MatroskaSubtitleExtractor {
         httpHeaders: [String: String]? = nil,
         subtitleIndices: Set<Int>? = nil,
         preferredTrackOnly: Bool = false,
+        preferredLanguageCode: String? = nil,
         priorityTime: Double? = nil,
         onTrackExtracted: (@MainActor (MatroskaTextSubtitleTrack) -> Void)? = nil
     ) async throws -> [MatroskaTextSubtitleTrack] {
@@ -80,7 +81,13 @@ enum MatroskaSubtitleExtractor {
         if let subtitleIndices {
             textTracks = availableTextTracks.filter { subtitleIndices.contains($0.0) }
         } else if preferredTrackOnly {
-            let preferred = availableTextTracks.first(where: { $0.1.isForced })
+            let languageMatches = availableTextTracks.filter {
+                SubtitlePreferences.languageMatches(code: $0.1.language, preferredCode: preferredLanguageCode)
+            }
+            let preferred = languageMatches.first(where: { $0.1.isForced })
+                ?? languageMatches.first(where: { $0.1.isDefault })
+                ?? languageMatches.first
+                ?? availableTextTracks.first(where: { $0.1.isForced })
                 ?? availableTextTracks.first(where: { $0.1.isDefault })
                 ?? availableTextTracks.first
             textTracks = preferred.map { [$0] } ?? []
@@ -149,6 +156,7 @@ enum MatroskaSubtitleExtractor {
         guard !output.isEmpty else { throw MatroskaSubtitleExtractorError.missingTracks }
         return output
     }
+
 }
 
 // MARK: - Matroska metadata

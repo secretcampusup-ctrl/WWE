@@ -1374,7 +1374,7 @@ struct UnifiedSettingsView: View {
     @State private var destination: SettingsDestination?
 
     private enum SettingsDestination: String, Identifiable {
-        case servers, downloads, directLinks
+        case servers, downloads, subtitles, directLinks
         var id: String { rawValue }
     }
 
@@ -1389,7 +1389,7 @@ struct UnifiedSettingsView: View {
                         Text("Control Center")
                             .font(.system(size: 28, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
-                        Text("Manage your sources, downloads, and direct links.")
+                        Text("Manage your sources, subtitles, downloads, and direct links.")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.5))
                     }
@@ -1397,6 +1397,7 @@ struct UnifiedSettingsView: View {
                     VStack(spacing: 12) {
                         settingsRow("Servers", "WebDAV, Offcloud and TorBox accounts", "server.rack", .servers)
                         settingsRow("Downloads", "Current downloads and downloaded videos", "arrow.down.circle.fill", .downloads)
+                        settingsRow("Subtitles", "Language, appearance and automatic search", "captions.bubble.fill", .subtitles)
                         settingsRow("Direct Links", "Add PikPak or any direct video link", "link.badge.plus", .directLinks)
                     }
                 }
@@ -1454,6 +1455,7 @@ struct UnifiedSettingsView: View {
         switch item {
         case .servers: ServerAccountsSettingsView(vm: vm)
         case .downloads: DownloadManagerView()
+        case .subtitles: SubtitleSettingsView()
         case .directLinks: DirectLinksSettingsView(vm: vm)
         }
     }
