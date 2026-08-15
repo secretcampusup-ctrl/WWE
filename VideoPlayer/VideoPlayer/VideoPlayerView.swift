@@ -46,6 +46,10 @@ struct VideoPlayerView: View {
     @State private var showSubtitleImporter = false
     @State private var externalSubtitleCues: [ExternalSubtitleCue] = []
     @State private var externalSubtitleFileName: String?
+    @State private var embeddedMKVSubtitleTracks: [MatroskaTextSubtitleTrack] = []
+    @State private var selectedEmbeddedMKVSubtitleTrackID: String?
+    @State private var mkvSubtitleExtractionTask: Task<Void, Never>?
+    @State private var subtitleSelectionWasUserDriven = false
     @State private var screenBrightness: Double = 0.5
     @State private var subtitleDelay: Double = UserDefaults.standard.object(forKey: "player.subtitle.delay") as? Double ?? 0
     @State private var subtitleHeight: Double = UserDefaults.standard.object(forKey: "player.subtitle.height") as? Double ?? 0
@@ -350,6 +354,8 @@ struct VideoPlayerView: View {
                         background: subtitleBackground
                     )
                 }
+            } else {
+                beginEmbeddedMKVSubtitleExtraction()
             }
             scheduleAutoHide()
         }
@@ -462,6 +468,8 @@ struct VideoPlayerView: View {
         hideTask = nil
         endCountdownTask?.cancel()
         endCountdownTask = nil
+        mkvSubtitleExtractionTask?.cancel()
+        mkvSubtitleExtractionTask = nil
 
         if usesMKVPlayer {
             if mkvControls.durationSeconds > 0 {
@@ -608,11 +616,22 @@ struct VideoPlayerView: View {
         return engine.renderedSubtitleText
     }
 
+    private var playerSubtitleTracks: [PlayerSubtitleTrackOption] {
+        if usesMKVPlayer {
+            return embeddedMKVSubtitleTracks.map {
+                PlayerSubtitleTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode)
+            }
+        }
+        return engine.subtitleTracks
+    }
+
+    private var playerSelectedSubtitleTrackID: String? {
+        usesMKVPlayer ? selectedEmbeddedMKVSubtitleTrackID : engine.selectedSubtitleTrackID
+    }
+
     private var selectedEmbeddedSubtitle: PlayerSubtitleTrackOption? {
-        let tracks = usesMKVPlayer ? mkvControls.subtitleTracks : engine.subtitleTracks
-        let selectedID = usesMKVPlayer ? mkvControls.selectedSubtitleTrackID : engine.selectedSubtitleTrackID
-        guard let selectedID else { return nil }
-        return tracks.first { $0.id == selectedID }
+        guard let selectedID = playerSelectedSubtitleTrackID else { return nil }
+        return playerSubtitleTracks.first { $0.id == selectedID }
     }
 
     private var effectiveSubtitlePointSize: Double {
@@ -667,7 +686,63 @@ struct VideoPlayerView: View {
         guard !cues.isEmpty else { return }
         externalSubtitleCues = cues
         externalSubtitleFileName = fileURL.lastPathComponent
+        selectedEmbeddedMKVSubtitleTrackID = nil
+        subtitleSelectionWasUserDriven = true
         selectedSubtitleTrack = fileURL.lastPathComponent
+        if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
+        else { engine.selectSubtitleTrack(id: nil) }
+    }
+
+    private func beginEmbeddedMKVSubtitleExtraction() {
+        mkvSubtitleExtractionTask?.cancel()
+        embeddedMKVSubtitleTracks = []
+        selectedEmbeddedMKVSubtitleTrackID = nil
+        subtitleSelectionWasUserDriven = false
+        mkvControls.selectSubtitleTrack(id: nil)
+
+        let mediaURL = url
+        let headers = httpHeaders
+        mkvSubtitleExtractionTask = Task {
+            do {
+                let tracks = try await MatroskaSubtitleExtractor.extract(from: mediaURL, httpHeaders: headers)
+                guard !Task.isCancelled else { return }
+                embeddedMKVSubtitleTracks = tracks
+                DiagnosticLogger.log("MKV subtitles: extracted \(tracks.count) text track(s) from \(mediaURL.lastPathComponent)")
+
+                // Match normal player behavior: automatically enable only a
+                // track explicitly marked Default/Forced by the container.
+                if !subtitleSelectionWasUserDriven,
+                   externalSubtitleFileName == nil,
+                   selectedEmbeddedMKVSubtitleTrackID == nil,
+                   let preferred = tracks.first(where: { $0.isForced }) ?? tracks.first(where: { $0.isDefault }) {
+                    selectEmbeddedMKVSubtitleTrack(id: preferred.id)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                DiagnosticLogger.log("MKV subtitles: extraction failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func selectEmbeddedMKVSubtitleTrack(id: String) {
+        guard let track = embeddedMKVSubtitleTracks.first(where: { $0.id == id }) else { return }
+        selectedEmbeddedMKVSubtitleTrackID = id
+        externalSubtitleFileName = nil
+        subtitleSelectionWasUserDriven = true
+        externalSubtitleCues = track.cues.map {
+            ExternalSubtitleCue(start: $0.start, end: $0.end, text: $0.text)
+        }
+        selectedSubtitleTrack = track.title
+        // Text came from Matroska itself; VLC must remain video/audio-only.
+        mkvControls.selectSubtitleTrack(id: nil)
+    }
+
+    private func disableAllSubtitles() {
+        externalSubtitleCues = []
+        externalSubtitleFileName = nil
+        selectedEmbeddedMKVSubtitleTrackID = nil
+        subtitleSelectionWasUserDriven = true
         if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
         else { engine.selectSubtitleTrack(id: nil) }
     }
@@ -784,8 +859,8 @@ struct VideoPlayerView: View {
                     PlayerQuickSettingsPopover(
                         audioTracks: usesMKVPlayer ? mkvControls.audioTracks : engine.audioTracks,
                         selectedAudioTrackID: usesMKVPlayer ? mkvControls.selectedAudioTrackID : engine.selectedAudioTrackID,
-                        subtitleTracks: usesMKVPlayer ? mkvControls.subtitleTracks : engine.subtitleTracks,
-                        selectedSubtitleTrackID: usesMKVPlayer ? mkvControls.selectedSubtitleTrackID : engine.selectedSubtitleTrackID,
+                        subtitleTracks: playerSubtitleTracks,
+                        selectedSubtitleTrackID: playerSelectedSubtitleTrackID,
                         subtitleFileName: externalSubtitleFileName,
                         onRateChange: { rate in
                             if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
@@ -797,7 +872,7 @@ struct VideoPlayerView: View {
                         onSubtitleTrackChange: { id in
                             externalSubtitleCues = []
                             externalSubtitleFileName = nil
-                            if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: id) }
+                            if usesMKVPlayer { selectEmbeddedMKVSubtitleTrack(id: id) }
                             else { engine.selectSubtitleTrack(id: id) }
                             DispatchQueue.main.async { applySubtitlePreferences() }
                         },
@@ -806,10 +881,7 @@ struct VideoPlayerView: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showSubtitleImporter = true }
                         },
                         onDisableSubtitles: {
-                            externalSubtitleCues = []
-                            externalSubtitleFileName = nil
-                            if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
-                            else { engine.selectSubtitleTrack(id: nil) }
+                            disableAllSubtitles()
                         },
                         onAdvanced: {
                             showQuickSettings = false
@@ -1238,6 +1310,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=500")
         media.addOption(":drop-late-frames")
+        // Embedded text subtitles are extracted from Matroska and rendered by
+        // the fixed SwiftUI overlay. Never let VLC composite them into video.
+        media.addOption(":spu=-1")
         media.addOption(":freetype-font=\(subtitleStyle.fontName)")
         media.addOption(":sub-text-scale=\(vlcTextScale(for: subtitleStyle.fontSize))")
         media.addOption(":freetype-color=\(subtitleStyle.color)")
@@ -1248,6 +1323,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         mediaPlayer.drawable = videoView
         mediaPlayer.media = media
         mediaPlayer.play()
+        mediaPlayer.currentVideoSubTitleIndex = -1
         applyCurrentSubtitleStyleToRenderer()
         if resumeAt > 3 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -1258,6 +1334,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         loadingTimer?.invalidate()
         loadingTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
+            if self.mediaPlayer.currentVideoSubTitleIndex != -1 {
+                self.mediaPlayer.currentVideoSubTitleIndex = -1
+            }
             self.controls?.isPlaying = self.mediaPlayer.isPlaying
             self.controls?.updateProgress(min(1, max(0, Double(self.mediaPlayer.position))))
             // MobileVLCKit: `time` is non-optional VLCTime in current versions.
@@ -1305,9 +1384,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             audio: audio,
             subtitles: subtitles,
             selectedAudio: String(mediaPlayer.currentAudioTrackIndex),
-            selectedSubtitle: mediaPlayer.currentVideoSubTitleIndex >= 0
-                ? String(mediaPlayer.currentVideoSubTitleIndex)
-                : nil
+            selectedSubtitle: nil
         )
     }
 
@@ -1318,10 +1395,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func selectSubtitleTrack(id: String?) {
-        let index = id.flatMap(Int32.init) ?? -1
-        mediaPlayer.currentVideoSubTitleIndex = index
-        controls?.selectedSubtitleTrackID = index >= 0 ? String(index) : nil
-        if index >= 0 { applyCurrentSubtitleStyleToRenderer() }
+        mediaPlayer.currentVideoSubTitleIndex = -1
+        controls?.selectedSubtitleTrackID = nil
     }
 
     func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
