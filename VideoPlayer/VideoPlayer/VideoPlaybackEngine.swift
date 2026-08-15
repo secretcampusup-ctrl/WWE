@@ -429,7 +429,13 @@ final class VideoPlaybackEngine: ObservableObject {
         guard let item = player.currentItem else { return }
         var red: CGFloat = 1, green: CGFloat = 1, blue: CGFloat = 1, alpha: CGFloat = 1
         color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        let videoHeightPercentage = max(3, min(7.5, fontSize / 6))
+        // fontSize here is the raw preset value (18...34), not a screen-scaled
+        // point size — this attribute is a percentage of the VIDEO's own
+        // height, so device/viewport scaling doesn't belong here at all.
+        // The old 3–7.5% range (divided by 6) capped even the largest preset
+        // at a barely-readable size; 5–12% gives a real, visible small→large
+        // progression comparable to typical caption sizing.
+        let videoHeightPercentage = max(5, min(12, fontSize / 2.8))
         var attributes: [String: Any] = [
             kCMTextMarkupAttribute_ForegroundColorARGB as String: [alpha, red, green, blue],
             kCMTextMarkupAttribute_BaseFontSizePercentageRelativeToVideoHeight as String: videoHeightPercentage,

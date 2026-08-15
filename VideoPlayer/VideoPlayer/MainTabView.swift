@@ -159,7 +159,6 @@ struct HomeLibraryView: View {
         self.vm = vm
         self.catalog = catalog
         self.isActive = isActive
-        UIRefreshControl.appearance().tintColor = .clear
     }
 
     var body: some View {
@@ -232,10 +231,6 @@ struct HomeLibraryView: View {
                     .tint(AppPalette.accent)
                 }
                 .scrollIndicators(.hidden)
-                // The native refresh control still supplies the familiar pull
-                // gesture, while its spinner is replaced by our centered loader.
-                .tint(.clear)
-                .refreshable { await refreshLibrary() }
 
                 homeHeader
                     .padding(.top, 12)
@@ -1149,8 +1144,7 @@ private final class HomeHeroMotionModel: ObservableObject {
 
 /// Reads the real UIScrollView offset, matching the reliable motion path used
 /// by the video-details header. A SwiftUI GeometryReader preference can skip
-/// frames while refreshable owns the pull gesture, which made the Hero appear
-/// static or update late.
+/// frames during overscroll, which made the Hero appear static or update late.
 private struct HomeHeroScrollOffsetObserver: UIViewRepresentable {
     let motion: HomeHeroMotionModel
 

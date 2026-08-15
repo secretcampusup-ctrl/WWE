@@ -344,7 +344,7 @@ struct VideoPlayerView: View {
                     try? await Task.sleep(nanoseconds: 700_000_000)
                     guard !Task.isCancelled else { return }
                     engine.applySubtitleStyle(
-                        fontSize: effectiveSubtitlePointSize,
+                        fontSize: subtitleSize,
                         fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
                         color: subtitleColor.uiColor,
                         background: subtitleBackground
@@ -703,7 +703,7 @@ struct VideoPlayerView: View {
         defaults.set(subtitleFont.rawValue, forKey: "player.subtitle.font")
 
         engine.applySubtitleStyle(
-            fontSize: effectiveSubtitlePointSize,
+            fontSize: subtitleSize,
             fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
             color: subtitleColor.uiColor,
             background: subtitleBackground
