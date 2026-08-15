@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 
 struct MatroskaSubtitleCue: Sendable, Equatable {
     let start: Double
@@ -9,6 +10,9 @@ struct MatroskaSubtitleCue: Sendable, Equatable {
 struct MatroskaTextSubtitleTrack: Identifiable, Sendable, Equatable {
     let id: String
     let trackNumber: UInt64
+    /// Zero-based position among every subtitle track in container order.
+    /// VLC exposes its subtitle list in the same order, including PGS/VobSub.
+    let containerSubtitleIndex: Int
     let title: String
     let languageCode: String?
     let isDefault: Bool
@@ -36,7 +40,13 @@ enum MatroskaSubtitleExtractorError: LocalizedError {
 /// not involved: text tracks are decoded into timed cues for the player's fixed
 /// SwiftUI subtitle overlay.
 enum MatroskaSubtitleExtractor {
-    static func extract(from url: URL, httpHeaders: [String: String]? = nil) async throws -> [MatroskaTextSubtitleTrack] {
+    static func extract(
+        from url: URL,
+        httpHeaders: [String: String]? = nil,
+        subtitleIndices: Set<Int>? = nil,
+        preferredTrackOnly: Bool = false,
+        onTrackExtracted: (@MainActor (MatroskaTextSubtitleTrack) -> Void)? = nil
+    ) async throws -> [MatroskaTextSubtitleTrack] {
         let source = MatroskaByteSource(url: url, headers: httpHeaders ?? [:])
         let fileSize = try await source.fileSize()
         let initialCount = Int(min(fileSize, 8 * 1_024 * 1_024))
@@ -53,7 +63,25 @@ enum MatroskaSubtitleExtractor {
             resolvedMetadata.tracks = parseTracks(data)
         }
 
-        let textTracks = resolvedMetadata.tracks.filter { $0.isSupportedTextSubtitle }
+        // Preserve container order so VLC's selected-track index maps to the
+        // same extracted text track while tracks arrive incrementally.
+        let availableTextTracks = resolvedMetadata.tracks
+            .filter { $0.type == 17 }
+            .enumerated()
+            .compactMap { subtitleIndex, track in
+                track.isSupportedTextSubtitle ? (subtitleIndex, track) : nil
+            }
+        let textTracks: [(Int, MatroskaTrack)]
+        if let subtitleIndices {
+            textTracks = availableTextTracks.filter { subtitleIndices.contains($0.0) }
+        } else if preferredTrackOnly {
+            let preferred = availableTextTracks.first(where: { $0.1.isForced })
+                ?? availableTextTracks.first(where: { $0.1.isDefault })
+                ?? availableTextTracks.first
+            textTracks = preferred.map { [$0] } ?? []
+        } else {
+            textTracks = availableTextTracks
+        }
         guard !textTracks.isEmpty else { throw MatroskaSubtitleExtractorError.missingTracks }
 
         let cueData = try await locateCues(metadata: resolvedMetadata, source: source, fileSize: fileSize)
@@ -61,7 +89,7 @@ enum MatroskaSubtitleExtractor {
         let references = cueData.map { parseCueReferences($0, timecodeScale: scale) } ?? []
 
         var output: [MatroskaTextSubtitleTrack] = []
-        for track in textTracks {
+        for (subtitleIndex, track) in textTracks {
             try Task.checkCancellation()
             let trackReferences = references.filter { $0.trackNumber == track.number }
             var cues = try await extractIndexedCues(
@@ -86,15 +114,18 @@ enum MatroskaSubtitleExtractor {
             }
             guard !cues.isEmpty else { continue }
 
-            output.append(MatroskaTextSubtitleTrack(
+            let extracted = MatroskaTextSubtitleTrack(
                 id: "mkv-text:\(track.number)",
                 trackNumber: track.number,
+                containerSubtitleIndex: subtitleIndex,
                 title: displayTitle(for: track),
                 languageCode: track.language,
                 isDefault: track.isDefault,
                 isForced: track.isForced,
                 cues: normalizeCueEnds(cues)
-            ))
+            )
+            output.append(extracted)
+            if let onTrackExtracted { await onTrackExtracted(extracted) }
         }
 
         guard !output.isEmpty else { throw MatroskaSubtitleExtractorError.missingTracks }
@@ -122,6 +153,14 @@ private enum MatroskaID {
     static let language: UInt64 = 0x22B59C
     static let languageIETF: UInt64 = 0x22B59D
     static let codecID: UInt64 = 0x86
+    static let contentEncodings: UInt64 = 0x6D80
+    static let contentEncoding: UInt64 = 0x6240
+    static let contentEncodingOrder: UInt64 = 0x5031
+    static let contentEncodingScope: UInt64 = 0x5032
+    static let contentEncodingType: UInt64 = 0x5033
+    static let contentCompression: UInt64 = 0x5034
+    static let contentCompAlgo: UInt64 = 0x4254
+    static let contentCompSettings: UInt64 = 0x4255
     static let cues: UInt64 = 0x1C53BB6B
     static let cuePoint: UInt64 = 0xBB
     static let cueTime: UInt64 = 0xB3
@@ -130,6 +169,7 @@ private enum MatroskaID {
     static let cueClusterPosition: UInt64 = 0xF1
     static let cueRelativePosition: UInt64 = 0xF0
     static let cueDuration: UInt64 = 0xB2
+    static let cueBlockNumber: UInt64 = 0x5378
     static let cluster: UInt64 = 0x1F43B675
     static let clusterTimecode: UInt64 = 0xE7
     static let simpleBlock: UInt64 = 0xA3
@@ -160,11 +200,34 @@ private struct MatroskaTrack: Sendable {
     var language: String?
     var isDefault = true
     var isForced = false
+    var contentEncodings: [MatroskaContentEncoding] = []
 
     var isSupportedTextSubtitle: Bool {
         guard type == 17 else { return false }
-        return ["S_TEXT/UTF8", "S_TEXT/ASCII", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT"].contains(codecID.uppercased())
+        return [
+            "S_TEXT/UTF8",
+            "S_TEXT/ASCII",
+            "S_TEXT/ASS",
+            "S_TEXT/SSA",
+            "S_TEXT/USF",
+            "S_TEXT/WEBVTT",
+            "S_ASS",
+            "S_SSA"
+        ].contains(codecID.uppercased())
     }
+}
+
+private struct MatroskaContentEncoding: Sendable {
+    let order: UInt64
+    let scope: UInt64
+    let type: UInt64
+    let compression: MatroskaContentCompression?
+}
+
+private enum MatroskaContentCompression: Sendable {
+    case zlib
+    case headerStripping(Data)
+    case unsupported(UInt64)
 }
 
 private struct MatroskaMetadata {
@@ -181,6 +244,7 @@ private struct MatroskaCueReference: Sendable {
     let duration: Double?
     let clusterPosition: UInt64
     let relativePosition: UInt64?
+    let blockNumber: UInt64
 }
 
 private struct DecodedBlock {
@@ -269,11 +333,52 @@ private func parseTracks(_ data: Data) -> [MatroskaTrack] {
             case MatroskaID.languageIETF: track.language = utf8String(data, element: child)
             case MatroskaID.language where track.language == nil: track.language = utf8String(data, element: child)
             case MatroskaID.codecID: track.codecID = utf8String(data, element: child) ?? ""
+            case MatroskaID.contentEncodings: track.contentEncodings = parseContentEncodings(data, element: child)
             default: break
             }
         }
         return track.number > 0 ? track : nil
     }
+}
+
+private func parseContentEncodings(_ data: Data, element: MatroskaElement) -> [MatroskaContentEncoding] {
+    childElements(data, parent: element).compactMap { encoding in
+        guard encoding.id == MatroskaID.contentEncoding else { return nil }
+        var order: UInt64 = 0
+        var scope: UInt64 = 1
+        var type: UInt64 = 0
+        var compression: MatroskaContentCompression?
+
+        for child in childElements(data, parent: encoding) {
+            switch child.id {
+            case MatroskaID.contentEncodingOrder:
+                order = unsignedInteger(data, element: child) ?? 0
+            case MatroskaID.contentEncodingScope:
+                scope = unsignedInteger(data, element: child) ?? 1
+            case MatroskaID.contentEncodingType:
+                type = unsignedInteger(data, element: child) ?? 0
+            case MatroskaID.contentCompression:
+                var algorithm: UInt64 = 0
+                var settings = Data()
+                for compressionChild in childElements(data, parent: child) {
+                    if compressionChild.id == MatroskaID.contentCompAlgo {
+                        algorithm = unsignedInteger(data, element: compressionChild) ?? 0
+                    } else if compressionChild.id == MatroskaID.contentCompSettings {
+                        settings = payload(data, element: compressionChild)
+                    }
+                }
+                switch algorithm {
+                case 0: compression = .zlib
+                case 3: compression = .headerStripping(settings)
+                default: compression = .unsupported(algorithm)
+                }
+            default:
+                break
+            }
+        }
+        return MatroskaContentEncoding(order: order, scope: scope, type: type, compression: compression)
+    }
+    .sorted { $0.order > $1.order }
 }
 
 private func parseCueReferences(_ data: Data, timecodeScale: UInt64) -> [MatroskaCueReference] {
@@ -289,12 +394,14 @@ private func parseCueReferences(_ data: Data, timecodeScale: UInt64) -> [Matrosk
             var cluster: UInt64?
             var relative: UInt64?
             var duration: UInt64?
+            var blockNumber: UInt64 = 1
             for child in childElements(data, parent: positions) {
                 switch child.id {
                 case MatroskaID.cueTrack: track = unsignedInteger(data, element: child)
                 case MatroskaID.cueClusterPosition: cluster = unsignedInteger(data, element: child)
                 case MatroskaID.cueRelativePosition: relative = unsignedInteger(data, element: child)
                 case MatroskaID.cueDuration: duration = unsignedInteger(data, element: child)
+                case MatroskaID.cueBlockNumber: blockNumber = max(1, unsignedInteger(data, element: child) ?? 1)
                 default: break
                 }
             }
@@ -304,7 +411,8 @@ private func parseCueReferences(_ data: Data, timecodeScale: UInt64) -> [Matrosk
                     start: start,
                     duration: duration.map { seconds(ticks: $0, scale: timecodeScale) },
                     clusterPosition: cluster,
-                    relativePosition: relative
+                    relativePosition: relative,
+                    blockNumber: blockNumber
                 ))
             }
         }
@@ -344,15 +452,15 @@ private func extractIndexedCues(
     guard !references.isEmpty else { return [] }
     let ordered = references.sorted { $0.start < $1.start }
     var indexed: [(Int, MatroskaSubtitleCue)] = []
+    let directlyAddressable = ordered.enumerated().filter { $0.element.relativePosition != nil }
 
     // Bound concurrency so a long movie does not flood a remote WebDAV/CDN.
-    for batchStart in stride(from: 0, to: ordered.count, by: 12) {
+    for batchStart in stride(from: 0, to: directlyAddressable.count, by: 4) {
         try Task.checkCancellation()
-        let batchEnd = min(ordered.count, batchStart + 12)
-        let batch = Array(ordered[batchStart..<batchEnd])
+        let batchEnd = min(directlyAddressable.count, batchStart + 4)
+        let batch = Array(directlyAddressable[batchStart..<batchEnd])
         let values = try await withThrowingTaskGroup(of: (Int, MatroskaSubtitleCue?).self) { group in
-            for (localIndex, reference) in batch.enumerated() {
-                let absoluteIndex = batchStart + localIndex
+            for (absoluteIndex, reference) in batch {
                 group.addTask {
                     do {
                         let cue = try await decodeIndexedCue(
@@ -378,7 +486,93 @@ private func extractIndexedCues(
         }
         indexed.append(contentsOf: values.compactMap { index, cue in cue.map { (index, $0) } })
     }
-    return indexed.sorted { $0.0 < $1.0 }.map(\.1)
+
+    // CueRelativePosition is optional and many perfectly valid MKVs omit it.
+    // Per Matroska, omission means the referenced frame is the first Block in
+    // that Cluster. Read only headers plus that small subtitle Block; never
+    // download an entire video Cluster just to locate one line of text.
+    var seenClusterBlocks = Set<String>()
+    let clusterOnlyReferences = ordered.filter { reference in
+        guard reference.relativePosition == nil else { return false }
+        return seenClusterBlocks.insert("\(reference.clusterPosition):\(reference.blockNumber)").inserted
+    }
+    var clusterCues: [MatroskaSubtitleCue] = []
+    for reference in clusterOnlyReferences {
+        try Task.checkCancellation()
+        do {
+            if let cue = try await decodeSubtitleCueAtBlockNumber(
+                track: track,
+                reference: reference,
+                segmentContentOffset: segmentContentOffset,
+                timecodeScale: timecodeScale,
+                source: source
+            ) {
+                clusterCues.append(cue)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // A corrupt/oversized Cluster should not hide valid cues from the
+            // remaining Clusters or the directly addressed entries above.
+            continue
+        }
+    }
+
+    return (indexed.map(\.1) + clusterCues).sorted { $0.start < $1.start }
+}
+
+private func decodeSubtitleCueAtBlockNumber(
+    track: MatroskaTrack,
+    reference: MatroskaCueReference,
+    segmentContentOffset: UInt64,
+    timecodeScale: UInt64,
+    source: MatroskaByteSource
+) async throws -> MatroskaSubtitleCue? {
+    let clusterOffset = segmentContentOffset + reference.clusterPosition
+    guard let cluster = try await readHeader(at: clusterOffset, from: source),
+          cluster.id == MatroskaID.cluster,
+          let clusterTotal = cluster.totalSize else { return nil }
+    let clusterEnd = clusterOffset + clusterTotal
+    var cursor = clusterOffset + UInt64(cluster.headerSize)
+    var clusterTimecode: UInt64 = 0
+    var encounteredBlocks: UInt64 = 0
+
+    while cursor + 2 < clusterEnd {
+        try Task.checkCancellation()
+        guard let child = try await readHeader(at: cursor, from: source),
+              let childTotal = child.totalSize,
+              childTotal > 0,
+              cursor + childTotal <= clusterEnd else { return nil }
+
+        if child.id == MatroskaID.clusterTimecode {
+            let valueData = try await source.read(offset: cursor, count: Int(childTotal))
+            if let local = parseElementHeader(valueData, at: 0) {
+                clusterTimecode = unsignedInteger(valueData, element: local) ?? 0
+            }
+        } else if child.id == MatroskaID.simpleBlock || child.id == MatroskaID.blockGroup {
+            encounteredBlocks += 1
+            guard encounteredBlocks == reference.blockNumber else {
+                cursor += childTotal
+                continue
+            }
+            // Read only the specifically indexed Block. All video/audio Block
+            // payloads before it were skipped using their EBML sizes.
+            let elementData = try await readElement(
+                at: cursor,
+                from: source,
+                maximumSize: 1 * 1_024 * 1_024
+            )
+            guard blockTrackNumber(in: elementData) == track.number else { return nil }
+            return decodeScannedElement(
+                elementData,
+                track: track,
+                clusterTimecode: clusterTimecode,
+                scale: timecodeScale
+            )
+        }
+        cursor += childTotal
+    }
+    return nil
 }
 
 private func decodeIndexedCue(
@@ -409,7 +603,7 @@ private func decodeIndexedCue(
         }
     }
     guard let block, block.trackNumber == track.number else { return nil }
-    let text = block.frames.compactMap { decodeSubtitleText($0, codecID: track.codecID) }.joined(separator: "\n")
+    let text = block.frames.compactMap { decodeSubtitleText($0, track: track) }.joined(separator: "\n")
     guard !text.isEmpty else { return nil }
     let duration = reference.duration ?? blockDuration ?? 0
     return MatroskaSubtitleCue(start: reference.start, end: reference.start + max(0.01, duration), text: text)
@@ -497,7 +691,7 @@ private func decodeScannedElement(_ data: Data, track: MatroskaTrack, clusterTim
     guard let block, block.trackNumber == track.number else { return nil }
     let absoluteTicks = max(0, Int64(clusterTimecode) + Int64(block.relativeTimecode))
     let start = seconds(ticks: UInt64(absoluteTicks), scale: scale)
-    let text = block.frames.compactMap { decodeSubtitleText($0, codecID: track.codecID) }.joined(separator: "\n")
+    let text = block.frames.compactMap { decodeSubtitleText($0, track: track) }.joined(separator: "\n")
     guard !text.isEmpty else { return nil }
     return MatroskaSubtitleCue(start: start, end: start + max(0.01, duration ?? 0), text: text)
 }
@@ -513,18 +707,92 @@ private func decodeBlock(_ data: Data) -> DecodedBlock? {
     let flags = data[timeOffset + 2]
     let frameOffset = timeOffset + 3
     let lacing = (flags & 0x06) >> 1
-    guard lacing == 0 else { return nil } // Subtitle blocks are not normally laced.
+    guard let frames = decodeLacedFrames(data, offset: frameOffset, lacing: lacing) else { return nil }
     return DecodedBlock(
         trackNumber: trackVINT.value,
         relativeTimecode: relativeTime,
-        frames: [Data(data[frameOffset..<data.count])]
+        frames: frames
     )
 }
 
-private func decodeSubtitleText(_ data: Data, codecID: String) -> String? {
-    guard var text = String(data: data, encoding: .utf8) else { return nil }
-    let codec = codecID.uppercased()
-    if codec == "S_TEXT/ASS" || codec == "S_TEXT/SSA" {
+private func decodeLacedFrames(_ data: Data, offset: Int, lacing: UInt8) -> [Data]? {
+    guard offset <= data.count else { return nil }
+    if lacing == 0 { return [Data(data[offset..<data.count])] }
+    guard offset < data.count else { return nil }
+
+    let frameCount = Int(data[offset]) + 1
+    guard frameCount > 0 else { return nil }
+    var cursor = offset + 1
+    var sizes: [Int] = []
+
+    switch lacing {
+    case 1: // Xiph lacing
+        for _ in 0..<(frameCount - 1) {
+            var size = 0
+            while true {
+                guard cursor < data.count else { return nil }
+                let byte = Int(data[cursor])
+                cursor += 1
+                guard size <= Int.max - byte else { return nil }
+                size += byte
+                if byte != 255 { break }
+            }
+            sizes.append(size)
+        }
+
+    case 2: // Fixed-size lacing
+        let remaining = data.count - cursor
+        guard remaining % frameCount == 0 else { return nil }
+        sizes = Array(repeating: remaining / frameCount, count: frameCount - 1)
+
+    case 3: // EBML lacing
+        guard let firstSize = parseVINT(data, at: cursor, removingMarker: true),
+              firstSize.value <= UInt64(Int.max) else { return nil }
+        cursor += firstSize.length
+        sizes.append(Int(firstSize.value))
+
+        if frameCount > 2 {
+            for _ in 1..<(frameCount - 1) {
+                guard let encodedDelta = parseVINT(data, at: cursor, removingMarker: true) else { return nil }
+                cursor += encodedDelta.length
+                let bitCount = 7 * encodedDelta.length
+                let bias = (Int64(1) << (bitCount - 1)) - 1
+                guard encodedDelta.value <= UInt64(Int64.max) else { return nil }
+                let delta = Int64(encodedDelta.value) - bias
+                let previous = Int64(sizes[sizes.count - 1])
+                let next = previous + delta
+                guard next >= 0, next <= Int64(Int.max) else { return nil }
+                sizes.append(Int(next))
+            }
+        }
+
+    default:
+        return nil
+    }
+
+    let remaining = data.count - cursor
+    let knownTotal = sizes.reduce(0) { partial, size in
+        partial > Int.max - size ? Int.max : partial + size
+    }
+    guard knownTotal <= remaining else { return nil }
+    sizes.append(remaining - knownTotal)
+    guard sizes.count == frameCount else { return nil }
+
+    var frames: [Data] = []
+    frames.reserveCapacity(frameCount)
+    for size in sizes {
+        guard size >= 0, cursor <= data.count - size else { return nil }
+        frames.append(Data(data[cursor..<(cursor + size)]))
+        cursor += size
+    }
+    return cursor == data.count ? frames : nil
+}
+
+private func decodeSubtitleText(_ data: Data, track: MatroskaTrack) -> String? {
+    guard let decodedData = decodeContentEncodings(data, encodings: track.contentEncodings),
+          var text = String(data: decodedData, encoding: .utf8) else { return nil }
+    let codec = track.codecID.uppercased()
+    if codec == "S_TEXT/ASS" || codec == "S_TEXT/SSA" || codec == "S_ASS" || codec == "S_SSA" {
         // Matroska ASS packets omit Start/End and begin with ReadOrder. The
         // ninth comma-separated field is the actual dialogue text.
         var commaCount = 0
@@ -545,12 +813,80 @@ private func decodeSubtitleText(_ data: Data, codecID: String) -> String? {
     }
     text = text
         .replacingOccurrences(of: "\0", with: "")
+        .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: "&nbsp;", with: " ")
+        .replacingOccurrences(of: "&lt;", with: "<")
+        .replacingOccurrences(of: "&gt;", with: ">")
+        .replacingOccurrences(of: "&quot;", with: "\"")
+        .replacingOccurrences(of: "&apos;", with: "'")
+        .replacingOccurrences(of: "&amp;", with: "&")
+        .replacingOccurrences(of: "\u{FEFF}", with: "")
         .trimmingCharacters(in: .whitespacesAndNewlines)
     return text.isEmpty ? nil : text
 }
 
+/// Content encodings are applied in ascending order while muxing, therefore
+/// they must be undone from the highest order to the lowest. Scope bit 0
+/// identifies Block frame data; private/next encoding scopes do not apply here.
+private func decodeContentEncodings(_ data: Data, encodings: [MatroskaContentEncoding]) -> Data? {
+    var result = data
+    for encoding in encodings where encoding.scope & 0x01 != 0 {
+        // Encryption (type 1) and unknown future encoding types cannot be
+        // decoded locally. Returning nil keeps VLC as the safe fallback.
+        guard encoding.type == 0 else { return nil }
+        guard let compression = encoding.compression else { continue }
+        switch compression {
+        case .zlib:
+            guard let inflated = decompressZlib(result) else { return nil }
+            result = inflated
+        case .headerStripping(let prefix):
+            var restored = prefix
+            restored.append(result)
+            result = restored
+        case .unsupported:
+            return nil
+        }
+    }
+    return result
+}
+
+private func decompressZlib(_ data: Data) -> Data? {
+    guard !data.isEmpty else { return Data() }
+    var capacity = max(4_096, data.count * 8)
+    let maximumCapacity = 4 * 1_024 * 1_024
+
+    while capacity <= maximumCapacity {
+        var output = Data(count: capacity)
+        let decodedCount: Int = output.withUnsafeMutableBytes { destinationBytes in
+            data.withUnsafeBytes { sourceBytes in
+                guard let destination = destinationBytes.bindMemory(to: UInt8.self).baseAddress,
+                      let source = sourceBytes.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(
+                    destination,
+                    capacity,
+                    source,
+                    data.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+        }
+        if decodedCount > 0 {
+            output.count = decodedCount
+            return output
+        }
+        capacity *= 2
+    }
+    return nil
+}
+
 private func normalizeCueEnds(_ cues: [MatroskaSubtitleCue]) -> [MatroskaSubtitleCue] {
-    let ordered = cues.sorted { lhs, rhs in lhs.start == rhs.start ? lhs.end < rhs.end : lhs.start < rhs.start }
+    let sorted = cues.sorted { lhs, rhs in lhs.start == rhs.start ? lhs.end < rhs.end : lhs.start < rhs.start }
+    var seen = Set<String>()
+    let ordered = sorted.filter { cue in
+        let key = "\(Int((cue.start * 1_000).rounded()))|\(cue.text)"
+        return seen.insert(key).inserted
+    }
     var result: [MatroskaSubtitleCue] = []
     for (index, cue) in ordered.enumerated() {
         let nextStart = index + 1 < ordered.count ? ordered[index + 1].start : nil

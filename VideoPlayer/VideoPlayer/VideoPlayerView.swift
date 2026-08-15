@@ -617,12 +617,34 @@ struct VideoPlayerView: View {
 
     private var playerSubtitleTracks: [PlayerSubtitleTrackOption] {
         if usesMKVPlayer {
-            if !embeddedMKVSubtitleTracks.isEmpty {
-                return embeddedMKVSubtitleTracks.map {
-                    PlayerSubtitleTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode)
+            guard !embeddedMKVSubtitleTracks.isEmpty else { return mkvControls.subtitleTracks }
+
+            // Keep VLC-only formats (PGS/VobSub/unsupported compression) in
+            // the picker while replacing each successfully extracted textual
+            // track at its exact container position. This avoids duplicates
+            // and prevents a bitmap track from shifting the selected language.
+            var options: [PlayerSubtitleTrackOption] = []
+            for (nativeIndex, nativeTrack) in mkvControls.subtitleTracks.enumerated() {
+                if let extracted = embeddedMKVSubtitleTracks.first(where: {
+                    $0.containerSubtitleIndex == nativeIndex
+                }) {
+                    options.append(PlayerSubtitleTrackOption(
+                        id: extracted.id,
+                        title: extracted.title,
+                        languageCode: extracted.languageCode
+                    ))
+                } else {
+                    options.append(nativeTrack)
                 }
             }
-            return mkvControls.subtitleTracks
+            let nativeCount = mkvControls.subtitleTracks.count
+            options.append(contentsOf: embeddedMKVSubtitleTracks
+                .filter { $0.containerSubtitleIndex >= nativeCount }
+                .sorted { $0.containerSubtitleIndex < $1.containerSubtitleIndex }
+                .map {
+                    PlayerSubtitleTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode)
+                })
+            return options
         }
         return engine.subtitleTracks
     }
@@ -688,6 +710,8 @@ struct VideoPlayerView: View {
               let content = decodeSubtitleText(data) else { return }
         let cues = ExternalSubtitleParser.parse(content)
         guard !cues.isEmpty else { return }
+        mkvSubtitleExtractionTask?.cancel()
+        mkvSubtitleExtractionTask = nil
         externalSubtitleCues = cues
         externalSubtitleFileName = fileURL.lastPathComponent
         selectedEmbeddedMKVSubtitleTrackID = nil
@@ -707,24 +731,33 @@ struct VideoPlayerView: View {
         let headers = httpHeaders
         mkvSubtitleExtractionTask = Task {
             do {
-                let tracks = try await MatroskaSubtitleExtractor.extract(from: mediaURL, httpHeaders: headers)
+                let tracks = try await MatroskaSubtitleExtractor.extract(
+                    from: mediaURL,
+                    httpHeaders: headers,
+                    preferredTrackOnly: true
+                ) { track in
+                    guard !Task.isCancelled else { return }
+                    acceptExtractedMKVSubtitleTrack(track)
+                }
                 guard !Task.isCancelled else { return }
                 embeddedMKVSubtitleTracks = tracks
                 DiagnosticLogger.log("MKV subtitles: extracted \(tracks.count) text track(s) from \(mediaURL.lastPathComponent)")
 
-                if externalSubtitleFileName == nil, selectedEmbeddedMKVSubtitleTrackID == nil {
+                if externalSubtitleFileName == nil, !subtitleSelectionWasUserDriven {
                     // If VLC already selected a track, preserve the user's
                     // intent by mapping its list position to the extracted text
                     // list. Otherwise honor Forced/Default metadata.
                     let nativeIndex = mkvControls.selectedSubtitleTrackID.flatMap { selectedID in
                         mkvControls.subtitleTracks.firstIndex(where: { $0.id == selectedID })
                     }
-                    let mapped = nativeIndex.flatMap { $0 < tracks.count ? tracks[$0] : nil }
+                    let mapped = nativeIndex.flatMap { selectedIndex in
+                        tracks.first(where: { $0.containerSubtitleIndex == selectedIndex })
+                    }
                     let preferred = mapped
                         ?? tracks.first(where: { $0.isForced })
                         ?? tracks.first(where: { $0.isDefault })
-                    if let preferred, !subtitleSelectionWasUserDriven || mapped != nil {
-                        selectEmbeddedMKVSubtitleTrack(id: preferred.id)
+                    if let preferred, selectedEmbeddedMKVSubtitleTrackID != preferred.id {
+                        selectEmbeddedMKVSubtitleTrack(id: preferred.id, userDriven: false)
                     }
                 }
             } catch is CancellationError {
@@ -735,11 +768,36 @@ struct VideoPlayerView: View {
         }
     }
 
-    private func selectEmbeddedMKVSubtitleTrack(id: String) {
+    private func acceptExtractedMKVSubtitleTrack(_ track: MatroskaTextSubtitleTrack) {
+        if !embeddedMKVSubtitleTracks.contains(where: { $0.id == track.id }) {
+            embeddedMKVSubtitleTracks.append(track)
+        }
+        guard externalSubtitleFileName == nil,
+              !subtitleSelectionWasUserDriven else { return }
+
+        let nativeIndex = mkvControls.selectedSubtitleTrackID.flatMap { selectedID in
+            mkvControls.subtitleTracks.firstIndex(where: { $0.id == selectedID })
+        }
+        if let nativeIndex,
+           let matchingTrack = embeddedMKVSubtitleTracks.first(where: {
+               $0.containerSubtitleIndex == nativeIndex
+           }) {
+            // The user/default VLC choice has now reached the incremental
+            // extractor; switch it immediately to the fixed text overlay.
+            if selectedEmbeddedMKVSubtitleTrackID != matchingTrack.id {
+                selectEmbeddedMKVSubtitleTrack(id: matchingTrack.id, userDriven: false)
+            }
+        } else if selectedEmbeddedMKVSubtitleTrackID == nil,
+                  track.isForced || track.isDefault {
+            selectEmbeddedMKVSubtitleTrack(id: track.id, userDriven: false)
+        }
+    }
+
+    private func selectEmbeddedMKVSubtitleTrack(id: String, userDriven: Bool = true) {
         guard let track = embeddedMKVSubtitleTracks.first(where: { $0.id == id }) else { return }
         selectedEmbeddedMKVSubtitleTrackID = id
         externalSubtitleFileName = nil
-        subtitleSelectionWasUserDriven = true
+        subtitleSelectionWasUserDriven = userDriven
         externalSubtitleCues = track.cues.map {
             ExternalSubtitleCue(start: $0.start, end: $0.end, text: $0.text)
         }
@@ -750,6 +808,8 @@ struct VideoPlayerView: View {
 
     private func selectMKVSubtitleTrack(id: String) {
         if id.hasPrefix("mkv-text:") {
+            mkvSubtitleExtractionTask?.cancel()
+            mkvSubtitleExtractionTask = nil
             selectEmbeddedMKVSubtitleTrack(id: id)
             return
         }
@@ -761,9 +821,47 @@ struct VideoPlayerView: View {
         subtitleSelectionWasUserDriven = true
         mkvControls.selectSubtitleTrack(id: id)
         selectedSubtitleTrack = mkvControls.subtitleTracks.first(where: { $0.id == id })?.title ?? "On"
+
+        // Try to promote a VLC textual track to the fixed viewport overlay on
+        // demand. Bitmap tracks simply fail extraction and continue in VLC.
+        if let nativeIndex = mkvControls.subtitleTracks.firstIndex(where: { $0.id == id }) {
+            extractSelectedMKVSubtitleTrack(at: nativeIndex)
+        }
+    }
+
+    private func extractSelectedMKVSubtitleTrack(at subtitleIndex: Int) {
+        mkvSubtitleExtractionTask?.cancel()
+        let mediaURL = url
+        let headers = httpHeaders
+        mkvSubtitleExtractionTask = Task {
+            do {
+                let tracks = try await MatroskaSubtitleExtractor.extract(
+                    from: mediaURL,
+                    httpHeaders: headers,
+                    subtitleIndices: [subtitleIndex]
+                ) { track in
+                    guard !Task.isCancelled else { return }
+                    acceptExtractedMKVSubtitleTrack(track)
+                }
+                guard !Task.isCancelled,
+                      let track = tracks.first(where: { $0.containerSubtitleIndex == subtitleIndex }) else { return }
+                if !embeddedMKVSubtitleTracks.contains(where: { $0.id == track.id }) {
+                    embeddedMKVSubtitleTracks.append(track)
+                }
+                selectEmbeddedMKVSubtitleTrack(id: track.id, userDriven: true)
+            } catch is CancellationError {
+                return
+            } catch {
+                // PGS/VobSub, encrypted text, or a server without Range support
+                // remains selected and rendered by VLC as the safe fallback.
+                DiagnosticLogger.log("MKV subtitles: native fallback for track \(subtitleIndex): \(error.localizedDescription)")
+            }
+        }
     }
 
     private func disableAllSubtitles() {
+        mkvSubtitleExtractionTask?.cancel()
+        mkvSubtitleExtractionTask = nil
         externalSubtitleCues = []
         externalSubtitleFileName = nil
         selectedEmbeddedMKVSubtitleTrackID = nil
