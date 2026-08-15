@@ -86,7 +86,7 @@ struct VideoPlayerView: View {
                     isFillMode: mkvFillMode,
                     resetZoomToken: mkvResetZoomToken,
                     httpHeaders: httpHeaders,
-                    subtitleSize: subtitleSize,
+                    subtitleSize: effectiveSubtitlePointSize,
                     subtitleFontName: effectiveEmbeddedSubtitleVLCFontName,
                     subtitleColorValue: subtitleColor.vlcColorValue,
                     subtitleBackground: subtitleBackground,
@@ -244,7 +244,7 @@ struct VideoPlayerView: View {
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
                         Text(cue.text)
-                            .font(externalSubtitleFont(for: cue.text))
+                            .font(externalSubtitleFont(for: cue.text, viewport: proxy.size))
                             .foregroundColor(subtitleColor.color)
                             .multilineTextAlignment(.center)
                             .lineLimit(nil)
@@ -342,7 +342,7 @@ struct VideoPlayerView: View {
                     try? await Task.sleep(nanoseconds: 700_000_000)
                     guard !Task.isCancelled else { return }
                     engine.applySubtitleStyle(
-                        fontSize: subtitleSize,
+                        fontSize: effectiveSubtitlePointSize,
                         fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
                         color: subtitleColor.uiColor,
                         background: subtitleBackground
@@ -604,6 +604,10 @@ struct VideoPlayerView: View {
         return tracks.first { $0.id == selectedID }
     }
 
+    private var effectiveSubtitlePointSize: Double {
+        PlayerSubtitleSizing.pointSize(base: subtitleSize)
+    }
+
     private var effectiveEmbeddedSubtitleAppleFontFamily: String {
         selectedEmbeddedSubtitle?.isEnglish == true
             ? PlayerSubtitleTypeface.englishFamilyName
@@ -616,11 +620,12 @@ struct VideoPlayerView: View {
             : subtitleFont.vlcFontName
     }
 
-    private func externalSubtitleFont(for text: String) -> Font {
+    private func externalSubtitleFont(for text: String, viewport: CGSize) -> Font {
+        let pointSize = PlayerSubtitleSizing.pointSize(base: subtitleSize, viewport: viewport)
         if SubtitleLanguageDetector.isPredominantlyLatin(text) {
-            return .custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(subtitleSize))
+            return .custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(pointSize))
         }
-        return .system(size: subtitleSize, weight: .semibold, design: subtitleFont.design)
+        return .system(size: pointSize, weight: .semibold, design: subtitleFont.design)
     }
 
     private func subtitleScreenBottomInset(for proxy: GeometryProxy) -> CGFloat {
@@ -687,13 +692,13 @@ struct VideoPlayerView: View {
         defaults.set(subtitleFont.rawValue, forKey: "player.subtitle.font")
 
         engine.applySubtitleStyle(
-            fontSize: subtitleSize,
+            fontSize: effectiveSubtitlePointSize,
             fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
             color: subtitleColor.uiColor,
             background: subtitleBackground
         )
         mkvControls.applySubtitleStyle(
-            fontSize: subtitleSize,
+            fontSize: effectiveSubtitlePointSize,
             fontName: effectiveEmbeddedSubtitleVLCFontName,
             color: subtitleColor.vlcColorValue,
             background: subtitleBackground,
@@ -1341,19 +1346,11 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     /// VLC's live text-renderer API uses an inverse relative scale: smaller
-    /// numbers produce larger subtitles. Keep this mapping aligned with the
-    /// four point-size presets used by SwiftUI and AVFoundation.
+    /// numbers produce larger subtitles. Convert the adaptive iPhone point
+    /// size continuously so every screen and every preset stays proportional.
     private func vlcRelativeFontSize(for pointSize: Double) -> Int {
-        switch pointSize {
-        case ..<18:
-            return 130       // Very Small (16 pt)
-        case ..<22:
-            return 100       // Small (20 pt)
-        case ..<28:
-            return 80        // Medium (24 pt)
-        default:
-            return 60        // Large (32 pt)
-        }
+        let relativeSize = 1_920 / max(14, pointSize)
+        return Int(min(130, max(45, relativeSize)).rounded())
     }
 
     private func performTextRendererSelector(_ name: String, value: AnyObject) {
@@ -1705,6 +1702,20 @@ private enum PlayerSubtitleTypeface {
     static let englishVLCFontName = "Nunito Sans SemiBold"
 }
 
+private enum PlayerSubtitleSizing {
+    /// 390 pt is the common modern iPhone width. Scaling from the viewport's
+    /// short side keeps subtitle sizing stable in portrait and landscape.
+    private static let referenceWidth: CGFloat = 390
+    private static let minimumScale: CGFloat = 0.96
+    private static let maximumScale: CGFloat = 1.13
+
+    static func pointSize(base: Double, viewport: CGSize = UIScreen.main.bounds.size) -> Double {
+        let shortSide = max(320, min(viewport.width, viewport.height))
+        let screenScale = min(max(shortSide / referenceWidth, minimumScale), maximumScale)
+        return base * Double(screenScale)
+    }
+}
+
 private enum SubtitleLanguageDetector {
     static func isPredominantlyLatin(_ text: String) -> Bool {
         var latinLetters = 0
@@ -1912,10 +1923,11 @@ private struct PlayerAdvancedSettingsSheet: View {
     @State private var section = 2
 
     private let subtitleSizes: [SubtitleSizePreset] = [
-        SubtitleSizePreset(id: "very-small", title: "Very Small", value: 16),
-        SubtitleSizePreset(id: "small", title: "Small", value: 20),
+        SubtitleSizePreset(id: "very-small", title: "Very Small", value: 18),
+        SubtitleSizePreset(id: "small", title: "Small", value: 21),
         SubtitleSizePreset(id: "medium", title: "Medium", value: 24),
-        SubtitleSizePreset(id: "large", title: "Large", value: 32)
+        SubtitleSizePreset(id: "large", title: "Large", value: 28),
+        SubtitleSizePreset(id: "very-large", title: "Very Large", value: 34)
     ]
 
     private var selectedSubtitleSizePresetID: String? {
@@ -2074,13 +2086,14 @@ private struct PlayerAdvancedSettingsSheet: View {
     }
 
     private var subtitlePreview: some View {
-        ZStack {
+        let previewSize = PlayerSubtitleSizing.pointSize(base: subtitleSize)
+        return ZStack {
             LinearGradient(colors: [Color.indigo.opacity(0.55), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
             VStack(spacing: 3) {
                 Text("English subtitle preview")
-                    .font(.custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(min(subtitleSize, 28))))
+                    .font(.custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(previewSize)))
                 Text("مرحباً، ستظهر الترجمة العربية بشكل صحيح")
-                    .font(.system(size: min(subtitleSize, 28), weight: .semibold, design: subtitleFont.design))
+                    .font(.system(size: previewSize, weight: .semibold, design: subtitleFont.design))
             }
                 .foregroundStyle(subtitleColor.color)
                 .multilineTextAlignment(.center)
