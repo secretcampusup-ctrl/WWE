@@ -1458,6 +1458,17 @@ struct VideoDetailsView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         withAnimation(.easeOut(duration: 0.16)) { isPreparingPlayback = true }
         vm.preparePlaybackHistory(for: item)
+        if let details = resolvedMovieDetails {
+            let selected = selectedEpisodeItem
+            let parsed = VideoTitleFormatter.episodeComponents(from: item.title)
+            vm.nowPlayingSubtitleContext = SubtitleMediaContext(
+                title: details.title,
+                tmdbID: details.id,
+                mediaType: details.mediaType,
+                season: selected?.season ?? parsed?.season,
+                episode: selected?.episode ?? parsed?.episode
+            )
+        }
         onPlay()
         if dismissOnPlay {
             dismiss()
@@ -2066,6 +2077,7 @@ struct ResolvedPlayerScreen: View {
             RoutedVideoPlayerView(
                 url: url,
                 title: file.name,
+                subtitleMediaContext: vm.nowPlayingSubtitleContext,
                 resumeAt: vm.nowPlayingResumeAt,
                 linkId: vm.nowPlayingLinkId,
                 httpHeaders: vm.nowPlayingHeaders,

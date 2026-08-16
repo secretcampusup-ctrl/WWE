@@ -62,6 +62,7 @@ class AppViewModel: ObservableObject {
     /// Library entry currently playing (for resume + badges).
     @Published var nowPlayingLinkId: UUID?
     @Published var nowPlayingResumeAt: Double = 0
+    @Published var nowPlayingSubtitleContext: SubtitleMediaContext?
     /// Library of auto-saved links (newest first).
     @Published var savedLinks: [SavedVideoLink] = []
     /// Small local-only resume history. It never stores stream URLs and never
@@ -133,6 +134,19 @@ class AppViewModel: ObservableObject {
             item.posterCacheKey ?? VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
         )
         pendingHistoryProgress = nil
+        let episode = item.relatedEpisodes.first(where: { $0.id == item.id })
+        let parsedEpisode = VideoTitleFormatter.episodeComponents(from: item.title)
+        if let details = item.suppliedTMDBDetails {
+            nowPlayingSubtitleContext = SubtitleMediaContext(
+                title: details.title,
+                tmdbID: details.id,
+                mediaType: details.mediaType,
+                season: episode?.season ?? parsedEpisode?.season,
+                episode: episode?.episode ?? parsedEpisode?.episode
+            )
+        } else {
+            nowPlayingSubtitleContext = nil
+        }
     }
 
     func playbackHistoryEntry(for item: VideoDetailsItem) -> PlaybackHistoryEntry? {
@@ -1087,6 +1101,7 @@ class AppViewModel: ObservableObject {
         nowPlayingHeaders = nil
         nowPlayingResumeAt = 0
         nowPlayingLinkId = nil
+        nowPlayingSubtitleContext = nil
         nowPlaying = nil
     }
 

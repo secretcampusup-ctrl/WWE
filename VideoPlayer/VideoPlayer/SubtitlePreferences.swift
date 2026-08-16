@@ -1,5 +1,15 @@
 import SwiftUI
 
+struct SubtitleMediaContext: Equatable, Sendable {
+    let title: String
+    let tmdbID: Int?
+    let mediaType: String?
+    let season: Int?
+    let episode: Int?
+
+    var isEpisode: Bool { season != nil && episode != nil }
+}
+
 enum SubtitlePreferenceKeys {
     static let size = "player.subtitle.size"
     static let color = "player.subtitle.color"

@@ -3,7 +3,6 @@ import AVKit
 import AVFoundation
 import UIKit
 import MobileVLCKit
-import UniformTypeIdentifiers
 import CoreFoundation
 
 // MARK: - Player screen
@@ -11,6 +10,7 @@ import CoreFoundation
 struct VideoPlayerView: View {
     let url: URL
     let title: String
+    var subtitleMediaContext: SubtitleMediaContext? = nil
     var resumeAt: Double = 0
     var linkId: UUID? = nil
     /// Optional HTTP headers (WebDAV Basic Auth, etc.)
@@ -43,7 +43,6 @@ struct VideoPlayerView: View {
     @State private var subtitleColor: PlayerSubtitleColor = PlayerSubtitleColor(rawValue: UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.color) ?? "") ?? .white
     @State private var selectedAudioTrack = ""
     @State private var selectedSubtitleTrack = "Off"
-    @State private var showSubtitleImporter = false
     @State private var externalSubtitleCues: [ExternalSubtitleCue] = []
     @State private var externalSubtitleFileName: String?
     @State private var embeddedMKVSubtitleTracks: [MatroskaTextSubtitleTrack] = []
@@ -99,7 +98,7 @@ struct VideoPlayerView: View {
                     subtitleShadow: subtitleShadow,
                     subtitleHeight: Int(subtitleHeight),
                     subtitleDelay: subtitleDelay,
-                    anchorEmbeddedSubtitlesToViewport: mkvControls.selectedSubtitleTrackID != nil && externalSubtitleFileName == nil
+                    anchorEmbeddedSubtitlesToViewport: false
                 )
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
@@ -303,6 +302,7 @@ struct VideoPlayerView: View {
                 subtitleFont: $subtitleFont,
                 brightness: $screenBrightness,
                 mediaTitle: title,
+                mediaContext: subtitleMediaContext,
                 audioTracks: usesMKVPlayer ? mkvControls.audioTracks : engine.audioTracks,
                 selectedAudioTrackID: usesMKVPlayer ? mkvControls.selectedAudioTrackID : engine.selectedAudioTrackID,
                 isFillMode: usesMKVPlayer ? mkvFillMode : isFillMode,
@@ -325,14 +325,6 @@ struct VideoPlayerView: View {
                     loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
                 }
             )
-        }
-        .fileImporter(
-            isPresented: $showSubtitleImporter,
-            allowedContentTypes: subtitleDocumentTypes,
-            allowsMultipleSelection: false
-        ) { result in
-            guard case .success(let urls) = result, let fileURL = urls.first else { return }
-            loadExternalSubtitle(from: fileURL)
         }
         .statusBar(hidden: true)
         .navigationBarHidden(true)
@@ -361,7 +353,9 @@ struct VideoPlayerView: View {
                     )
                 }
             } else {
-                beginEmbeddedMKVSubtitleExtraction()
+                // Embedded MKV/VLC subtitles are disabled by design. Online
+                // downloads use the independent viewport overlay below.
+                mkvControls.selectSubtitleTrack(id: nil)
             }
             beginAutomaticSubtitleDownloadIfNeeded()
             scheduleAutoHide()
@@ -418,10 +412,13 @@ struct VideoPlayerView: View {
         .onChange(of: subtitleBackground) { _ in applySubtitlePreferences() }
         .onChange(of: subtitleFont) { _ in applySubtitlePreferences() }
         .onChange(of: engine.selectedSubtitleTrackID) { _ in applySubtitlePreferences() }
-        .onChange(of: engine.subtitleTracks) { tracks in
-            selectPreferredAppleSubtitleIfNeeded(from: tracks)
+        .onChange(of: engine.subtitleTracks) { _ in
+            engine.selectSubtitleTrack(id: nil)
         }
         .onChange(of: mkvControls.selectedSubtitleTrackID) { _ in applySubtitlePreferences() }
+        .onChange(of: mkvControls.subtitleTracks) { _ in
+            mkvControls.selectSubtitleTrack(id: nil)
+        }
         .onChange(of: playbackDidEnd) { ended in
             if ended { beginEndCountdown() } else { endCountdownTask?.cancel() }
         }
@@ -605,13 +602,6 @@ struct VideoPlayerView: View {
         if showControls { scheduleAutoHide() } else { hideTask?.cancel() }
     }
 
-    private var subtitleDocumentTypes: [UTType] {
-        var types: [UTType] = [.plainText]
-        if let srt = UTType(filenameExtension: "srt") { types.append(srt) }
-        if let vtt = UTType(filenameExtension: "vtt") { types.append(vtt) }
-        return types
-    }
-
     private var activeExternalSubtitle: ExternalSubtitleCue? {
         externalSubtitleCues.first {
             let adjustedTime = currentPlaybackSeconds - subtitleDelay
@@ -622,49 +612,15 @@ struct VideoPlayerView: View {
     /// A single viewport-level subtitle source. External files and successfully
     /// extracted text tracks share the exact same fixed rendering path.
     private var activeViewportSubtitleText: String? {
-        if let cue = activeExternalSubtitle { return cue.text }
-        guard !usesMKVPlayer else { return nil }
-        return engine.renderedSubtitleText
+        activeExternalSubtitle?.text
     }
 
     private var playerSubtitleTracks: [PlayerSubtitleTrackOption] {
-        if usesMKVPlayer {
-            guard !embeddedMKVSubtitleTracks.isEmpty else { return mkvControls.subtitleTracks }
-
-            // Keep VLC-only formats (PGS/VobSub/unsupported compression) in
-            // the picker while replacing each successfully extracted textual
-            // track at its exact container position. This avoids duplicates
-            // and prevents a bitmap track from shifting the selected language.
-            var options: [PlayerSubtitleTrackOption] = []
-            for (nativeIndex, nativeTrack) in mkvControls.subtitleTracks.enumerated() {
-                if let extracted = embeddedMKVSubtitleTracks.first(where: {
-                    $0.containerSubtitleIndex == nativeIndex
-                }) {
-                    options.append(PlayerSubtitleTrackOption(
-                        id: extracted.id,
-                        title: extracted.title,
-                        languageCode: extracted.languageCode
-                    ))
-                } else {
-                    options.append(nativeTrack)
-                }
-            }
-            let nativeCount = mkvControls.subtitleTracks.count
-            options.append(contentsOf: embeddedMKVSubtitleTracks
-                .filter { $0.containerSubtitleIndex >= nativeCount }
-                .sorted { $0.containerSubtitleIndex < $1.containerSubtitleIndex }
-                .map {
-                    PlayerSubtitleTrackOption(id: $0.id, title: $0.title, languageCode: $0.languageCode)
-                })
-            return options
-        }
-        return engine.subtitleTracks
+        []
     }
 
     private var playerSelectedSubtitleTrackID: String? {
-        usesMKVPlayer
-            ? (selectedEmbeddedMKVSubtitleTrackID ?? mkvControls.selectedSubtitleTrackID)
-            : engine.selectedSubtitleTrackID
+        nil
     }
 
     private var selectedEmbeddedSubtitle: PlayerSubtitleTrackOption? {
@@ -715,13 +671,6 @@ struct VideoPlayerView: View {
         )
     }
 
-    private func loadExternalSubtitle(from fileURL: URL) {
-        let scoped = fileURL.startAccessingSecurityScopedResource()
-        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        loadExternalSubtitle(data: data, fileName: fileURL.lastPathComponent)
-    }
-
     private func loadExternalSubtitle(data: Data, fileName: String) {
         guard let content = decodeSubtitleText(data) else { return }
         let cues = ExternalSubtitleParser.parse(content)
@@ -745,7 +694,10 @@ struct VideoPlayerView: View {
         let mediaTitle = title
         automaticSubtitleTask = Task {
             do {
-                guard let subtitle = try await SubDLSubtitleService.automaticDownload(mediaTitle: mediaTitle),
+                guard let subtitle = try await SubDLSubtitleService.automaticDownload(
+                    mediaTitle: mediaTitle,
+                    mediaContext: subtitleMediaContext
+                ),
                       !Task.isCancelled,
                       !subtitleSelectionWasUserDriven else { return }
                 loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
@@ -1050,20 +1002,6 @@ struct VideoPlayerView: View {
                         onAudioTrackChange: { id in
                             if usesMKVPlayer { mkvControls.selectAudioTrack(id: id) }
                             else { engine.selectAudioTrack(id: id) }
-                        },
-                        onSubtitleTrackChange: { id in
-                            externalSubtitleCues = []
-                            externalSubtitleFileName = nil
-                            if usesMKVPlayer { selectMKVSubtitleTrack(id: id) }
-                            else {
-                                subtitleSelectionWasUserDriven = true
-                                engine.selectSubtitleTrack(id: id)
-                            }
-                            DispatchQueue.main.async { applySubtitlePreferences() }
-                        },
-                        onChooseSubtitleFile: {
-                            showQuickSettings = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { showSubtitleImporter = true }
                         },
                         onDisableSubtitles: {
                             disableAllSubtitles()
@@ -1502,9 +1440,11 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         media.addOption(":freetype-shadow-opacity=\(subtitleStyle.shadow ? 255 : 0)")
         media.addOption(":sub-margin=\(subtitleStyle.margin)")
         media.addOption(":spu-delay=\(Int(subtitleStyle.delay * 1_000_000))")
+        media.addOption(":no-spu")
         mediaPlayer.drawable = videoView
         mediaPlayer.media = media
         mediaPlayer.play()
+        mediaPlayer.currentVideoSubTitleIndex = -1
         applyCurrentSubtitleStyleToRenderer()
         if resumeAt > 3 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -1547,26 +1487,17 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private func refreshEmbeddedTracks() {
         let audioNames = mediaPlayer.audioTrackNames.compactMap { $0 as? String }
         let audioIndexes = mediaPlayer.audioTrackIndexes.compactMap { ($0 as? NSNumber)?.int32Value }
-        let subtitleNames = mediaPlayer.videoSubTitlesNames.compactMap { $0 as? String }
-        let subtitleIndexes = mediaPlayer.videoSubTitlesIndexes.compactMap { ($0 as? NSNumber)?.int32Value }
-
         let audio = zip(audioIndexes, audioNames).map {
             PlayerAudioTrackOption(id: String($0.0), title: $0.1)
         }
-        let subtitles = zip(subtitleIndexes, subtitleNames)
-            .filter { $0.0 >= 0 }
-            .map { PlayerSubtitleTrackOption(id: String($0.0), title: $0.1) }
-        guard !audio.isEmpty || !subtitles.isEmpty else { return }
-        // Audio tracks often become available a little before subtitle tracks.
-        // Do not stop the retry loop merely because audio arrived first.
-        didLoadEmbeddedTracks = !subtitles.isEmpty || embeddedTrackRefreshAttempts >= 30
+        mediaPlayer.currentVideoSubTitleIndex = -1
+        guard !audio.isEmpty else { return }
+        didLoadEmbeddedTracks = true
         controls?.updateEmbeddedTracks(
             audio: audio,
-            subtitles: subtitles,
+            subtitles: [],
             selectedAudio: String(mediaPlayer.currentAudioTrackIndex),
-            selectedSubtitle: mediaPlayer.currentVideoSubTitleIndex >= 0
-                ? String(mediaPlayer.currentVideoSubTitleIndex)
-                : nil
+            selectedSubtitle: nil
         )
     }
 
@@ -1576,11 +1507,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         controls?.selectedAudioTrackID = id
     }
 
-    func selectSubtitleTrack(id: String?) {
-        let index = id.flatMap(Int32.init) ?? -1
-        mediaPlayer.currentVideoSubTitleIndex = index
-        controls?.selectedSubtitleTrackID = index >= 0 ? String(index) : nil
-        if index >= 0 { applyCurrentSubtitleStyleToRenderer() }
+    func selectSubtitleTrack(id _: String?) {
+        mediaPlayer.currentVideoSubTitleIndex = -1
+        controls?.selectedSubtitleTrackID = nil
     }
 
     func applySubtitleStyle(fontSize: Double, fontName: String, color: Int, background: Bool, shadow: Bool, margin: Int, delay: Double) {
@@ -2086,8 +2015,6 @@ private struct PlayerQuickSettingsPopover: View {
     let subtitleFileName: String?
     let onRateChange: (Float) -> Void
     let onAudioTrackChange: (String) -> Void
-    let onSubtitleTrackChange: (String) -> Void
-    let onChooseSubtitleFile: () -> Void
     let onDisableSubtitles: () -> Void
     let onAdvanced: () -> Void
     @State private var page: QuickSettingsPage = .main
@@ -2156,14 +2083,9 @@ private struct PlayerQuickSettingsPopover: View {
             }
         case .subtitles:
             choice("None", selected: subtitleFileName == nil && selectedSubtitleTrackID == nil, action: onDisableSubtitles)
-            ForEach(subtitleTracks) { track in
-                choice(track.title, selected: subtitleFileName == nil && selectedSubtitleTrackID == track.id) { onSubtitleTrackChange(track.id) }
+            if let subtitleFileName {
+                choice(subtitleFileName, selected: true, action: {})
             }
-            choice(
-                subtitleFileName ?? "Choose from Files",
-                selected: subtitleFileName != nil,
-                action: onChooseSubtitleFile
-            )
         case .main:
             EmptyView()
         }
@@ -2217,6 +2139,7 @@ private struct PlayerAdvancedSettingsSheet: View {
     @Binding var subtitleFont: PlayerSubtitleFont
     @Binding var brightness: Double
     let mediaTitle: String
+    let mediaContext: SubtitleMediaContext?
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
     let isFillMode: Bool
@@ -2287,7 +2210,11 @@ private struct PlayerAdvancedSettingsSheet: View {
         }
         .preferredColorScheme(.dark)
         .fullScreenCover(isPresented: $showSubtitleSearch) {
-            SubtitleSearchView(mediaTitle: mediaTitle, onSubtitleSelected: onSubtitleSelected)
+            SubtitleSearchView(
+                mediaTitle: mediaTitle,
+                mediaContext: mediaContext,
+                onSubtitleSelected: onSubtitleSelected
+            )
         }
     }
 
@@ -3161,6 +3088,7 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
 struct RoutedVideoPlayerView: View {
     let url: URL
     let title: String
+    var subtitleMediaContext: SubtitleMediaContext? = nil
     var resumeAt: Double = 0
     var linkId: UUID? = nil
     var httpHeaders: [String: String]? = nil
@@ -3168,14 +3096,15 @@ struct RoutedVideoPlayerView: View {
     var onSelectEpisode: ((String) -> Void)? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
-    init(url: URL, title: String, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+    init(url: URL, title: String, subtitleMediaContext: SubtitleMediaContext? = nil, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
+        self.subtitleMediaContext = subtitleMediaContext
         self.httpHeaders = httpHeaders; self.onProgress = onProgress
         self.episodeOptions = episodeOptions; self.onSelectEpisode = onSelectEpisode
     }
 
     var body: some View {
-        VideoPlayerView(url: url, title: title, resumeAt: resumeAt, linkId: linkId, httpHeaders: httpHeaders, episodeOptions: episodeOptions, onSelectEpisode: onSelectEpisode, onProgress: onProgress)
+        VideoPlayerView(url: url, title: title, subtitleMediaContext: subtitleMediaContext, resumeAt: resumeAt, linkId: linkId, httpHeaders: httpHeaders, episodeOptions: episodeOptions, onSelectEpisode: onSelectEpisode, onProgress: onProgress)
     }
 
 }

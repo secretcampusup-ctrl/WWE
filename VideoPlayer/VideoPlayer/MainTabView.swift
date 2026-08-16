@@ -25,39 +25,43 @@ struct MainTabView: View {
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
 
-            dockContent
+            dockSurface
+                .padding(.horizontal, dockIsCompact ? 0 : 34)
+                .frame(maxWidth: .infinity, alignment: dockIsCompact ? .leading : .center)
+                .padding(.leading, dockIsCompact ? 18 : 0)
+                .padding(.bottom, -16)
+                .animation(.spring(response: 0.42, dampingFraction: 0.76), value: dockIsCompact)
+        }
+        .background {
+            DockScrollGestureBridge { compact in setDockCompact(compact) }
+                .frame(width: 1, height: 1)
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .tint(AppPalette.accent)
+        .preferredColorScheme(.dark)
+    }
+
+    private var dockSurface: some View {
+        dockContent
             .padding(4)
             .background {
                 ZStack {
-                    // Keep the content visibly passing behind the dock while
-                    // retaining enough blur for the icons to stay readable.
-                    Capsule()
-                        .fill(.ultraThinMaterial)
-                        .opacity(0.56)
-                    Capsule()
-                        .fill(Color.black.opacity(0.16))
+                    Capsule().fill(.ultraThinMaterial).opacity(0.68)
+                    Capsule().fill(Color.black.opacity(0.13))
                 }
             }
             .overlay {
                 Capsule()
                     .stroke(
                         LinearGradient(
-                            colors: [Color.white.opacity(0.28), Color.white.opacity(0.08)],
+                            colors: [Color.white.opacity(0.34), Color.white.opacity(0.09)],
                             startPoint: .top,
                             endPoint: .bottom
                         ),
-                        lineWidth: 0.8
+                        lineWidth: 0.9
                     )
             }
-            .shadow(color: .black.opacity(0.26), radius: 14, y: 6)
-            .padding(.horizontal, dockIsCompact ? 0 : 34)
-            .padding(.bottom, -16)
-            .animation(.spring(response: 0.42, dampingFraction: 0.76), value: dockIsCompact)
-        }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
-        .simultaneousGesture(dockScrollGesture)
-        .tint(AppPalette.accent)
-        .preferredColorScheme(.dark)
+            .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
     }
 
     @ViewBuilder
@@ -68,19 +72,19 @@ struct MainTabView: View {
                 setDockCompact(false)
             } label: {
                 Image(systemName: selectedDockIcon)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 38)
+                    .font(.system(size: 23, weight: .medium))
+                    .foregroundStyle(AppPalette.accent)
+                    .frame(width: 52, height: 48)
                     .background(
                         LinearGradient(
-                            colors: [Color.white.opacity(0.12), AppPalette.accent.opacity(0.07)],
+                            colors: [Color.white.opacity(0.16), AppPalette.accent.opacity(0.14)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
                         in: Capsule()
                     )
-                    .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.6))
-                    .shadow(color: AppPalette.accent.opacity(0.42), radius: 6)
+                    .overlay(Capsule().stroke(AppPalette.accent.opacity(0.45), lineWidth: 0.8))
+                    .shadow(color: AppPalette.accent.opacity(0.36), radius: 7)
                     .matchedGeometryEffect(id: "dock-icon-\(selectedTab)", in: dockSelection)
             }
             .buttonStyle(.plain)
@@ -105,16 +109,6 @@ struct MainTabView: View {
         ["Home", "Content", "Discover", "Settings"][min(3, max(0, selectedTab))]
     }
 
-    private var dockScrollGesture: some Gesture {
-        DragGesture(minimumDistance: 14, coordinateSpace: .global)
-            .onChanged { value in
-                let horizontal = abs(value.translation.width)
-                let vertical = abs(value.translation.height)
-                guard vertical > horizontal * 1.15, vertical > 20 else { return }
-                setDockCompact(value.translation.height < 0)
-            }
-    }
-
     private func setDockCompact(_ compact: Bool) {
         guard dockIsCompact != compact else { return }
         withAnimation(.spring(response: 0.42, dampingFraction: 0.76)) {
@@ -131,42 +125,140 @@ struct MainTabView: View {
                 selectedTab = tab
             }
         } label: {
-            VStack(spacing: 2) {
-                Image(systemName: icon)
-                    .font(.system(size: 14.5, weight: .semibold))
-                    .scaleEffect(isSelected ? 1.13 : 1)
-                    .offset(y: isSelected ? -1.5 : 0)
-                    .shadow(
-                        color: isSelected ? AppPalette.accent.opacity(0.5) : .clear,
-                        radius: 5
-                    )
-                    .matchedGeometryEffect(id: "dock-icon-\(tab)", in: dockSelection)
-                Text(title)
-                    .font(.system(size: 7.5, weight: .semibold))
-                    .lineLimit(1)
-                    .opacity(isSelected ? 1 : 0.78)
-            }
-            .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.48))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 5.5)
-            .background {
-                if isSelected {
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.12), AppPalette.accent.opacity(0.07)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
+            Image(systemName: icon)
+                .font(.system(size: 23, weight: .medium))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(isSelected ? AppPalette.accent : Color.white.opacity(0.9))
+                .scaleEffect(isSelected ? 1.08 : 1)
+                .shadow(color: isSelected ? AppPalette.accent.opacity(0.42) : .clear, radius: 6)
+                .matchedGeometryEffect(id: "dock-icon-\(tab)", in: dockSelection)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background {
+                    if isSelected {
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.17), AppPalette.accent.opacity(0.13)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
                             )
-                        )
-                        .matchedGeometryEffect(id: "dock", in: dockSelection)
-                        .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.6))
+                            .matchedGeometryEffect(id: "dock", in: dockSelection)
+                            .overlay(Capsule().stroke(AppPalette.accent.opacity(0.34), lineWidth: 0.7))
+                    }
                 }
-            }
-            .contentShape(Capsule())
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .animation(.spring(response: 0.38, dampingFraction: 0.7), value: isSelected)
+        .accessibilityLabel(title)
+    }
+}
+
+/// Watches vertical pan gestures at the window level so nested SwiftUI
+/// ScrollViews in every tab produce the same compact/expanded dock behavior.
+private struct DockScrollGestureBridge: UIViewRepresentable {
+    let onDirectionChange: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onDirectionChange: onDirectionChange) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        DispatchQueue.main.async { context.coordinator.attach(from: view) }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onDirectionChange = onDirectionChange
+        if !context.coordinator.isAttached {
+            DispatchQueue.main.async { context.coordinator.attach(from: uiView) }
+        }
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onDirectionChange: (Bool) -> Void
+        private weak var hostView: UIView?
+        private var recognizer: UIPanGestureRecognizer?
+        private var didTrigger = false
+        private var attachAttempts = 0
+        private var gestureStartedInScrollView = false
+        var isAttached: Bool { recognizer?.view != nil }
+
+        init(onDirectionChange: @escaping (Bool) -> Void) {
+            self.onDirectionChange = onDirectionChange
+        }
+
+        func attach(from view: UIView) {
+            guard recognizer == nil else { return }
+            guard let host = view.window else {
+                guard attachAttempts < 20 else { return }
+                attachAttempts += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak view] in
+                    guard let self, let view else { return }
+                    self.attach(from: view)
+                }
+                return
+            }
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            pan.cancelsTouchesInView = false
+            pan.delaysTouchesBegan = false
+            pan.delaysTouchesEnded = false
+            pan.delegate = self
+            host.addGestureRecognizer(pan)
+            hostView = host
+            recognizer = pan
+            attachAttempts = 0
+        }
+
+        func detach() {
+            if let recognizer { hostView?.removeGestureRecognizer(recognizer) }
+            recognizer = nil
+            hostView = nil
+            attachAttempts = 0
+        }
+
+        @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                didTrigger = false
+                gestureStartedInScrollView = isInsideScrollView(gesture)
+            case .changed where !didTrigger:
+                guard gestureStartedInScrollView else { return }
+                let translation = gesture.translation(in: gesture.view)
+                let velocity = gesture.velocity(in: gesture.view)
+                guard abs(translation.y) > 18,
+                      abs(velocity.y) > abs(velocity.x) * 1.1 else { return }
+                didTrigger = true
+                onDirectionChange(velocity.y < 0)
+            case .ended, .cancelled, .failed:
+                didTrigger = false
+                gestureStartedInScrollView = false
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool { true }
+
+        private func isInsideScrollView(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let hostView else { return false }
+            let point = gesture.location(in: hostView)
+            var view = hostView.hitTest(point, with: nil)
+            while let current = view {
+                if current is UIScrollView { return true }
+                view = current.superview
+            }
+            return false
+        }
     }
 }
 

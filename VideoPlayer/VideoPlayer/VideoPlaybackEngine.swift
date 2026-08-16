@@ -408,18 +408,13 @@ final class VideoPlaybackEngine: ObservableObject {
         }
     }
 
-    func selectSubtitleTrack(id: String?) {
+    func selectSubtitleTrack(id _: String?) {
         guard let item = player.currentItem,
               let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else { return }
         legibleOutput?.suppressesPlayerRendering = false
         renderedSubtitleText = nil
-        if let id, let option = subtitleOptionsByID[id] {
-            item.select(option, in: group)
-            selectedSubtitleTrackID = id
-        } else {
-            item.select(nil, in: group)
-            selectedSubtitleTrackID = nil
-        }
+        item.select(nil, in: group)
+        selectedSubtitleTrackID = nil
     }
 
     /// Applies styling to AVFoundation-rendered embedded captions immediately.
@@ -454,18 +449,13 @@ final class VideoPlaybackEngine: ObservableObject {
         guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
             subtitleTracks = []; subtitleOptionsByID = [:]; selectedSubtitleTrackID = nil; return
         }
-        var map: [String: AVMediaSelectionOption] = [:]
-        subtitleTracks = group.options.enumerated().map { index, option in
-            let id = "subtitle-\(index)"; map[id] = option
-            return PlayerSubtitleTrackOption(
-                id: id,
-                title: option.displayName,
-                languageCode: option.locale?.languageCode
-            )
-        }
-        subtitleOptionsByID = map
-        if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
-           let entry = map.first(where: { $0.value === selected }) { selectedSubtitleTrackID = entry.key }
+        // Embedded captions are intentionally disabled. Downloaded subtitles
+        // are rendered by the fixed SwiftUI overlay instead of AVPlayer.
+        item.select(nil, in: group)
+        subtitleTracks = []
+        subtitleOptionsByID = [:]
+        selectedSubtitleTrackID = nil
+        renderedSubtitleText = nil
     }
 
     func setRate(_ rate: Float) {
@@ -555,7 +545,7 @@ final class VideoPlaybackEngine: ObservableObject {
         // Hardware-accelerated pipeline (VideoToolbox decode + GPU layer composition).
         player.automaticallyWaitsToMinimizeStalling = true
         player.allowsExternalPlayback = true
-        player.appliesMediaSelectionCriteriaAutomatically = true
+        player.appliesMediaSelectionCriteriaAutomatically = false
         player.actionAtItemEnd = .pause
 
         // Prevent silent switch from muting unexpectedly during video.
@@ -604,12 +594,6 @@ final class VideoPlaybackEngine: ObservableObject {
 
     private func makePlayerItem(asset: AVURLAsset) -> AVPlayerItem {
         let item = AVPlayerItem(asset: asset)
-
-        let output = AVPlayerItemLegibleOutput()
-        output.suppressesPlayerRendering = false
-        output.setDelegate(legibleTextReceiver, queue: .main)
-        item.add(output)
-        legibleOutput = output
 
         // Keep several minutes ready ahead for smooth seeking and 4K playback.
         item.preferredForwardBufferDuration = startupForwardBufferSeconds

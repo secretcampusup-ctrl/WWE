@@ -11,6 +11,8 @@ struct SubtitleSearchResult: Identifiable, Sendable {
     let language: String
     let format: String
     let hearingImpaired: Bool
+    let season: Int?
+    let episode: Int?
     let directURL: URL?
     let nID: String?
 }
@@ -35,21 +37,35 @@ enum SubDLSubtitleService {
     static func search(
         query: String,
         mediaTitle: String,
+        mediaContext: SubtitleMediaContext? = nil,
         languageCode: String?
     ) async throws -> [SubtitleSearchResult] {
         guard var components = URLComponents(string: "https://api.subdl.com/api/v2/subtitles/search") else {
             throw SubtitleSearchError.invalidResponse
         }
         var items = [
-            URLQueryItem(name: "film_name", value: query),
             URLQueryItem(name: "unpack", value: "1"),
             URLQueryItem(name: "subs_per_page", value: "30")
         ]
+        let usesMetadata = mediaContext.map {
+            normalizedIdentity(query) == normalizedIdentity($0.title)
+        } ?? false
+        let parsedEpisode = VideoTitleFormatter.episodeComponents(from: mediaTitle)
+        let requestedSeason = usesMetadata ? mediaContext?.season : parsedEpisode?.season
+        let requestedEpisode = usesMetadata ? mediaContext?.episode : parsedEpisode?.episode
+        if usesMetadata, let context = mediaContext, let tmdbID = context.tmdbID {
+            items.append(URLQueryItem(name: "tmdb_id", value: String(tmdbID)))
+            items.append(URLQueryItem(name: "type", value: context.mediaType == "tv" || context.isEpisode ? "tv" : "movie"))
+        } else {
+            items.append(URLQueryItem(name: "film_name", value: query))
+        }
         if let languageCode { items.append(URLQueryItem(name: "languages", value: languageCode)) }
-        if let episode = VideoTitleFormatter.episodeComponents(from: mediaTitle) {
-            items.append(URLQueryItem(name: "type", value: "tv"))
-            items.append(URLQueryItem(name: "season", value: String(episode.season)))
-            items.append(URLQueryItem(name: "episode", value: String(episode.episode)))
+        if let season = requestedSeason, let episode = requestedEpisode {
+            if !usesMetadata || mediaContext?.tmdbID == nil {
+                items.append(URLQueryItem(name: "type", value: "tv"))
+            }
+            items.append(URLQueryItem(name: "season", value: String(season)))
+            items.append(URLQueryItem(name: "episode", value: String(episode)))
         }
         components.queryItems = items
         guard let url = components.url else { throw SubtitleSearchError.invalidResponse }
@@ -73,12 +89,21 @@ enum SubDLSubtitleService {
         }
 
         let subtitles = object["subtitles"] as? [[String: Any]] ?? []
-        return subtitles.flatMap { subtitle -> [SubtitleSearchResult] in
+        let flattened = subtitles.flatMap { subtitle -> [SubtitleSearchResult] in
             if let files = subtitle["unpack_files"] as? [[String: Any]], !files.isEmpty {
                 return files.compactMap { result(from: $0, parent: subtitle) }
             }
             return result(from: subtitle, parent: nil).map { [$0] } ?? []
         }
+        if let requestedEpisode {
+            let exact = flattened.filter { result in
+                guard result.episode == requestedEpisode else { return false }
+                guard let requestedSeason, let resultSeason = result.season, resultSeason > 0 else { return true }
+                return resultSeason == requestedSeason
+            }
+            return exact
+        }
+        return flattened
     }
 
     static func download(_ result: SubtitleSearchResult) async throws -> DownloadedSubtitle {
@@ -110,13 +135,20 @@ enum SubDLSubtitleService {
         return DownloadedSubtitle(data: data, fileName: fileName)
     }
 
-    static func automaticDownload(mediaTitle: String) async throws -> DownloadedSubtitle? {
+    static func automaticDownload(
+        mediaTitle: String,
+        mediaContext: SubtitleMediaContext?
+    ) async throws -> DownloadedSubtitle? {
         let languageCodes = SubtitlePreferences.searchLanguageCodes
-        let cacheKey = mediaTitle + "|" + languageCodes.joined(separator: ",")
+        let metadataIdentity = mediaContext.map {
+            "tmdb:\($0.tmdbID ?? 0)|\($0.mediaType ?? "")|s\($0.season ?? 0)e\($0.episode ?? 0)"
+        } ?? mediaTitle
+        let cacheKey = metadataIdentity + "|" + languageCodes.joined(separator: ",")
         if let cached = AutomaticSubtitleCache.load(key: cacheKey) { return cached }
         let results = try await search(
-            query: VideoTitleFormatter.title(from: mediaTitle),
+            query: mediaContext?.title ?? VideoTitleFormatter.title(from: mediaTitle),
             mediaTitle: mediaTitle,
+            mediaContext: mediaContext,
             languageCode: languageCodes.joined(separator: ",")
         )
         guard !results.isEmpty else { return nil }
@@ -180,12 +212,18 @@ enum SubDLSubtitleService {
             ?? (title as NSString).pathExtension.lowercased()
         let normalizedFormat = format.lowercased()
         guard ["srt", "vtt", "ass", "ssa"].contains(normalizedFormat) else { return nil }
+        let childSeason = integer(value["season"])
+        let childEpisode = integer(value["episode"])
+        let parentSeason = integer(parent?["season"])
+        let parentEpisode = integer(parent?["episode"])
         let hearingImpaired = (value["hi"] as? Bool) ?? (parent?["hi"] as? Bool) ?? false
         return SubtitleSearchResult(
             title: title,
             language: language,
             format: normalizedFormat,
             hearingImpaired: hearingImpaired,
+            season: (childSeason ?? 0) > 0 ? childSeason : parentSeason,
+            episode: (childEpisode ?? 0) > 0 ? childEpisode : parentEpisode,
             directURL: directURL,
             nID: nID
         )
@@ -195,6 +233,20 @@ enum SubDLSubtitleService {
         if let value = value as? String, !value.isEmpty { return value }
         if let value = value as? NSNumber { return value.stringValue }
         return nil
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String { return Int(value) }
+        return nil
+    }
+
+    private static func normalizedIdentity(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -248,6 +300,7 @@ struct SubtitleSearchView: View {
 
     @Environment(\.dismiss) private var dismiss
     let mediaTitle: String
+    let mediaContext: SubtitleMediaContext?
     let onSubtitleSelected: (DownloadedSubtitle) -> Void
 
     @State private var query: String
@@ -264,10 +317,15 @@ struct SubtitleSearchView: View {
         ] + SubtitleLanguageOption.supported.map { SearchLanguage(code: $0.code, title: $0.title) }
     }
 
-    init(mediaTitle: String, onSubtitleSelected: @escaping (DownloadedSubtitle) -> Void) {
+    init(
+        mediaTitle: String,
+        mediaContext: SubtitleMediaContext? = nil,
+        onSubtitleSelected: @escaping (DownloadedSubtitle) -> Void
+    ) {
         self.mediaTitle = mediaTitle
+        self.mediaContext = mediaContext
         self.onSubtitleSelected = onSubtitleSelected
-        _query = State(initialValue: VideoTitleFormatter.title(from: mediaTitle))
+        _query = State(initialValue: mediaContext?.title ?? VideoTitleFormatter.title(from: mediaTitle))
     }
 
     var body: some View {
@@ -322,6 +380,20 @@ struct SubtitleSearchView: View {
             }
             .padding(.horizontal, 14).frame(height: 48)
             .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 15))
+
+            if let context = mediaContext {
+                HStack(spacing: 7) {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(AppPalette.accent)
+                    Text("TMDB · \(context.title)")
+                    if let season = context.season, let episode = context.episode {
+                        Text("· S\(season) E\(episode)")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(1)
+            }
 
             HStack(spacing: 10) {
                 Menu {
@@ -409,6 +481,7 @@ struct SubtitleSearchView: View {
                 results = try await SubDLSubtitleService.search(
                     query: cleaned,
                     mediaTitle: mediaTitle,
+                    mediaContext: mediaContext,
                     languageCode: searchLanguageCode
                 )
                 if results.isEmpty { errorMessage = "No subtitles found for this search." }
