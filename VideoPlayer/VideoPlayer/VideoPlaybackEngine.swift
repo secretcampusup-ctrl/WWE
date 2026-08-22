@@ -102,6 +102,7 @@ final class VideoPlaybackEngine: ObservableObject {
     @Published private(set) var currentTimeFormatted = "00:00"
     @Published private(set) var durationFormatted = "00:00"
     @Published private(set) var bufferPercent = 0
+    @Published private(set) var networkSpeedBytesPerSecond: Double = 0
     @Published private(set) var resolutionLabel = "—"
     @Published private(set) var resolutionWidth: Int = 0
     @Published private(set) var resolutionHeight: Int = 0
@@ -221,6 +222,7 @@ final class VideoPlaybackEngine: ObservableObject {
         didApplyResume = false
         progress = 0
         bufferPercent = 0
+        networkSpeedBytesPerSecond = 0
         currentSeconds = 0
         durationSeconds = 0
         loadGeneration &+= 1
@@ -301,6 +303,7 @@ final class VideoPlaybackEngine: ObservableObject {
         player.pause()
         isPlaying = false
         isBuffering = false
+        networkSpeedBytesPerSecond = 0
         tearDownItemObservers()
         removeTimeObserver()
         player.currentItem?.cancelPendingSeeks()
@@ -788,15 +791,27 @@ final class VideoPlaybackEngine: ObservableObject {
         itemLoadedRangesObserver = item.observe(\.loadedTimeRanges, options: [.new]) { [weak self] item, _ in
             // Compute buffer % off main, publish on main.
             let duration = CMTimeGetSeconds(item.duration)
-            guard duration.isFinite, duration > 0 else { return }
             let end = item.loadedTimeRanges
                 .map(\.timeRangeValue)
                 .map { CMTimeGetSeconds($0.start) + CMTimeGetSeconds($0.duration) }
                 .filter(\.isFinite)
                 .max() ?? 0
-            let percent = Int(min(100, max(0, (end / duration) * 100)))
+            let percent: Int? = duration.isFinite && duration > 0
+                ? Int(min(100, max(0, (end / duration) * 100)))
+                : nil
+            let measuredSpeed: Double? = item.accessLog()?.events.last.map { event in
+                let observedBytesPerSecond = max(0, event.observedBitrate / 8)
+                let averageBytesPerSecond = event.transferDuration > 0
+                    ? Double(event.numberOfBytesTransferred) / event.transferDuration
+                    : 0
+                return observedBytesPerSecond > 0
+                    ? observedBytesPerSecond
+                    : max(0, averageBytesPerSecond)
+            }
             Task { @MainActor [weak self] in
-                self?.bufferPercent = percent
+                guard let self else { return }
+                if let percent { self.bufferPercent = percent }
+                if let measuredSpeed { self.networkSpeedBytesPerSecond = measuredSpeed }
             }
         }
 

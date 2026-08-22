@@ -63,6 +63,7 @@ struct VideoPlayerView: View {
     @State private var didResetNetworkAfterPlayback = false
     @State private var isPlayerLandscape = false
     @State private var isClosingPlayer = false
+    @State private var isMuted = false
 
     // Keep formats Apple handles well on AVPlayer; route MKV and other extended
     // containers through MobileVLCKit.
@@ -153,83 +154,25 @@ struct VideoPlayerView: View {
                 .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
 
-            // Chrome only — empty regions do NOT intercept touches (no full-screen hit target).
-            if usesMKVPlayer, showControls {
-                VStack {
-                    HStack {
-                        Button { closePlayer() } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundColor(.white)
-                                .frame(width: 40, height: 40)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
-                        PlayerQualityBadge(label: mkvQualityLabel)
-                        Spacer()
-                        playerOrientationButton
-                        Button {
-                            mkvFillMode.toggle()
-                            scheduleAutoHide()
-                        } label: {
-                            Image(systemName: mkvFillMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .frame(width: 40, height: 40)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
+            // Concept 05 — Edge Controls. AVPlayer and VLC now share one chrome.
+            if showControls {
+                ZStack {
+                    VStack(spacing: 0) {
+                        topOverlay
+                        Spacer(minLength: 0).allowsHitTesting(false)
+                        bottomOverlay
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
-                    Spacer()
-                    VStack(spacing: 12) {
-                        cinematicMetadataPanel
-                            .padding(.bottom, 12)
-                        InstantSeekBar(
-                            progress: isScrubbing ? scrubProgress : mkvControls.displayProgress,
-                            bufferProgress: mkvControls.displayProgress,
-                            currentLabel: isScrubbing
-                                ? mkvControls.formattedTime(forFraction: scrubProgress)
-                                : mkvControls.currentTimeFormatted,
-                            durationLabel: negativeRemaining(current: isScrubbing ? scrubProgress * mkvControls.durationSeconds : mkvControls.currentSeconds, duration: mkvControls.durationSeconds),
-                            chapters: playbackChapters,
-                            onSeek: { value in
-                                mkvControls.seek(to: value)
-                                isScrubbing = false
-                                scheduleAutoHide()
-                            },
-                            onScrubbing: { value, active in
-                                isScrubbing = active
-                                scrubProgress = value
-                            }
-                        )
-                        .frame(height: SeekBarContainerView.preferredHeight)
-                    }
-                    .padding(.horizontal, 22)
-                    .padding(.bottom, 26)
+                    edgeControlsOverlay
                 }
-            } else if showControls {
-                VStack(spacing: 0) {
-                    topOverlay
-                    Spacer(minLength: 0)
-                        .allowsHitTesting(false)
-                    bottomOverlay
-                }
-
             }
 
-            // Intentionally outside the auto-hidden chrome: it remains available
-            // throughout the intro window even after every other control fades.
-            if showControls && !playbackDidEnd {
-                CircularPlaybackButton(
-                    progress: usesMKVPlayer ? mkvControls.displayProgress : engine.progress,
-                    isPlaying: usesMKVPlayer ? mkvControls.isPlaying : engine.isPlaying,
-                    isLoading: usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering,
-                    action: {
-                        if usesMKVPlayer { mkvControls.togglePlayback() } else { engine.togglePlayPause() }
-                        scheduleAutoHide()
-                    }
+            if !playbackDidEnd {
+                PlayerLoadingReadout(
+                    isLoading: playbackIsBuffering,
+                    bytesPerSecond: usesMKVPlayer
+                        ? mkvControls.networkSpeedBytesPerSecond
+                        : engine.networkSpeedBytesPerSecond
                 )
-                .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
 
             if shouldShowSkipIntro && !playbackDidEnd {
@@ -386,6 +329,16 @@ struct VideoPlayerView: View {
             guard usesMKVPlayer else { return }
             playbackRunningChanged(playing)
         }
+        .onChange(of: engine.isBuffering) { buffering in
+            guard !usesMKVPlayer, buffering else { return }
+            hideTask?.cancel()
+            showControls = true
+        }
+        .onChange(of: mkvControls.isBuffering) { buffering in
+            guard usesMKVPlayer, buffering else { return }
+            hideTask?.cancel()
+            showControls = true
+        }
         .onChange(of: showControls) { visible in
             if !visible {
                 showQuickSettings = false
@@ -522,7 +475,11 @@ struct VideoPlayerView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
 
-            PlayerQualityBadge(tier: engine.resolutionTier)
+            PlayerQualityBadge(
+                width: usesMKVPlayer ? mkvControls.videoWidth : engine.resolutionWidth,
+                height: usesMKVPlayer ? mkvControls.videoHeight : engine.resolutionHeight,
+                fallbackLabel: usesMKVPlayer ? mkvQualityLabel : engine.resolutionTier.badgeText
+            )
 
             Spacer(minLength: 0)
 
@@ -530,12 +487,16 @@ struct VideoPlayerView: View {
 
             Button {
                 withAnimation(.easeInOut(duration: 0.28)) {
-                    isFillMode.toggle()
-                    fillModeToken += 1
+                    if usesMKVPlayer {
+                        mkvFillMode.toggle()
+                    } else {
+                        isFillMode.toggle()
+                        fillModeToken += 1
+                    }
                 }
                 scheduleAutoHide()
             } label: {
-                Image(systemName: isFillMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                Image(systemName: (usesMKVPlayer ? mkvFillMode : isFillMode) ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 40, height: 40)
@@ -567,17 +528,21 @@ struct VideoPlayerView: View {
 
             // Timeline
             InstantSeekBar(
-                progress: isScrubbing ? scrubProgress : engine.progress,
-                bufferProgress: Double(engine.bufferPercent) / 100,
+                progress: isScrubbing ? scrubProgress : (usesMKVPlayer ? mkvControls.displayProgress : engine.progress),
+                bufferProgress: usesMKVPlayer ? mkvControls.displayProgress : Double(engine.bufferPercent) / 100,
                 currentLabel: isScrubbing
-                    ? engine.formattedTime(forFraction: scrubProgress)
-                    : engine.currentTimeFormatted,
-                durationLabel: negativeRemaining(current: isScrubbing ? scrubProgress * engine.durationSeconds : engine.currentSeconds, duration: engine.durationSeconds),
+                    ? (usesMKVPlayer ? mkvControls.formattedTime(forFraction: scrubProgress) : engine.formattedTime(forFraction: scrubProgress))
+                    : (usesMKVPlayer ? mkvControls.currentTimeFormatted : engine.currentTimeFormatted),
+                durationLabel: negativeRemaining(
+                    current: isScrubbing ? scrubProgress * playbackDurationSeconds : currentPlaybackSeconds,
+                    duration: playbackDurationSeconds
+                ),
                 chapters: playbackChapters,
                 onSeek: { value in
                     scrubProgress = value
                     isScrubbing = false
-                    engine.seek(to: value)
+                    if usesMKVPlayer { mkvControls.seek(to: value) }
+                    else { engine.seek(to: value) }
                     scheduleAutoHide()
                 },
                 onScrubbing: { value, active in
@@ -675,6 +640,56 @@ struct VideoPlayerView: View {
                 - proxy.safeAreaInsets.trailing
                 - 64
         )
+    }
+
+    private var edgeControlsOverlay: some View {
+        HStack {
+            VStack(spacing: 10) {
+                edgeControlButton(isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+                    isMuted.toggle()
+                    if usesMKVPlayer { mkvControls.setMuted(isMuted) }
+                    else { engine.player.isMuted = isMuted }
+                    scheduleAutoHide()
+                }
+                edgeControlButton("sun.max.fill") {
+                    let next = screenBrightness >= 0.95 ? 0.25 : min(1, screenBrightness + 0.18)
+                    screenBrightness = next
+                    UIScreen.main.brightness = CGFloat(next)
+                    scheduleAutoHide()
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            VStack(spacing: 10) {
+                edgeControlButton("captions.bubble.fill") {
+                    showQuickSettings = true
+                    hideTask?.cancel()
+                    hideTask = nil
+                }
+                edgeControlButton("gearshape.fill") {
+                    showPlaybackSettings = true
+                    hideTask?.cancel()
+                    hideTask = nil
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.bottom, 50)
+    }
+
+    private func edgeControlButton(_ systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 40, height: 40)
+                .background(Color.black.opacity(0.38), in: Circle())
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 0.8))
+                .shadow(color: .black.opacity(0.42), radius: 8, y: 3)
+        }
+        .buttonStyle(PremiumPressButtonStyle())
     }
 
     private func loadExternalSubtitle(data: Data, fileName: String) {
@@ -987,6 +1002,15 @@ struct VideoPlayerView: View {
             Spacer(minLength: 8)
             HStack(spacing: 3) {
                 Button {
+                    if usesMKVPlayer { mkvControls.togglePlayback() }
+                    else { engine.togglePlayPause() }
+                    scheduleAutoHide()
+                } label: {
+                    Image(systemName: playbackIsActuallyRunning ? "pause.fill" : "play.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .frame(width: 37, height: 37)
+                }
+                Button {
                     showQuickSettings = true
                     hideTask?.cancel()
                     hideTask = nil
@@ -1133,6 +1157,10 @@ struct VideoPlayerView: View {
         usesMKVPlayer ? mkvControls.isPlaying : engine.isPlaying
     }
 
+    private var playbackIsBuffering: Bool {
+        usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering
+    }
+
     private func playbackRunningChanged(_ running: Bool) {
         hideTask?.cancel()
         if running {
@@ -1199,6 +1227,7 @@ private final class MKVPlaybackControls: ObservableObject {
     @Published var resolutionLabel = "MKV"
     @Published var didReachEnd = false
     @Published var isBuffering = true
+    @Published var networkSpeedBytesPerSecond: Double = 0
     @Published var audioTracks: [PlayerAudioTrackOption] = []
     @Published var subtitleTracks: [PlayerSubtitleTrackOption] = []
     @Published var selectedAudioTrackID: String?
@@ -1245,6 +1274,9 @@ private final class MKVPlaybackControls: ObservableObject {
         videoWidth = Int(size.width)
         videoHeight = Int(size.height)
     }
+    func updateNetworkSpeed(_ bytesPerSecond: Double) {
+        networkSpeedBytesPerSecond = max(0, bytesPerSecond)
+    }
     func skip(by seconds: Int) {
         guard durationSeconds > 0 else { surface?.skip(by: seconds); return }
         let base = requestedProgress.map { $0 * durationSeconds } ?? currentSeconds
@@ -1255,6 +1287,7 @@ private final class MKVPlaybackControls: ObservableObject {
         surface?.seek(to: targetProgress)
     }
     func setRate(_ rate: Float) { surface?.setRate(rate) }
+    func setMuted(_ muted: Bool) { surface?.setMuted(muted) }
     func selectAudioTrack(id: String) { surface?.selectAudioTrack(id: id) }
     func selectSubtitleTrack(id: String?) { surface?.selectSubtitleTrack(id: id) }
     func stop() { surface?.stop() }
@@ -1351,6 +1384,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var didLoadEmbeddedTracks = false
     private var isStopped = true
     private var playbackGeneration: UInt64 = 0
+    private var lastStatisticsBytes: Double?
+    private var lastStatisticsSampleTime: TimeInterval?
     var onSingleTap: (() -> Void)?
     weak var controls: MKVPlaybackControls? {
         didSet { controls?.surface = self }
@@ -1424,6 +1459,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
         controls?.isBuffering = true
+        controls?.updateNetworkSpeed(0)
+        lastStatisticsBytes = nil
+        lastStatisticsSampleTime = nil
         embeddedTrackRefreshAttempts = 0
         didLoadEmbeddedTracks = false
         controls?.updateEmbeddedTracks(audio: [], subtitles: [], selectedAudio: nil, selectedSubtitle: nil)
@@ -1475,6 +1513,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             let currentTime = Double(self.mediaPlayer.time.intValue) / 1000
             let duration = Double(self.mediaPlayer.media?.length.intValue ?? 0) / 1000
             self.controls?.updateTime(current: currentTime, duration: duration)
+            self.updateNetworkTelemetry()
             let size = self.mediaPlayer.videoSize
             if size.width > 1, size.height > 1 {
                 self.controls?.resolutionLabel = "\(Int(size.width))×\(Int(size.height)) · \(self.sourceFormat)"
@@ -1495,6 +1534,46 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
                     self.refreshEmbeddedTracks()
                 }
             }
+        }
+    }
+
+    private func updateNetworkTelemetry() {
+        guard let media = mediaPlayer.media else { return }
+        var statistics: NSDictionary?
+        for name in ["statistics", "stats"] {
+            let selector = NSSelectorFromString(name)
+            guard media.responds(to: selector),
+                  let value = media.perform(selector)?.takeUnretainedValue() as? NSDictionary else { continue }
+            statistics = value
+            break
+        }
+        guard let statistics else { return }
+
+        func number(matching fragments: [String]) -> Double? {
+            for (rawKey, rawValue) in statistics {
+                let key = String(describing: rawKey).lowercased().replacingOccurrences(of: "_", with: "")
+                guard fragments.contains(where: { key.contains($0) }) else { continue }
+                if let value = rawValue as? NSNumber { return value.doubleValue }
+            }
+            return nil
+        }
+
+        let byteKeys = ["demuxreadbytes", "readbytes", "inputbytes"]
+        let now = ProcessInfo.processInfo.systemUptime
+        let totalBytes = number(matching: byteKeys)
+        if let totalBytes,
+           let previousBytes = lastStatisticsBytes,
+           let previousTime = lastStatisticsSampleTime,
+           now > previousTime,
+           totalBytes >= previousBytes {
+            controls?.updateNetworkSpeed((totalBytes - previousBytes) / (now - previousTime))
+        } else if let bitrate = number(matching: ["inputbitrate", "demuxbitrate"]), bitrate > 0 {
+            // libVLC exposes this field in kilobytes per second.
+            controls?.updateNetworkSpeed(bitrate * 1_000)
+        }
+        if let totalBytes {
+            lastStatisticsBytes = totalBytes
+            lastStatisticsSampleTime = now
         }
     }
 
@@ -1586,6 +1665,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         onSingleTap = nil
         controls?.isBuffering = false
         controls?.isPlaying = false
+        controls?.updateNetworkSpeed(0)
         if controls?.surface === self {
             controls?.surface = nil
         }
@@ -1749,6 +1829,10 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
 
     func setRate(_ rate: Float) { mediaPlayer.rate = rate }
 
+    func setMuted(_ muted: Bool) {
+        mediaPlayer.audio?.isMuted = muted
+    }
+
     func skip(by seconds: Int) {
         if seconds >= 0 {
             mediaPlayer.jumpForward(Int32(seconds))
@@ -1893,22 +1977,122 @@ private struct PlayerLoadingArc: View {
     }
 }
 
-private struct PlayerQualityBadge: View {
-    var tier: ResolutionTier? = nil
-    var label: String? = nil
+private struct PlayerLoadingReadout: View {
+    let isLoading: Bool
+    let bytesPerSecond: Double
+    @State private var percent = 3
+    @State private var isVisible = false
+    @State private var countingTask: Task<Void, Never>?
+
+    private var speedText: String {
+        let speed = max(0, bytesPerSecond)
+        if speed >= 1_000_000 { return String(format: "%.1f MB/s", speed / 1_000_000) }
+        if speed >= 1_000 { return String(format: "%.0f KB/s", speed / 1_000) }
+        return "0 KB/s"
+    }
 
     var body: some View {
-        Text(label ?? tier?.badgeText ?? "HD")
-            .font(.system(size: 10, weight: .black, design: .rounded))
-            .foregroundColor(Color.black.opacity(0.88))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                LinearGradient(colors: [Color(red: 1, green: 0.86, blue: 0.25), .orange], startPoint: .topLeading, endPoint: .bottomTrailing),
-                in: Capsule()
-            )
-            .overlay(Capsule().stroke(Color.white.opacity(0.3), lineWidth: 0.5))
-            .shadow(color: .orange.opacity(0.25), radius: 6)
+        HStack(spacing: 14) {
+            Text(speedText)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .monospacedDigit()
+
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(AppPalette.gradient)
+                .frame(width: 7, height: 7)
+                .rotationEffect(.degrees(45))
+                .shadow(color: AppPalette.accent.opacity(0.75), radius: 5)
+
+            Text("\(percent)%")
+                .font(.system(size: 17, weight: .heavy, design: .rounded))
+                .monospacedDigit()
+        }
+        .foregroundColor(.white)
+        .shadow(color: .black.opacity(0.95), radius: 4, y: 2)
+        .shadow(color: .black.opacity(0.72), radius: 12, y: 5)
+        .opacity(isVisible ? 1 : 0)
+        .scaleEffect(isVisible ? 1 : 0.94)
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.2), value: isVisible)
+        .onAppear { updateLoadingState(isLoading) }
+        .onChange(of: isLoading) { updateLoadingState($0) }
+        .onDisappear { countingTask?.cancel() }
+    }
+
+    private func updateLoadingState(_ loading: Bool) {
+        countingTask?.cancel()
+        if loading {
+            percent = 3
+            isVisible = true
+            countingTask = Task { @MainActor in
+                while !Task.isCancelled, percent < 96 {
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    guard !Task.isCancelled else { return }
+                    percent = min(96, percent + max(1, (100 - percent) / 10))
+                }
+            }
+        } else if isVisible {
+            percent = 100
+            countingTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 320_000_000)
+                guard !Task.isCancelled else { return }
+                isVisible = false
+            }
+        }
+    }
+}
+
+private struct PlayerQualityBadge: View {
+    let width: Int
+    let height: Int
+    var fallbackLabel: String? = nil
+
+    private var badge: (resolution: String, className: String) {
+        let longEdge = max(width, height)
+        let shortEdge = min(width, height)
+
+        if longEdge >= 7600 || shortEdge >= 4200 { return ("8K", "ULTRA HD") }
+        if longEdge >= 5000 || shortEdge >= 2800 { return ("5K", "ULTRA HD") }
+        if longEdge >= 3800 || shortEdge >= 2100 { return ("4K", "ULTRA HD") }
+        if longEdge >= 2500 || shortEdge >= 1400 { return ("1440p", "QUAD HD") }
+        if longEdge >= 1800 || shortEdge >= 1000 { return ("1080p", "FULL HD") }
+        if longEdge >= 1200 || shortEdge >= 700 { return ("720p", "HD") }
+        if longEdge >= 800 || shortEdge >= 460 { return ("480p", "HD") }
+        if longEdge > 0 || shortEdge > 0 { return ("360p", "HD") }
+
+        switch fallbackLabel?.uppercased() {
+        case "4K": return ("4K", "ULTRA HD")
+        case "FHD", "1080P": return ("1080p", "FULL HD")
+        case "1440P", "QHD": return ("1440p", "QUAD HD")
+        case "720P": return ("720p", "HD")
+        default: return ("HD", "VIDEO")
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(badge.resolution)
+                .font(.system(size: 11, weight: .black, design: .rounded))
+                .foregroundColor(.black)
+                .padding(.horizontal, 7)
+                .frame(height: 25)
+                .background(Color.white.opacity(0.82))
+
+            Text(badge.className)
+                .font(.system(size: 10, weight: .black, design: .rounded))
+                .tracking(0.35)
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .frame(height: 25)
+                .background(Color.black.opacity(0.58))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .stroke(Color.white.opacity(0.68), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.42), radius: 6, y: 2)
+        .accessibilityLabel("\(badge.resolution), \(badge.className)")
     }
 }
 
