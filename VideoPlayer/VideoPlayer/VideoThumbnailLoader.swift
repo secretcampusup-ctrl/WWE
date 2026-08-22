@@ -202,11 +202,10 @@ enum ThumbnailSizeTier: String {
 actor ThumbnailLoadGate {
     static let shared = ThumbnailLoadGate()
 
-    /// 1 = strictly sequential (one thumbnail fetch at a time, app-wide) — the
-    /// bounded-parallelism version (3) still wasn't enough given how many
-    /// screens fire requests independently, so this is now a hard one-at-a-time
-    /// queue across every section (PikPak, Offcloud, Recent, etc.).
-    private let maxConcurrent = 6
+    /// Two background image jobs keep the connection useful without letting
+    /// download + decode + WebP compression contend with a live scroll gesture.
+    /// The currently opened item uses its separate responsive path.
+    private let maxConcurrent = 2
     private var running = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -300,7 +299,9 @@ enum ThumbnailPipeline {
             VideoThumbnailLoader.clearMemoryCache()
         }
 
-        removeLegacyRasterCaches()
+        DispatchQueue.global(qos: .utility).async {
+            removeLegacyRasterCaches()
+        }
     }
 
     static func tier(for targetPointSize: CGSize, scale: CGFloat = UIScreen.main.scale) -> ThumbnailSizeTier {
@@ -398,6 +399,8 @@ enum VideoThumbnailLoader {
         cache.totalCostLimit = 8 * 1024 * 1024
         return cache
     }()
+    private static let diskTrimLock = NSLock()
+    private static var lastDiskTrimDate = Date.distantPast
 
 
     static func clearMemoryCache() {
@@ -588,10 +591,42 @@ enum VideoThumbnailLoader {
         }
     }
 
+    static func cachedImageAsync(for remote: URL) async -> UIImage? {
+        let key = cacheKey(for: remote)
+        if let memoryImage = memoryCache.object(forKey: key as NSString) { return memoryImage }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: diskCachedImage(forKey: key))
+            }
+        }
+    }
+
     /// Resize/compress/write without occupying the scrolling/UI executor.
     static func cacheImageInBackground(_ image: UIImage, forStableKey key: String) {
         DispatchQueue.global(qos: .utility).async {
             cacheImage(image, forStableKey: key)
+        }
+    }
+
+    /// Stores one decoded poster under all of its aliases in a single utility
+    /// job. This avoids launching several compression jobs at once and keeps
+    /// WebP resize/encode work completely away from live scrolling.
+    static func cacheImageInBackground(_ image: UIImage, forStableKeys keys: [String]) {
+        let uniqueKeys = Array(Set(keys))
+        DispatchQueue.global(qos: .utility).async {
+            for key in uniqueKeys {
+                cacheImage(image, forStableKey: key)
+            }
+        }
+    }
+
+    static func cacheHighQualityImageInBackground(
+        _ image: UIImage,
+        forStableKey key: String,
+        maximumBytes: Int = ThumbnailPipeline.largeMaximumBytes
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            cacheHighQualityImage(image, forStableKey: key, maximumBytes: maximumBytes)
         }
     }
 
@@ -646,15 +681,14 @@ enum VideoThumbnailLoader {
             .processor(processor),
             .cacheSerializer(serializer),
             .requestModifier(modifier),
-            .scaleFactor(1.0),
-            .loadDiskFileSynchronously
+            .scaleFactor(1.0)
         ]
 
         return await withCheckedContinuation { continuation in
             KingfisherManager.shared.retrieveImage(with: resourceURL, options: options) { result in
                 switch result {
                 case .success(let value):
-                    if let stableKey { cacheImage(value.image, forStableKey: stableKey) }
+                    if let stableKey { cacheImageInBackground(value.image, forStableKey: stableKey) }
                     continuation.resume(returning: value.image)
                 case .failure:
                     continuation.resume(returning: nil)
@@ -1103,7 +1137,7 @@ enum VideoThumbnailLoader {
 
         guard let fetched = await fetchThePornDBMetadataFromNetwork(for: text) else { return nil }
         if let cover = fetched.coverImage {
-            cacheImage(cover, forStableKey: ThePornDBPersistentMetadataStore.posterKey(for: text))
+            cacheImageInBackground(cover, forStableKey: ThePornDBPersistentMetadataStore.posterKey(for: text))
         }
         await ThePornDBPersistentMetadataStore.shared.save(fetched, for: text)
         return fetched
@@ -1231,13 +1265,18 @@ enum VideoThumbnailLoader {
     /// stays capped — even though every request here is queued up front.
     static func schedulePrefetchPosters(_ requests: [PrefetchRequest]) {
         guard isAutomaticDownloadEnabled else { return }
-        let missing = Array(requests.filter {
-            cachedImage(forStableKey: $0.stableKey) == nil &&
-            !isStableImageSuppressed(forKey: $0.stableKey)
-        }.prefix(12))
-        guard !missing.isEmpty else { return }
-
         Task.detached(priority: .utility) {
+            var missing: [PrefetchRequest] = []
+            missing.reserveCapacity(min(12, requests.count))
+            for request in requests {
+                guard !Task.isCancelled else { return }
+                if cachedImage(forStableKey: request.stableKey) == nil,
+                   !isStableImageSuppressed(forKey: request.stableKey) {
+                    missing.append(request)
+                    if missing.count == 12 { break }
+                }
+            }
+            guard !missing.isEmpty else { return }
             await withTaskGroup(of: Void.self) { group in
                 for request in missing {
                     group.addTask {
@@ -1284,6 +1323,14 @@ enum VideoThumbnailLoader {
     }
     // MARK: - File Management
     private static func trimDiskCacheIfNeeded() {
+        let shouldTrim = diskTrimLock.withLock { () -> Bool in
+            let now = Date()
+            guard now.timeIntervalSince(lastDiskTrimDate) >= 30 else { return false }
+            lastDiskTrimDate = now
+            return true
+        }
+        guard shouldTrim else { return }
+
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: cacheDirectory,

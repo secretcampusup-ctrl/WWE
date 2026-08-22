@@ -286,7 +286,7 @@ private struct PikPakThePornDBThumbnail: View {
             }
         }
         .task(id: file.id) {
-            if let cached = VideoThumbnailLoader.cachedImage(forStableKey: stableCacheKey) {
+            if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: stableCacheKey) {
                 image = cached
                 return
             }
@@ -304,7 +304,7 @@ private struct PikPakThePornDBThumbnail: View {
             if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query),
                let cover = metadata.coverImage {
                 image = cover
-                VideoThumbnailLoader.cacheImage(cover, forStableKey: stableCacheKey)
+                VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: stableCacheKey)
             }
         }
     }

@@ -270,16 +270,16 @@ struct VideoDetailsView: View {
             }
 
             if let seriesKey = item.automaticSeriesPosterCacheKey {
-                if let cachedSeriesPoster = VideoThumbnailLoader.cachedImage(forStableKey: seriesKey) {
+                if let cachedSeriesPoster = await VideoThumbnailLoader.cachedImageAsync(forStableKey: seriesKey) {
                     frame = cachedSeriesPoster
                     return
                 }
                 if let seriesPoster = await VideoThumbnailLoader.loadSeriesPoster(named: item.displayTitle) {
                     guard !Task.isCancelled, requestedURL == item.url else { return }
-                    VideoThumbnailLoader.cacheImage(seriesPoster, forStableKey: seriesKey)
-                    if let key = item.posterCacheKey {
-                        VideoThumbnailLoader.cacheImage(seriesPoster, forStableKey: key)
-                    }
+                    VideoThumbnailLoader.cacheImageInBackground(
+                        seriesPoster,
+                        forStableKeys: [seriesKey] + [item.posterCacheKey].compactMap { $0 }
+                    )
                     frame = seriesPoster
                     return
                 }
@@ -288,25 +288,33 @@ struct VideoDetailsView: View {
             // Metadata artwork is already persisted on disk under these stable
             // keys. On subsequent opens, use it and do not probe the remote
             // video again merely to regenerate a background frame.
-            let cachedMetadataArtwork = VideoThumbnailLoader.cachedImage(
+            let cachedEpisodeArtwork = await VideoThumbnailLoader.cachedImageAsync(
                 forStableKey: "tmdb-episode|\(stableMetadataCacheKey)"
-            ) ?? VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
+            )
+            let cachedMetadataArtwork: UIImage?
+            if let cachedEpisodeArtwork {
+                cachedMetadataArtwork = cachedEpisodeArtwork
+            } else {
+                cachedMetadataArtwork = await VideoThumbnailLoader.cachedImageAsync(
+                    forStableKey: tmdbTitleArtworkCacheKey
+                )
+            }
             if let cachedMetadataArtwork {
                 frame = cachedMetadataArtwork
                 return
             }
 
             let detailKey = "details-artwork|\(stableMetadataCacheKey)"
-            if let highResolution = VideoThumbnailLoader.cachedImage(forStableKey: detailKey) {
+            if let highResolution = await VideoThumbnailLoader.cachedImageAsync(forStableKey: detailKey) {
                 frame = highResolution
                 return
             }
 
             // Show the lightweight grid image immediately, then upgrade it.
             if let key = item.posterCacheKey,
-               let lightweight = VideoThumbnailLoader.cachedImage(forStableKey: key) {
+               let lightweight = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
                 frame = lightweight
-            } else if let cached = VideoThumbnailLoader.cachedImage(for: requestedURL) {
+            } else if let cached = await VideoThumbnailLoader.cachedImageAsync(for: requestedURL) {
                 frame = cached
             }
 
@@ -337,9 +345,12 @@ struct VideoDetailsView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let key = notification.object as? String,
-                  key == item.posterCacheKey,
-                  let cached = VideoThumbnailLoader.cachedImage(forStableKey: key) else { return }
-            frame = cached
+                  key == item.posterCacheKey else { return }
+            Task {
+                if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
+                    frame = cached
+                }
+            }
         }
         // ThePornDB metadata (cover + title/performers/tags/date) is the one automatic
         // lookup that's always on, independent of the poster-frame logic above — see
@@ -359,9 +370,9 @@ struct VideoDetailsView: View {
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
             let titleArtworkKey = tmdbTitleArtworkCacheKey
-            if let cachedEpisode = VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) {
+            if let cachedEpisode = await VideoThumbnailLoader.cachedImageAsync(forStableKey: episodeArtworkKey) {
                 frame = cachedEpisode
-            } else if let cachedTitle = VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) {
+            } else if let cachedTitle = await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) {
                 frame = cachedTitle
             }
             if item.relatedEpisodes.isEmpty,
@@ -371,14 +382,16 @@ struct VideoDetailsView: View {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 tmdbEpisode = loadedEpisode
                 if let loadedEpisode { VideoDetailsMemoryCache.episodes[metadataKey] = loadedEpisode }
-                if VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey) == nil,
+                if await VideoThumbnailLoader.cachedImageAsync(forStableKey: episodeArtworkKey) == nil,
                    let imageURL = loadedEpisode?.imageURL,
                    let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled, requestedItemID == item.id else { return }
                     frame = image
-                    VideoThumbnailLoader.cacheImage(image, forStableKey: episodeArtworkKey)
-                    if let key = item.posterCacheKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
+                    VideoThumbnailLoader.cacheImageInBackground(
+                        image,
+                        forStableKeys: [episodeArtworkKey] + [item.posterCacheKey].compactMap { $0 }
+                    )
                 }
             }
             // Snapshots created before poster-based Details do not contain the
@@ -390,26 +403,29 @@ struct VideoDetailsView: View {
             }
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil,
-               VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey) == nil,
+               await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) == nil,
                let imageURL = isMovieDetailsPage ? tmdbDetails?.detailsPosterURL : tmdbDetails?.imageURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 frame = image
                 if isMovieDetailsPage {
-                    VideoThumbnailLoader.cacheHighQualityImage(
+                    VideoThumbnailLoader.cacheHighQualityImageInBackground(
                         image,
                         forStableKey: titleArtworkKey,
                         maximumBytes: ThumbnailPipeline.largeMaximumBytes
                     )
                 } else {
-                    VideoThumbnailLoader.cacheImage(image, forStableKey: titleArtworkKey)
+                    VideoThumbnailLoader.cacheImageInBackground(image, forStableKey: titleArtworkKey)
                 }
-                VideoThumbnailLoader.cacheImage(image, forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
+                VideoThumbnailLoader.cacheImageInBackground(
+                    image,
+                    forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
+                )
                 // Full portrait artwork belongs only to Details. Sharing this
                 // key with the grid would overwrite its lightweight poster.
                 if !isMovieDetailsPage, let key = item.posterCacheKey {
-                    VideoThumbnailLoader.cacheImage(image, forStableKey: key)
+                    VideoThumbnailLoader.cacheImageInBackground(image, forStableKey: key)
                 }
             }
             guard tmdbDetails == nil else { return }
@@ -423,15 +439,15 @@ struct VideoDetailsView: View {
                 if frame == nil || item.suppliedAdultMetadata != nil || item.manualMetadataProvider == "theporndb" {
                     frame = cover
                 }
-                VideoThumbnailLoader.cacheImage(
+                VideoThumbnailLoader.cacheImageInBackground(
                     cover,
                     forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
                 )
                 if let key = item.posterCacheKey {
-                    VideoThumbnailLoader.cacheImage(cover, forStableKey: key)
+                    VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: key)
                     if key.hasPrefix("unified|") {
                         let suffix = String(key.dropFirst("unified|".count))
-                        VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified-adult|\(suffix)")
+                        VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: "unified-adult|\(suffix)")
                     }
                 }
             }
@@ -807,17 +823,10 @@ struct VideoDetailsView: View {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack {
                     Color.white.opacity(0.07)
-                    if let poster = VideoThumbnailLoader.cachedImage(forStableKey: suggestion.posterCacheKey) {
-                        Image(uiImage: poster)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        CachedTMDBImage(
-                            url: suggestion.imageURL,
-                            contentMode: .fill,
-                            placeholderSystemName: "film.fill"
-                        )
-                    }
+                    CachedStablePosterImage(
+                        stableKey: suggestion.posterCacheKey,
+                        remoteURL: suggestion.imageURL
+                    )
                 }
                 .frame(width: 112, height: 154)
                 .clipped()
@@ -884,13 +893,7 @@ struct VideoDetailsView: View {
     }
 
     private var displayedFrame: UIImage? {
-        VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title))
-            ?? frame
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-episode|\(stableMetadataCacheKey)")
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "details-artwork|\(stableMetadataCacheKey)")
-            ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
-            ?? VideoThumbnailLoader.cachedImage(for: item.url)
+        frame ?? item.customPosterImage ?? thePornDBMetadata?.coverImage
     }
 
     private var movieBackdropFrame: UIImage? {
@@ -899,7 +902,7 @@ struct VideoDetailsView: View {
            let adultCover = thePornDBMetadata?.coverImage {
             return adultCover
         }
-        return VideoThumbnailLoader.cachedImage(forStableKey: tmdbTitleArtworkCacheKey)
+        return frame
     }
 
     private var tmdbTitleArtworkCacheKey: String {
@@ -1135,11 +1138,9 @@ struct VideoDetailsView: View {
                 ? (item.suppliedAdultMetadata ?? VideoDetailsMemoryCache.adultMetadata[metadataKey])
                 : nil
 
-            let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
-            let titleArtworkKey = tmdbTitleArtworkCacheKey
-            frame = VideoThumbnailLoader.cachedImage(forStableKey: episodeArtworkKey)
-                ?? VideoThumbnailLoader.cachedImage(forStableKey: titleArtworkKey)
-                ?? item.posterCacheKey.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: $0) }
+            // Artwork is loaded by the async details task. Never perform disk
+            // reads from onAppear or a scroll-driven render transaction.
+            frame = item.customPosterImage
         }
     }
 
@@ -1660,7 +1661,11 @@ private struct DetailsScrollOffsetObserver: UIViewRepresentable {
         private func publish(from scrollView: UIScrollView) {
             // At rest: contentOffset.y == -adjustedContentInset.top. Pulling
             // down becomes positive; scrolling content up becomes negative.
-            let value = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+            let rawValue = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+            // Both the fade and upward parallax have reached their visual caps
+            // by -400pt. Do not keep invalidating the header for the remaining
+            // (potentially thousands of) scroll points below it.
+            let value = max(-400, rawValue)
             if abs(motion.offset - value) > 0.35 {
                 motion.offset = value
             }
@@ -1917,8 +1922,7 @@ private struct CachedTMDBImage: View {
         self.url = url
         self.contentMode = contentMode
         self.placeholderSystemName = placeholderSystemName
-        let cached = url.flatMap { VideoThumbnailLoader.cachedImage(forStableKey: "tmdb-remote|\($0.absoluteString)") }
-        _image = State(initialValue: cached)
+        _image = State(initialValue: nil)
     }
 
     var body: some View {
@@ -1940,15 +1944,42 @@ private struct CachedTMDBImage: View {
         .task(id: url) {
             guard image == nil, let url else { return }
             let key = "tmdb-remote|\(url.absoluteString)"
-            if let cached = VideoThumbnailLoader.cachedImage(forStableKey: key) {
+            if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
                 image = cached
                 return
             }
             guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: url),
                   let loaded = UIImage(data: data),
                   !Task.isCancelled else { return }
-            VideoThumbnailLoader.cacheImage(loaded, forStableKey: key)
+            VideoThumbnailLoader.cacheImageInBackground(loaded, forStableKey: key)
             image = loaded
+        }
+    }
+}
+
+private struct CachedStablePosterImage: View {
+    let stableKey: String
+    let remoteURL: URL?
+    @State private var image: UIImage?
+    @State private var didCheckCache = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if didCheckCache {
+                CachedTMDBImage(
+                    url: remoteURL,
+                    contentMode: .fill,
+                    placeholderSystemName: "film.fill"
+                )
+            } else {
+                Color.clear
+            }
+        }
+        .task(id: stableKey) {
+            image = await VideoThumbnailLoader.cachedImageAsync(forStableKey: stableKey)
+            didCheckCache = true
         }
     }
 }

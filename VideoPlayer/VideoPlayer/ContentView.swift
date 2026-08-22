@@ -801,8 +801,11 @@ struct MoviePosterCard: View {
         .onChange(of: selectedThumbnail) { item in
             Task {
                 guard let item,
-                      let data = try? await item.loadTransferable(type: Data.self),
-                      let image = UIImage(data: data) else { return }
+                      let data = try? await item.loadTransferable(type: Data.self) else { return }
+                let image = await Task.detached(priority: .userInitiated) {
+                    UIImage(data: data)
+                }.value
+                guard let image else { return }
                 await MainActor.run {
                     onSetThumbnail?(image)
                     selectedThumbnail = nil

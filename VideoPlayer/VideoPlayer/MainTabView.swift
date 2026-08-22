@@ -283,6 +283,22 @@ private struct HomeCollection: Identifiable {
     let items: [UnifiedMediaEntry]
 }
 
+private struct HomeLibraryDerivedData {
+    var showIDs = Set<String>()
+    var unknownIDs = Set<String>()
+    var featured: [UnifiedMediaEntry] = []
+    var resume: [HomeMediaItem] = []
+    var recentlyAdded: [UnifiedMediaEntry] = []
+    var watched: [UnifiedMediaEntry] = []
+    var unwatched: [UnifiedMediaEntry] = []
+    var anime: [UnifiedMediaEntry] = []
+    var others: [UnifiedMediaEntry] = []
+    var genres: [HomeCategoryCardModel] = []
+    var ratings: [HomeCategoryCardModel] = []
+    var releases: [HomeCategoryCardModel] = []
+    var ageRatings: [HomeCategoryCardModel] = []
+}
+
 struct HomeLibraryView: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var catalog: UnifiedContentModel
@@ -299,6 +315,8 @@ struct HomeLibraryView: View {
     @State private var showHeroPlayer = false
     @State private var heroPlayingEntry: UnifiedMediaEntry?
     @State private var heroMotion = HomeHeroMotionModel()
+    @State private var derivedData = HomeLibraryDerivedData()
+    @State private var derivedRebuildTask: Task<Void, Never>?
 
     // Check the wall-clock slot periodically. The featured set itself only
     // changes when a new two-hour window begins.
@@ -307,6 +325,7 @@ struct HomeLibraryView: View {
 
     private let posterWidth: CGFloat = 112
     private let posterHeight: CGFloat = 168
+    private static let sourceISO8601Formatter = ISO8601DateFormatter()
 
     init(vm: AppViewModel, catalog: UnifiedContentModel, isActive: Bool) {
         self.vm = vm
@@ -357,18 +376,18 @@ struct HomeLibraryView: View {
 
                         LazyVStack(alignment: .leading, spacing: 28) {
                             resumeSection
-                            posterSection("Recently Added", items: recentlyAdded)
+                            posterSection("Recently Added", items: derivedData.recentlyAdded)
                             posterSection("Movies", items: catalog.movies)
                             posterSection("TV Shows", items: catalog.shows)
-                            posterSection("Anime", items: animeItems)
-                            posterSection("Others", items: otherItems)
-                            posterSection("Unwatched", items: unwatchedItems)
-                            posterSection("Watched", items: watchedItems)
+                            posterSection("Anime", items: derivedData.anime)
+                            posterSection("Others", items: derivedData.others)
+                            posterSection("Unwatched", items: derivedData.unwatched)
+                            posterSection("Watched", items: derivedData.watched)
                             favoritesSection
-                            categorySection("By Genre", categories: genreCategories)
-                            categorySection("By Rating", categories: ratingCategories)
-                            categorySection("By Release Date", categories: releaseCategories)
-                            categorySection("By Age Rating", categories: ageRatingCategories)
+                            categorySection("By Genre", categories: derivedData.genres)
+                            categorySection("By Rating", categories: derivedData.ratings)
+                            categorySection("By Release Date", categories: derivedData.releases)
+                            categorySection("By Age Rating", categories: derivedData.ageRatings)
                         }
                         .padding(.top, 0)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -412,7 +431,14 @@ struct HomeLibraryView: View {
                 guard isActive else { return }
                 updateHeroRotationIfNeeded()
                 await catalog.load(vm: vm, force: false)
+                scheduleDerivedDataRebuild()
             }
+            .onReceive(catalog.$movies) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(catalog.$shows) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(catalog.$unknown) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(vm.$playbackHistory) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(vm.$savedLinks) { _ in scheduleDerivedDataRebuild() }
+            .onChange(of: heroRotationSlot) { _ in scheduleDerivedDataRebuild() }
             .onReceive(heroSlideTimer) { _ in
                 guard isActive, featuredItems.count > 1 else { return }
                 withAnimation(.easeInOut(duration: 0.55)) {
@@ -727,13 +753,13 @@ struct HomeLibraryView: View {
 
     private var resumeSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Resume Playback", items: resumeItems.map(\.entry))
-            if resumeItems.isEmpty {
+            sectionHeader("Resume Playback", items: derivedData.resume.map(\.entry))
+            if derivedData.resume.isEmpty {
                 emptyRow("Nothing to resume")
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 14) {
-                        ForEach(resumeItems) { item in resumeCard(item) }
+                        ForEach(derivedData.resume) { item in resumeCard(item) }
                     }
                     .padding(.horizontal, 16)
                 }
@@ -956,6 +982,10 @@ struct HomeLibraryView: View {
     }
 
     private var featuredItems: [UnifiedMediaEntry] {
+        derivedData.featured
+    }
+
+    private func buildFeaturedItems(from libraryItems: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
         let candidates = (catalog.movies + catalog.shows).filter { entry in
             guard entry.details != nil else { return false }
             return entry.details?.detailsBackdropURL != nil
@@ -964,9 +994,17 @@ struct HomeLibraryView: View {
         }
 
         let candidateIDs = Set(candidates.map(\.id))
+        let entriesByID = Dictionary(libraryItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let entriesByURL = Dictionary(libraryItems.map { ($0.streamURL.absoluteString, $0) }, uniquingKeysWith: { first, _ in first })
+        var episodeOwners: [String: UnifiedMediaEntry] = [:]
+        for entry in libraryItems {
+            for episode in entry.episodes { episodeOwners[episode.id] = entry }
+        }
         var seenFavorites = Set<String>()
         let favorites = vm.favoriteLinks.compactMap { link -> UnifiedMediaEntry? in
-            guard let matched = entry(matching: link),
+            guard let matched = entriesByID[link.favoriteIdentity ?? ""]
+                    ?? link.favoriteIdentity.flatMap { episodeOwners[$0] }
+                    ?? entriesByURL[link.urlString],
                   candidateIDs.contains(matched.id),
                   seenFavorites.insert(matched.id).inserted else { return nil }
             return matched
@@ -1032,90 +1070,97 @@ struct HomeLibraryView: View {
         vm.playbackHistory
     }
 
-    private func history(for entry: UnifiedMediaEntry) -> PlaybackHistoryEntry? {
-        if let direct = historyByID[entry.id] { return direct }
-        if let episode = entry.episodes.compactMap({ historyByID[$0.id] }).max(by: { $0.watchedAt < $1.watchedAt }) {
-            return episode
-        }
-
-        // Snapshot refreshes and adult metadata enrichment may rebuild an Others
-        // entry while playback is presented. Its unified poster key remains stable,
-        // so use it as a safe identity fallback instead of comparing mutable titles.
-        let posterKey = "unified|\(entry.id)"
-        return vm.playbackHistory.values
-            .filter { $0.posterCacheKey == posterKey }
-            .max { $0.watchedAt < $1.watchedAt }
-    }
-
-    private var resumeItems: [HomeMediaItem] {
-        allItems.compactMap { entry in
-            guard let history = history(for: entry), history.hasResumePoint else { return nil }
-            return HomeMediaItem(entry: entry, history: history)
-        }
-        .sorted { ($0.history?.watchedAt ?? .distantPast) > ($1.history?.watchedAt ?? .distantPast) }
-        .prefix(12)
-        .map { $0 }
-    }
-
-    private var recentlyAdded: [UnifiedMediaEntry] {
-        allItems.sorted { sourceDate($0) > sourceDate($1) }
-    }
-
-    private var watchedItems: [UnifiedMediaEntry] {
-        allItems.filter { history(for: $0) != nil }
-            .sorted { (history(for: $0)?.watchedAt ?? .distantPast) > (history(for: $1)?.watchedAt ?? .distantPast) }
-    }
-
-    private var unwatchedItems: [UnifiedMediaEntry] {
-        allItems.filter { history(for: $0) == nil }
-    }
-
-    private var animeItems: [UnifiedMediaEntry] {
-        allItems.filter {
-            $0.details?.genres.contains(where: { $0.name.localizedCaseInsensitiveContains("animation") }) == true
-                || $0.title.localizedCaseInsensitiveContains("anime")
+    private func scheduleDerivedDataRebuild() {
+        derivedRebuildTask?.cancel()
+        derivedRebuildTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard !Task.isCancelled else { return }
+            await rebuildDerivedData()
         }
     }
 
-    private var otherItems: [UnifiedMediaEntry] {
-        catalog.unknown.filter { entry in !animeItems.contains(where: { $0.id == entry.id }) }
-    }
+    @MainActor
+    private func rebuildDerivedData() async {
+        let items = allItems
+        let playbackHistory = vm.playbackHistory
+        let historiesByPosterKey = Dictionary(
+            grouping: playbackHistory.values.compactMap { history in
+                history.posterCacheKey.map { ($0, history) }
+            },
+            by: { $0.0 }
+        )
 
-    private var genreCategories: [HomeCategoryCardModel] {
-        let pairs = allItems.flatMap { entry in (entry.details?.genres ?? []).map { ($0.name, entry) } }
-        return groupedCategories(pairs, tint: AppPalette.accent)
-    }
-
-    private var ratingCategories: [HomeCategoryCardModel] {
-        let pairs = allItems.compactMap { entry -> (String, UnifiedMediaEntry)? in
-            guard let value = entry.details?.voteAverage, value > 0 else { return nil }
-            return ("\(Int(value.rounded(.down))) Score", entry)
+        func resolvedHistory(for entry: UnifiedMediaEntry) -> PlaybackHistoryEntry? {
+            if let direct = playbackHistory[entry.id] { return direct }
+            let latestEpisodeHistory = entry.episodes
+                .compactMap { playbackHistory[$0.id] }
+                .max(by: { $0.watchedAt < $1.watchedAt })
+            if let latestEpisodeHistory { return latestEpisodeHistory }
+            return historiesByPosterKey["unified|\(entry.id)"]?
+                .map(\.1)
+                .max(by: { $0.watchedAt < $1.watchedAt })
         }
-        return groupedCategories(pairs, tint: .yellow)
-            .sorted { $0.title > $1.title }
-    }
 
-    private var releaseCategories: [HomeCategoryCardModel] {
-        let yearPairs = allItems.compactMap { entry -> (String, UnifiedMediaEntry)? in
-            guard let date = entry.details?.releaseDate, date.count >= 4 else { return nil }
-            return (String(date.prefix(4)), entry)
+        var resumed: [HomeMediaItem] = []
+        var watched: [(UnifiedMediaEntry, Date)] = []
+        var unwatched: [UnifiedMediaEntry] = []
+        var anime: [UnifiedMediaEntry] = []
+        var genrePairs: [(String, UnifiedMediaEntry)] = []
+        var ratingPairs: [(String, UnifiedMediaEntry)] = []
+        var yearPairs: [(String, UnifiedMediaEntry)] = []
+        var agePairs: [(String, UnifiedMediaEntry)] = []
+
+        for (index, entry) in items.enumerated() {
+            if let history = resolvedHistory(for: entry) {
+                watched.append((entry, history.watchedAt))
+                if history.hasResumePoint { resumed.append(HomeMediaItem(entry: entry, history: history)) }
+            } else {
+                unwatched.append(entry)
+            }
+            if entry.details?.genres.contains(where: { $0.name.localizedCaseInsensitiveContains("animation") }) == true
+                || entry.title.localizedCaseInsensitiveContains("anime") {
+                anime.append(entry)
+            }
+            for genre in entry.details?.genres ?? [] { genrePairs.append((genre.name, entry)) }
+            if let rating = entry.details?.voteAverage, rating > 0 {
+                ratingPairs.append(("\(Int(rating.rounded(.down))) Score", entry))
+            }
+            if let date = entry.details?.releaseDate, date.count >= 4 {
+                yearPairs.append((String(date.prefix(4)), entry))
+            }
+            if let age = entry.details?.certification?.trimmingCharacters(in: .whitespacesAndNewlines), !age.isEmpty {
+                agePairs.append((age, entry))
+            }
+            if index.isMultiple(of: 48) { await Task.yield() }
         }
+        guard !Task.isCancelled else { return }
+
+        let animeIDs = Set(anime.map(\.id))
         let decadePairs = yearPairs.compactMap { year, entry -> (String, UnifiedMediaEntry)? in
             guard let value = Int(year) else { return nil }
             return ("\((value / 10) * 10)s", entry)
         }
         let years = groupedCategories(yearPairs, tint: .cyan).sorted { $0.title > $1.title }.prefix(8)
         let decades = groupedCategories(decadePairs, tint: .blue).sorted { $0.title > $1.title }
-        return Array(years) + decades
-    }
 
-    private var ageRatingCategories: [HomeCategoryCardModel] {
-        let pairs = allItems.compactMap { entry -> (String, UnifiedMediaEntry)? in
-            guard let value = entry.details?.certification?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !value.isEmpty else { return nil }
-            return (value, entry)
-        }
-        return groupedCategories(pairs, tint: .orange)
+        derivedData = HomeLibraryDerivedData(
+            showIDs: Set(catalog.shows.map(\.id)),
+            unknownIDs: Set(catalog.unknown.map(\.id)),
+            featured: buildFeaturedItems(from: items),
+            resume: Array(resumed.sorted {
+                ($0.history?.watchedAt ?? .distantPast) > ($1.history?.watchedAt ?? .distantPast)
+            }.prefix(12)),
+            recentlyAdded: items.map { ($0, sourceDate($0)) }.sorted { $0.1 > $1.1 }.map(\.0),
+            watched: watched.sorted { $0.1 > $1.1 }.map(\.0),
+            unwatched: unwatched,
+            anime: anime,
+            others: catalog.unknown.filter { !animeIDs.contains($0.id) },
+            genres: groupedCategories(genrePairs, tint: AppPalette.accent),
+            ratings: groupedCategories(ratingPairs, tint: .yellow).sorted { $0.title > $1.title },
+            releases: Array(years) + decades,
+            ageRatings: groupedCategories(agePairs, tint: .orange)
+        )
+        derivedRebuildTask = nil
     }
 
     private func groupedCategories(
@@ -1135,17 +1180,11 @@ struct HomeLibraryView: View {
             .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
-    private func entry(matching link: SavedVideoLink) -> UnifiedMediaEntry? {
-        allItems.first {
-            link.favoriteIdentity == $0.id
-                || $0.episodes.contains(where: { $0.id == link.favoriteIdentity })
-                || $0.streamURL.absoluteString == link.urlString
-        }
-    }
-
     private func section(for entry: UnifiedMediaEntry) -> UnifiedMediaSection {
-        if catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
-        if catalog.unknown.contains(where: { $0.id == entry.id }) { return .unknown }
+        if derivedData.showIDs.contains(entry.id) { return .shows }
+        if derivedData.unknownIDs.contains(entry.id) { return .unknown }
+        if derivedData.showIDs.isEmpty, catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
+        if derivedData.unknownIDs.isEmpty, catalog.unknown.contains(where: { $0.id == entry.id }) { return .unknown }
         return .movies
     }
 
@@ -1183,7 +1222,7 @@ struct HomeLibraryView: View {
         case let .webDAV(_, file): return file.lastModified ?? .distantPast
         case let .offcloud(transfer, _):
             guard let raw = transfer.createdOn else { return .distantPast }
-            return ISO8601DateFormatter().date(from: raw) ?? .distantPast
+            return Self.sourceISO8601Formatter.date(from: raw) ?? .distantPast
         case .torBox: return .distantPast
         }
     }
@@ -1374,7 +1413,10 @@ private struct HomeHeroScrollOffsetObserver: UIViewRepresentable {
 
         private func publish(from scrollView: UIScrollView) {
             let rawValue = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
-            let value = min(maximumPullDistance, rawValue)
+            // The hero only reacts to downward overscroll. Publishing every
+            // normal upward-scroll pixel needlessly invalidates the large
+            // background view while its scale remains exactly 1.
+            let value = max(0, min(maximumPullDistance, rawValue))
 
             // Limit the actual elastic pull as well as the visual zoom. Merely
             // capping the scale still lets ScrollView move the foreground past
@@ -1415,6 +1457,7 @@ private struct HomeHeroZoomContainer<Content: View>: View {
 private struct PersistentHeroArtwork: View {
     let entry: UnifiedMediaEntry
     @State private var image: UIImage?
+    @State private var didCheckStableCache = false
 
     private var cacheKey: String { "unified-hero|\(entry.id)" }
     private var remoteURL: URL? {
@@ -1424,24 +1467,16 @@ private struct PersistentHeroArtwork: View {
             ?? entry.details?.imageURL
     }
 
-    init(entry: UnifiedMediaEntry) {
-        self.entry = entry
-        _image = State(initialValue:
-            VideoThumbnailLoader.cachedImage(forStableKey: "unified-hero|\(entry.id)")
-                ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)")
-        )
-    }
-
     var body: some View {
         Group {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
-            } else if let remoteURL {
+            } else if didCheckStableCache, let remoteURL {
                 KFImage(remoteURL)
                     .cacheOriginalImage()
                     .onSuccess { result in
                         image = result.image
-                        VideoThumbnailLoader.cacheHighQualityImage(
+                        VideoThumbnailLoader.cacheHighQualityImageInBackground(
                             result.image,
                             forStableKey: cacheKey,
                             maximumBytes: ThumbnailPipeline.largeMaximumBytes
@@ -1453,6 +1488,16 @@ private struct PersistentHeroArtwork: View {
             } else {
                 AppTheme.bg
             }
+        }
+        .task(id: cacheKey) {
+            didCheckStableCache = false
+            image = nil
+            if let primary = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey) {
+                image = primary
+            } else {
+                image = await VideoThumbnailLoader.cachedImageAsync(forStableKey: "unified|\(entry.id)")
+            }
+            didCheckStableCache = true
         }
     }
 }
@@ -1490,61 +1535,28 @@ private struct HomeHeroTitleTreatment: View {
 /// Compact native SwiftUI version of the supplied media-orbit loader.
 /// It is intentionally rendered as an overlay so refreshing never moves cards.
 private struct MediaOrbitRefreshView: View {
-    private let symbols = ["film.fill", "music.note", "video.fill", "play.rectangle.fill"]
     @State private var isRotating = false
-    @State private var isPulsing = false
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(Color(red: 0.075, green: 0.065, blue: 0.085).opacity(0.96))
+                .fill(Color.black.opacity(0.72))
                 .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.8))
-                .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
-
-            ZStack {
-                Circle()
-                    .stroke(
-                        AppPalette.accent.opacity(0.25),
-                        style: StrokeStyle(lineWidth: 1.2, dash: [3, 5])
-                    )
-                    .frame(width: 82, height: 82)
-
-                ForEach(Array(symbols.enumerated()), id: \.offset) { index, symbol in
-                    Image(systemName: symbol)
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.88))
-                        .frame(width: 25, height: 25)
-                        .background(Color.white.opacity(0.075), in: Circle())
-                        .overlay(Circle().stroke(AppPalette.accent.opacity(0.2), lineWidth: 0.7))
-                        .offset(y: -35)
-                        .rotationEffect(.degrees(Double(index) * 90))
-                }
-            }
-            .drawingGroup(opaque: false)
-            .rotationEffect(.degrees(isRotating ? 360 : 0))
 
             Circle()
-                .stroke(AppPalette.blue.opacity(0.16), lineWidth: 1)
-                .frame(width: 57, height: 57)
-                .scaleEffect(isPulsing ? 1.08 : 0.94)
+                .trim(from: 0.08, to: 0.78)
+                .stroke(AppPalette.gradient, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
+                .frame(width: 34, height: 34)
+                .rotationEffect(.degrees(isRotating ? 360 : 0))
 
-            Circle()
-                .fill(AppPalette.diagonalGradient)
-                .frame(width: 29, height: 29)
-                .shadow(color: AppPalette.accent.opacity(0.4), radius: 8)
-                .scaleEffect(isPulsing ? 1.06 : 0.94)
-
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 12, weight: .black))
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 108, height: 108)
+        .frame(width: 58, height: 58)
         .onAppear {
-            withAnimation(.linear(duration: 4.8).repeatForever(autoreverses: false)) {
+            withAnimation(.linear(duration: 1.25).repeatForever(autoreverses: false)) {
                 isRotating = true
-            }
-            withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) {
-                isPulsing = true
             }
         }
         .accessibilityElement(children: .ignore)

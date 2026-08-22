@@ -46,18 +46,31 @@ final class OffcloudViewModel: ObservableObject {
 
     init() {
         apiKey = OffcloudKeyStore.load()
-        transfers = Self.load([OffcloudTransfer].self, key: "offcloud_history_cache_v1") ?? []
-        filesCache = Self.load([String: [OffcloudFile]].self, key: "offcloud_files_cache_v1") ?? [:]
-        sourceByRequest = Self.load([String: String].self, key: "offcloud_sources_cache_v1") ?? [:]
-        filesCacheDates = Self.load([String: Date].self, key: "offcloud_files_cache_dates_v1") ?? [:]
+        transfers = []
+        filesCache = [:]
+        sourceByRequest = [:]
+        filesCacheDates = [:]
     }
 
-    func reloadPersistedState() {
-        apiKey = OffcloudKeyStore.load()
-        transfers = Self.load([OffcloudTransfer].self, key: historyCacheKey) ?? []
-        filesCache = Self.load([String: [OffcloudFile]].self, key: filesCacheKey) ?? [:]
-        sourceByRequest = Self.load([String: String].self, key: sourcesCacheKey) ?? [:]
-        filesCacheDates = Self.load([String: Date].self, key: filesCacheDatesKey) ?? [:]
+    func reloadPersistedState() async {
+        let historyKey = historyCacheKey
+        let filesKey = filesCacheKey
+        let sourcesKey = sourcesCacheKey
+        let datesKey = filesCacheDatesKey
+        let state = await Task.detached(priority: .utility) {
+            (
+                OffcloudKeyStore.load(),
+                Self.load([OffcloudTransfer].self, key: historyKey) ?? [],
+                Self.load([String: [OffcloudFile]].self, key: filesKey) ?? [:],
+                Self.load([String: String].self, key: sourcesKey) ?? [:],
+                Self.load([String: Date].self, key: datesKey) ?? [:]
+            )
+        }.value
+        apiKey = state.0
+        transfers = state.1
+        filesCache = state.2
+        sourceByRequest = state.3
+        filesCacheDates = state.4
         filesCacheVersion &+= 1
     }
 
@@ -84,6 +97,7 @@ final class OffcloudViewModel: ObservableObject {
     }
 
     func loadInitial() async {
+        await reloadPersistedState()
         guard hasKey else { return }
         if transfers.isEmpty {
             await refreshHistory(startPolling: false)
@@ -441,19 +455,27 @@ final class OffcloudViewModel: ObservableObject {
 
     private func refreshDownloadedFileCaches(force: Bool = false) async {
         guard hasKey else { return }
+        var changed = false
         let client = OffcloudClient(apiKey: apiKey)
         for transfer in transfers where transfer.isDownloaded && !transfer.isInstantCache {
             if !force, freshCachedFiles(for: transfer.requestId) != nil { continue }
             do {
                 let files = try await client.explore(requestId: transfer.requestId)
-                saveFiles(files, for: transfer.requestId)
+                saveFiles(files, for: transfer.requestId, persistImmediately: false)
+                changed = true
             } catch OffcloudError.badArchive {
                 if let files = try? await recoverSingleFile(for: transfer, client: client) {
-                    saveFiles(files, for: transfer.requestId)
+                    saveFiles(files, for: transfer.requestId, persistImmediately: false)
+                    changed = true
                 }
             } catch {
                 continue
             }
+        }
+        if changed {
+            filesCacheVersion &+= 1
+            persist(filesCache, key: filesCacheKey)
+            persist(filesCacheDates, key: filesCacheDatesKey)
         }
     }
     /// Sequentially generates and permanently caches thumbnails (cell + detail
@@ -464,23 +486,27 @@ final class OffcloudViewModel: ObservableObject {
         "offcloud|\(transfer.requestId)|\(file.path ?? file.name)"
     }
 
-    private func saveFiles(_ files: [OffcloudFile], for requestId: String) {
+    private func saveFiles(_ files: [OffcloudFile], for requestId: String, persistImmediately: Bool = true) {
         filesCache[requestId] = files
         filesCacheDates[requestId] = Date()
-        filesCacheVersion &+= 1
-        persist(filesCache, key: filesCacheKey)
-        persist(filesCacheDates, key: filesCacheDatesKey)
+        if persistImmediately {
+            filesCacheVersion &+= 1
+            persist(filesCache, key: filesCacheKey)
+            persist(filesCacheDates, key: filesCacheDatesKey)
+        }
         guard selectedTransfer?.requestId == requestId else { return }
         selectedFiles = files
         selectedFilesError = nil
     }
 
     private func persist<T: Encodable>(_ value: T, key: String) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        DispatchQueue.global(qos: .utility).async {
+            guard let data = try? JSONEncoder().encode(value) else { return }
+            UserDefaults.standard.set(data, forKey: key)
+        }
     }
 
-    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+    nonisolated private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
@@ -688,20 +714,22 @@ struct OffcloudView: View {
 
     private func cacheOffcloudCover(_ image: UIImage, key: String) {
         if key.hasPrefix("offcloud-folder|") {
-            VideoThumbnailLoader.cacheHighQualityImage(image, forStableKey: key)
+            VideoThumbnailLoader.cacheHighQualityImageInBackground(image, forStableKey: key)
         } else {
-            VideoThumbnailLoader.cacheImage(image, forStableKey: key)
+            VideoThumbnailLoader.cacheImageInBackground(image, forStableKey: key)
         }
     }
 
     private func generateMissingFolderCovers() async {
-        let jobs = cloud.transfers.compactMap { transfer -> (key: String, title: String, videoURL: URL?)? in
-            guard transfer.isDownloaded else { return nil }
+        var jobs: [(key: String, title: String, videoURL: URL?)] = []
+        for (index, transfer) in cloud.transfers.enumerated() {
+            guard transfer.isDownloaded else { continue }
             let key = offcloudFolderCoverKey(for: transfer)
-            guard VideoThumbnailLoader.cachedImage(forStableKey: key) == nil,
-                  !VideoThumbnailLoader.isStableImageSuppressed(forKey: key) else { return nil }
+            guard await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) == nil,
+                  !VideoThumbnailLoader.isStableImageSuppressed(forKey: key) else { continue }
             let firstVideoURL = cloud.cachedVideoFiles(for: transfer).first?.streamURL
-            return (key, VideoTitleFormatter.title(from: transfer.fileName), firstVideoURL)
+            jobs.append((key, VideoTitleFormatter.title(from: transfer.fileName), firstVideoURL))
+            if index.isMultiple(of: 32) { await Task.yield() }
         }
 
         // Batches just control how many Task objects exist at once — the actual

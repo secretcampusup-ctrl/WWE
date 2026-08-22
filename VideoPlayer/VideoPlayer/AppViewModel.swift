@@ -516,9 +516,11 @@ class AppViewModel: ObservableObject {
 
 
     private func copyProviderPosterIfAvailable(from providerKey: String?, to savedID: UUID) {
-        guard let providerKey,
-              let poster = VideoThumbnailLoader.cachedImage(forStableKey: providerKey) else { return }
-        VideoThumbnailLoader.cacheImage(poster, forStableKey: "saved|\(savedID.uuidString)")
+        guard let providerKey else { return }
+        DispatchQueue.global(qos: .utility).async {
+            guard let poster = VideoThumbnailLoader.cachedImage(forStableKey: providerKey) else { return }
+            VideoThumbnailLoader.cacheImage(poster, forStableKey: "saved|\(savedID.uuidString)")
+        }
     }
     private func refreshMissingFileSizes() {
         for link in savedLinks where link.fileSizeBytes == nil {
@@ -576,19 +578,22 @@ class AppViewModel: ObservableObject {
     }
 
     func setCustomThumbnail(_ image: UIImage, for link: SavedVideoLink) {
-        guard let fileName = VideoThumbnailLoader.saveCustomPoster(image, for: link.id) else { return }
-        if let idx = savedLinks.firstIndex(where: { $0.id == link.id }) {
-            // Remove previous custom file if different
-            if let old = savedLinks[idx].thumbnailFileName, old != fileName {
-                VideoThumbnailLoader.deleteCustomPoster(fileName: old)
+        let linkID = link.id
+        let favoriteIdentity = link.favoriteIdentity
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let fileName = VideoThumbnailLoader.saveCustomPoster(image, for: linkID) else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let idx = self.savedLinks.firstIndex(where: { $0.id == linkID }) else { return }
+                if let old = self.savedLinks[idx].thumbnailFileName, old != fileName {
+                    VideoThumbnailLoader.deleteCustomPoster(fileName: old)
+                }
+                self.savedLinks[idx].thumbnailFileName = fileName
+                let keys = Set(["saved|\(linkID.uuidString)", favoriteIdentity].compactMap { $0 })
+                VideoThumbnailLoader.cacheImageInBackground(image, forStableKeys: Array(keys))
+                self.savedLinks = self.savedLinks
+                self.persistSavedLinksImmediately()
             }
-            savedLinks[idx].thumbnailFileName = fileName
-            let keys = Set(["saved|\(link.id.uuidString)", link.favoriteIdentity].compactMap { $0 })
-            for key in keys { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
-            // Assign the array back so every grid that is showing this link,
-            // including Recent, immediately receives the new file name.
-            savedLinks = savedLinks
-            persistSavedLinksImmediately()
         }
     }
 
@@ -898,8 +903,16 @@ class AppViewModel: ObservableObject {
     }
 
     private func savePikPakFilesToCache(_ files: [WebDAVFile], server: WebDAVServer, path: String, flattenFolders: Bool, extractSmallFolders: Bool) {
-        guard let data = try? JSONEncoder().encode(files) else { return }
-        UserDefaults.standard.set(data, forKey: pikPakCacheKey(server: server, path: path, flattenFolders: flattenFolders, extractSmallFolders: extractSmallFolders))
+        let key = pikPakCacheKey(
+            server: server,
+            path: path,
+            flattenFolders: flattenFolders,
+            extractSmallFolders: extractSmallFolders
+        )
+        DispatchQueue.global(qos: .utility).async {
+            guard let data = try? JSONEncoder().encode(files) else { return }
+            UserDefaults.standard.set(data, forKey: key)
+        }
     }
 
     private func pikPakCacheKey(server: WebDAVServer, path: String, flattenFolders: Bool, extractSmallFolders: Bool) -> String {
@@ -987,7 +1000,10 @@ class AppViewModel: ObservableObject {
         }
         return videos
     }
-    func contentLibraryFiles(server: WebDAVServer, forceRefresh: Bool = false) async -> [WebDAVFile] {
+    /// Library discovery does not touch published view-model state. Keep the
+    /// recursive traversal, de-duplication, sorting and index serialization off
+    /// the main actor so large WebDAV folders cannot interrupt scrolling.
+    nonisolated func contentLibraryFiles(server: WebDAVServer, forceRefresh: Bool = false) async -> [WebDAVFile] {
         let configuredRoots = WebDAVContentSelectionStore.selectedPaths(for: server.id)
         let roots = configuredRoots.map(WebDAVContentSelectionStore.minimalRoots) ?? [""]
         guard !roots.isEmpty else { return [] }
@@ -997,12 +1013,16 @@ class AppViewModel: ObservableObject {
             return persistedIndex.filter(\.isVideo)
         }
         let cachedIndex = persistedIndex ?? []
-        let client = WebDAVClient(server: server)
         var collected: [WebDAVFile] = []
         await withTaskGroup(of: [WebDAVFile].self) { group in
             for root in roots {
                 group.addTask {
-                    (try? await self.collectPikPakVideos(client: client, startingAt: root, maximumFiles: 5_000, forceRefresh: forceRefresh)) ?? []
+                    (try? await Self.collectContentVideos(
+                        server: server,
+                        startingAt: root,
+                        maximumFiles: 5_000,
+                        forceRefresh: forceRefresh
+                    )) ?? []
                 }
             }
             for await files in group { collected.append(contentsOf: files) }
@@ -1024,6 +1044,57 @@ class AppViewModel: ObservableObject {
         }
         WebDAVContentIndexStore.save(result, serverID: server.id, revision: revision)
         return result
+    }
+
+    /// A content-only traversal deliberately separated from the @MainActor
+    /// browser helpers. Each selected root owns its client, avoiding shared
+    /// mutable authentication state while roots are scanned concurrently.
+    nonisolated private static func collectContentVideos(
+        server: WebDAVServer,
+        startingAt path: String,
+        maximumFiles: Int,
+        forceRefresh: Bool
+    ) async throws -> [WebDAVFile] {
+        let client = WebDAVClient(server: server)
+        var pendingPaths = [path]
+        var visited = Set<String>()
+        var videos: [WebDAVFile] = []
+
+        while !pendingPaths.isEmpty && videos.count < maximumFiles {
+            var batch: [String] = []
+            while batch.count < 8, let nextPath = pendingPaths.popLast() {
+                let normalized = nextPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if visited.insert(normalized).inserted { batch.append(nextPath) }
+            }
+            guard !batch.isEmpty else { continue }
+
+            let listings = await withTaskGroup(of: [WebDAVFile].self) { group in
+                for folderPath in batch {
+                    group.addTask {
+                        (try? await client.listFiles(at: folderPath, forceRefresh: forceRefresh)) ?? []
+                    }
+                }
+                var result: [[WebDAVFile]] = []
+                result.reserveCapacity(batch.count)
+                for await files in group { result.append(files) }
+                return result
+            }
+
+            for contents in listings {
+                for item in contents {
+                    if Task.isCancelled { return videos }
+                    if item.isDirectory {
+                        pendingPaths.append(item.path)
+                    } else if item.isVideo, videos.count < maximumFiles {
+                        videos.append(item)
+                    }
+                }
+            }
+            // Cooperatively yield between directory batches. This matters on
+            // older iPhones when a DAV response contains hundreds of children.
+            await Task.yield()
+        }
+        return videos
     }
 
     func searchPikPakVideos(server: WebDAVServer, query: String) async -> [WebDAVFile] {

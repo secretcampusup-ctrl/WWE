@@ -56,12 +56,25 @@ struct UnifiedEpisode: Identifiable, Codable {
     let url: URL
 }
 
-private struct UnifiedContentSnapshot: Codable {
+private struct UnifiedContentSnapshot: Codable, @unchecked Sendable {
     let movies: [UnifiedMediaEntry]
     let shows: [UnifiedMediaEntry]
     let unknown: [UnifiedMediaEntry]
     let sourceSignature: String?
     let metadataSignature: String?
+}
+
+/// JSON encoding and atomic disk writes can take multiple frames for a large
+/// library. Serialize them on an actor that never occupies SwiftUI's executor.
+private actor UnifiedContentSnapshotWriter {
+    private var latestRevision = 0
+
+    func persist(_ snapshot: UnifiedContentSnapshot, to url: URL, revision: Int) {
+        guard revision > latestRevision else { return }
+        latestRevision = revision
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
 }
 
 private struct EpisodeMetadataBatch {
@@ -98,6 +111,9 @@ final class UnifiedContentModel: ObservableObject {
     private var prioritizedDetailsArtwork: Set<String> = []
     private var pendingForcedRefresh = false
     private let cloud = OffcloudViewModel()
+    private let snapshotWriter = UnifiedContentSnapshotWriter()
+    private var snapshotRevision = 0
+    private var snapshotRestoreTask: Task<UnifiedContentSnapshot?, Never>?
     private static var snapshotURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let directory = base.appendingPathComponent("UnifiedContent", isDirectory: true)
@@ -110,8 +126,16 @@ final class UnifiedContentModel: ObservableObject {
     }
 
     init() {
-        if let data = try? Data(contentsOf: Self.snapshotURL),
-           let snapshot = try? JSONDecoder().decode(UnifiedContentSnapshot.self, from: data) {
+        let url = Self.snapshotURL
+        snapshotRestoreTask = Task.detached(priority: .userInitiated) {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? JSONDecoder().decode(UnifiedContentSnapshot.self, from: data)
+        }
+    }
+
+    private func restoreSnapshotIfNeeded() async {
+        guard let task = snapshotRestoreTask else { return }
+        if let snapshot = await task.value {
             movies = Self.removingUndersizedFiles(from: snapshot.movies)
             shows = Self.removingUndersizedFiles(from: snapshot.shows)
             unknown = Self.removingUndersizedFiles(from: snapshot.unknown)
@@ -119,9 +143,11 @@ final class UnifiedContentModel: ObservableObject {
             lastMetadataSignature = snapshot.metadataSignature ?? Self.currentMetadataSignature()
             loaded = true
         }
+        snapshotRestoreTask = nil
     }
 
     func load(vm: AppViewModel, force: Bool = false) async {
+        await restoreSnapshotIfNeeded()
         if isLoading {
             // Pull-to-refresh or a newly added provider must never be discarded
             // just because an older scan is still finishing.
@@ -168,20 +194,22 @@ final class UnifiedContentModel: ObservableObject {
         // Settings and provider screens use their own OffcloudViewModel. Reload
         // the persisted account/files before every catalog scan so this shared
         // Home/Content model cannot keep an old in-memory provider snapshot.
-        cloud.reloadPersistedState()
+        await cloud.reloadPersistedState()
 
         let existingLibraryEntries = movies + shows + unknown
         var raw: [UnifiedMediaEntry] = []
         for server in vm.servers {
             let files = await vm.contentLibraryFiles(server: server, forceRefresh: force)
             let client = WebDAVClient(server: server)
-            for file in files where file.isVideo && !file.isDirectory {
+            for (index, file) in files.enumerated() {
+                guard file.isVideo && !file.isDirectory else { continue }
                 guard let url = client.streamURL(for: file) else { continue }
                 raw.append(UnifiedMediaEntry(
                     id: "webdav|\(server.id.uuidString)|\(file.path)", rawTitle: file.name,
                     title: file.name, sourceLabel: server.name,
                     source: .webDAV(server: server, file: file), streamURL: url
                 ))
+                if index.isMultiple(of: 64) { await Task.yield() }
             }
         }
 
@@ -203,11 +231,16 @@ final class UnifiedContentModel: ObservableObject {
 
         let torBoxKey = TorBoxKeyStore.load()
         if !torBoxKey.isEmpty {
-            var torrents = TorBoxLibraryStore.load()
+            var torrents = await Task.detached(priority: .utility) {
+                TorBoxLibraryStore.load()
+            }.value
             if force {
                 do {
                     torrents = try await TorBoxClient(apiKey: torBoxKey).torrents(bypassCache: true)
-                    TorBoxLibraryStore.save(torrents)
+                    let values = torrents
+                    await Task.detached(priority: .utility) {
+                        TorBoxLibraryStore.save(values)
+                    }.value
                     sourceSignature = baseSourceSignature + "|torbox:\(TorBoxLibraryStore.revision)"
                 } catch {
                     status = error.localizedDescription
@@ -295,7 +328,10 @@ final class UnifiedContentModel: ObservableObject {
         // that all resolve to the same show, so querying each file serially made the
         // Content screen appear to load forever.
         var representativeByKey: [String: UnifiedMediaEntry] = [:]
-        for entry in raw { representativeByKey[metadataGroupKey(for: entry)] = entry }
+        for (index, entry) in raw.enumerated() {
+            representativeByKey[metadataGroupKey(for: entry)] = entry
+            if index.isMultiple(of: 48) { await Task.yield() }
+        }
         // Old query groups are final. Only titles that have never appeared in
         // the persisted library enter the automatic lookup queue.
         let representatives = representativeByKey.filter { key, _ in
@@ -340,7 +376,8 @@ final class UnifiedContentModel: ObservableObject {
         var movieItems: [UnifiedMediaEntry] = []
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
-        for var entry in raw {
+        for (index, originalEntry) in raw.enumerated() {
+            var entry = originalEntry
             let query = metadataGroupKey(for: entry)
             entry.details = metadataByQuery[query]
             if let previous = previousEntriesByID[entry.id], previous.manualMetadataProvider != nil {
@@ -377,16 +414,18 @@ final class UnifiedContentModel: ObservableObject {
                 }
                 unknownItems.append(entry)
             }
+            if index.isMultiple(of: 48) { await Task.yield() }
         }
 
         var showItems: [UnifiedMediaEntry] = []
-        for values in showEpisodes.values {
+        for (index, values) in showEpisodes.values.enumerated() {
             guard var first = values.first?.0 else { continue }
             first.title = first.details?.title ?? first.title
             first.episodes = values.map(\.1).sorted { lhs, rhs in
                 lhs.season == rhs.season ? lhs.episode < rhs.episode : lhs.season < rhs.season
             }
             showItems.append(first)
+            if index.isMultiple(of: 24) { await Task.yield() }
         }
 
         movies = deduplicatedMovies(movieItems).sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
@@ -413,8 +452,13 @@ final class UnifiedContentModel: ObservableObject {
             sourceSignature: lastSourceSignature,
             metadataSignature: lastMetadataSignature
         )
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        try? data.write(to: Self.snapshotURL, options: .atomic)
+        snapshotRevision += 1
+        let revision = snapshotRevision
+        let writer = snapshotWriter
+        let url = Self.snapshotURL
+        Task(priority: .utility) {
+            await writer.persist(snapshot, to: url, revision: revision)
+        }
     }
 
     /// Swift's built-in `hashValue` changes between launches. A deterministic
@@ -472,6 +516,7 @@ final class UnifiedContentModel: ObservableObject {
 
     private func enrichUnknownWithAdultMetadata() async {
         var items = unknown
+        var changedSincePublish = 0
         // Process up to 200 still-pending entries per pass. Filtering the indices
         // first ensures libraries larger than 200 continue on later launches.
         let pendingIndices = Array(items.indices.filter { items[$0].adultLookupCompleted != true }.prefix(200))
@@ -484,6 +529,7 @@ final class UnifiedContentModel: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !query.isEmpty else {
                 items[index].adultLookupCompleted = true
+                changedSincePublish += 1
                 continue
             }
             let isJavCode = VideoTitleFormatter.catalogIdentifier(from: query) != nil
@@ -493,24 +539,24 @@ final class UnifiedContentModel: ObservableObject {
             if let response {
                 guard !Task.isCancelled else { return }
                 items[index].adultLookupCompleted = true
+                changedSincePublish += 1
                 if let scene = bestAdultMatch(response.list, query: query) ?? response.list.first {
                     items[index].adultScene = scene
                     items[index].title = scene.title ?? items[index].title
                     let posterKey = "unified|\(items[index].id)"
                     let adultPosterKey = "unified-adult|\(items[index].id)"
-                    if VideoThumbnailLoader.cachedImage(forStableKey: adultPosterKey) == nil,
-                       let imageURL = scene.bestImage {
+                    let existingPoster = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultPosterKey)
+                    if existingPoster == nil, let imageURL = scene.bestImage {
                         await ThumbnailLoadGate.shared.acquire()
                         let cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
                         await ThumbnailLoadGate.shared.release()
                         guard !Task.isCancelled else { return }
                         if let cover {
-                            VideoThumbnailLoader.cacheImage(cover, forStableKey: adultPosterKey)
-                            VideoThumbnailLoader.cacheImage(cover, forStableKey: posterKey)
-                            VideoThumbnailLoader.cacheImage(
-                                cover,
-                                forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: items[index].rawTitle)
-                            )
+                            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKeys: [
+                                adultPosterKey,
+                                posterKey,
+                                VideoThumbnailLoader.canonicalPosterCacheKey(for: items[index].rawTitle)
+                            ])
                         }
                     }
                 } else if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query) {
@@ -519,13 +565,23 @@ final class UnifiedContentModel: ObservableObject {
                     // under the same stable key consumed by the Unknown poster grid.
                     items[index].title = metadata.title ?? items[index].title
                     if let cover = metadata.coverImage {
-                        VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified-adult|\(items[index].id)")
-                        VideoThumbnailLoader.cacheImage(cover, forStableKey: "unified|\(items[index].id)")
+                        VideoThumbnailLoader.cacheImageInBackground(cover, forStableKeys: [
+                            "unified-adult|\(items[index].id)",
+                            "unified|\(items[index].id)"
+                        ])
                     }
                 }
-                unknown = items
-                if index.isMultiple(of: 10) { persistSnapshot() }
+                // Publishing a 500+ item array for every metadata response makes
+                // SwiftUI re-diff the visible grids while the user is scrolling.
+                // Commit a bounded batch instead, then yield a frame.
+                if changedSincePublish >= 24 {
+                    unknown = items
+                    persistSnapshot()
+                    changedSincePublish = 0
+                    await Task.yield()
+                }
             }
+            try? await Task.sleep(nanoseconds: 80_000_000)
         }
         unknown = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         persistSnapshot()
@@ -556,8 +612,9 @@ final class UnifiedContentModel: ObservableObject {
             Task {
                 guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: posterURL),
                       let image = UIImage(data: data) else { return }
-                VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-manual|\(entry.id)")
-                VideoThumbnailLoader.cacheImage(image, forStableKey: "unified|\(entry.id)")
+                VideoThumbnailLoader.cacheImageInBackground(image, forStableKeys: [
+                    "unified-manual|\(entry.id)", "unified|\(entry.id)"
+                ])
             }
         }
     }
@@ -582,14 +639,17 @@ final class UnifiedContentModel: ObservableObject {
         unknown.append(value)
         unknown.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         persistSnapshot()
-        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-manual|\(entry.id)")
-        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-adult|\(entry.id)")
-        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified|\(entry.id)")
+        VideoThumbnailLoader.cacheImageInBackground(image, forStableKeys: [
+            "unified-manual|\(entry.id)",
+            "unified-adult|\(entry.id)",
+            "unified|\(entry.id)"
+        ])
     }
 
     func applyManualCover(_ image: UIImage, to entry: UnifiedMediaEntry) {
-        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified-manual|\(entry.id)")
-        VideoThumbnailLoader.cacheImage(image, forStableKey: "unified|\(entry.id)")
+        VideoThumbnailLoader.cacheImageInBackground(image, forStableKeys: [
+            "unified-manual|\(entry.id)", "unified|\(entry.id)"
+        ])
     }
 
     private func takeEntry(id: String) -> UnifiedMediaEntry? {
@@ -620,11 +680,17 @@ final class UnifiedContentModel: ObservableObject {
     @discardableResult
     private func startEpisodeEnrichmentIfNeeded() -> Bool {
         guard episodeEnrichmentTask == nil else { return true }
-        let batches = episodeMetadataBatches()
-        guard !batches.isEmpty else { return false }
         episodeEnrichmentTask = Task(priority: .utility) { [weak self] in
             guard let self else { return }
-            var pending = batches
+            // Let the newly published grids complete their first frame before
+            // grouping a very large episode library.
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            var pending = await self.episodeMetadataBatches()
+            guard !pending.isEmpty, !Task.isCancelled else {
+                self.episodeEnrichmentTask = nil
+                _ = self.startAdultEnrichmentIfNeeded()
+                return
+            }
             while !pending.isEmpty, !Task.isCancelled {
                 let preferredIndex = pending.firstIndex {
                     self.prioritizedEpisodeSeries.contains($0.seriesEntryID)
@@ -656,13 +722,15 @@ final class UnifiedContentModel: ObservableObject {
     /// one item at a time and only after metadata enrichment has gone idle.
     private func startDetailsArtworkPrefetchIfNeeded() {
         guard detailsArtworkTask == nil else { return }
-        let requests = detailsArtworkRequests()
-        guard !requests.isEmpty else { return }
-
         detailsArtworkTask = Task(priority: .background) { [weak self] in
             guard let self else { return }
             // Give the visible library a moment to finish its own first render.
             try? await Task.sleep(nanoseconds: 3_000_000_000)
+            let requests = await self.detailsArtworkRequests()
+            guard !requests.isEmpty, !Task.isCancelled else {
+                self.detailsArtworkTask = nil
+                return
+            }
             var pending = requests
             while !pending.isEmpty, !Task.isCancelled {
                 let preferredIndex = pending.firstIndex {
@@ -678,13 +746,16 @@ final class UnifiedContentModel: ObservableObject {
         }
     }
 
-    private func detailsArtworkRequests() -> [DetailsArtworkRequest] {
-        (movies + shows).compactMap { entry in
-            guard let url = entry.details?.detailsPosterURL else { return nil }
+    private func detailsArtworkRequests() async -> [DetailsArtworkRequest] {
+        var requests: [DetailsArtworkRequest] = []
+        for (index, entry) in (movies + shows).enumerated() {
+            guard let url = entry.details?.detailsPosterURL else { continue }
             let cacheKey = detailsArtworkCacheKey(for: entry)
-            guard VideoThumbnailLoader.cachedImage(forStableKey: cacheKey) == nil else { return nil }
-            return DetailsArtworkRequest(entryID: entry.id, cacheKey: cacheKey, url: url)
+            guard await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey) == nil else { continue }
+            requests.append(DetailsArtworkRequest(entryID: entry.id, cacheKey: cacheKey, url: url))
+            if index.isMultiple(of: 24) { await Task.yield() }
         }
+        return requests
     }
 
     private func detailsArtworkCacheKey(for entry: UnifiedMediaEntry) -> String {
@@ -725,11 +796,12 @@ final class UnifiedContentModel: ObservableObject {
         }
     }
 
-    private func episodeMetadataBatches() -> [EpisodeMetadataBatch] {
+    private func episodeMetadataBatches() async -> [EpisodeMetadataBatch] {
         let completed = Set(UserDefaults.standard.stringArray(forKey: "unified.completedEpisodeMetadata.v1") ?? [])
-        return shows.flatMap { entry -> [EpisodeMetadataBatch] in
-            guard let seriesID = entry.details?.id else { return [] }
-            return Dictionary(grouping: entry.episodes, by: \.season)
+        var result: [EpisodeMetadataBatch] = []
+        for (index, entry) in shows.enumerated() {
+            guard let seriesID = entry.details?.id else { continue }
+            let batches = Dictionary(grouping: entry.episodes, by: \.season)
                 .map { season, episodes in
                     EpisodeMetadataBatch(
                         seriesEntryID: entry.id,
@@ -740,7 +812,10 @@ final class UnifiedContentModel: ObservableObject {
                 }
                 .filter { !completed.contains($0.identity) }
                 .sorted { $0.season < $1.season }
+            result.append(contentsOf: batches)
+            if index.isMultiple(of: 12) { await Task.yield() }
         }
+        return result
     }
 
     private func prefetchEpisodeBatch(_ batch: EpisodeMetadataBatch) async {
@@ -1067,7 +1142,7 @@ struct UnifiedPosterArtwork: View {
                     .onSuccess { result in
                         // Kingfisher's URL cache is disposable. Keep the library
                         // poster under the same persistent key every screen reads.
-                        VideoThumbnailLoader.cacheImage(result.image, forStableKey: cacheKey)
+                        VideoThumbnailLoader.cacheImageInBackground(result.image, forStableKey: cacheKey)
                     }
                     .fade(duration: 0.12)
                     .resizable()
@@ -1381,9 +1456,6 @@ struct UnifiedMediaDetailsHost: View {
 
     private var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? {
         guard let scene = activeEntry.adultScene else { return nil }
-        let cover = VideoThumbnailLoader.cachedImage(forStableKey: "unified-manual|\(activeEntry.id)")
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified-adult|\(activeEntry.id)")
-            ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(activeEntry.id)")
         return VideoThumbnailLoader.ThePornDBMetadata(
             source: .scene,
             title: scene.title,
@@ -1391,7 +1463,10 @@ struct UnifiedMediaDetailsHost: View {
             tags: scene.tagNames,
             date: scene.date,
             siteName: scene.site,
-            coverImage: cover
+            // VideoDetailsView resolves the same stable poster keys
+            // asynchronously. Never decode disk images while constructing a
+            // navigation destination.
+            coverImage: nil
         )
     }
 

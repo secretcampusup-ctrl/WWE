@@ -160,14 +160,19 @@ final class PikPakAutoSyncManager: ObservableObject {
         lastError = nil
         defer { isSyncing = false }
 
-        let client = WebDAVClient(server: server)
         do {
-            let videos = try await collectVideos(client: client, startingAt: watchPath)
+            let videos = try await Self.collectVideos(
+                server: server,
+                startingAt: watchPath,
+                maximumFiles: maxFilesPerRun,
+                maximumFolders: maxFoldersVisited
+            )
+            let client = WebDAVClient(server: server)
             let headers = client.streamHeaders()
             var queued = 0
             let minBytes = Int64(minimumSizeMB) * 1_024 * 1_024
 
-            for file in videos {
+            for (index, file) in videos.enumerated() {
                 if queued >= maxFilesPerRun { break }
                 if let size = file.size, minBytes > 0, size < minBytes { continue }
                 guard let url = client.streamURL(for: file) else { continue }
@@ -186,6 +191,7 @@ final class PikPakAutoSyncManager: ObservableObject {
                     headers: headers
                 )
                 queued += 1
+                if index.isMultiple(of: 20) { await Task.yield() }
             }
             lastQueuedCount = queued
             lastSyncDate = Date()
@@ -201,15 +207,21 @@ final class PikPakAutoSyncManager: ObservableObject {
         server.id.uuidString + "|file|" + file.path + "|" + file.name
     }
 
-    private func collectVideos(client: WebDAVClient, startingAt path: String) async throws -> [WebDAVFile] {
+    nonisolated private static func collectVideos(
+        server: WebDAVServer,
+        startingAt path: String,
+        maximumFiles: Int,
+        maximumFolders: Int
+    ) async throws -> [WebDAVFile] {
+        let client = WebDAVClient(server: server)
         var pendingPaths = [path]
         var visited = Set<String>()
         var videos: [WebDAVFile] = []
         var foldersVisited = 0
 
         while let nextPath = pendingPaths.popLast(),
-              videos.count < maxFilesPerRun,
-              foldersVisited < maxFoldersVisited {
+              videos.count < maximumFiles,
+              foldersVisited < maximumFolders {
             let normalized = nextPath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard visited.insert(normalized).inserted else { continue }
             foldersVisited += 1
@@ -223,6 +235,7 @@ final class PikPakAutoSyncManager: ObservableObject {
                     videos.append(item)
                 }
             }
+            await Task.yield()
         }
         return videos
     }

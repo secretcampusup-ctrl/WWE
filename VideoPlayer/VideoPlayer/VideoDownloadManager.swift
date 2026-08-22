@@ -52,6 +52,11 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     private let persistenceKey = "managed_video_downloads_v1"
     private var backgroundEventsCompletionHandler: (() -> Void)?
     private var lastProgressSave = Date.distantPast
+    private var lastProgressPublishByID: [UUID: Date] = [:]
+    private let persistenceQueue = DispatchQueue(
+        label: "com.mortaza.minoz.VideoPlayer.download-persistence",
+        qos: .utility
+    )
     private var hlsTasks: [UUID: Task<Void, Never>] = [:]
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var lifecycleObservers: [NSObjectProtocol] = []
@@ -432,6 +437,10 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
             let mp4URL = try await HLSSegmentDownloader.download(masterURL: url, headers: headers) { [weak self] progress in
                 guard let self else { return }
                 DispatchQueue.main.async {
+                    let now = Date()
+                    if let last = self.lastProgressPublishByID[id],
+                       now.timeIntervalSince(last) < 0.25 { return }
+                    self.lastProgressPublishByID[id] = now
                     guard let index = self.downloads.firstIndex(where: { $0.id == id }) else { return }
                     self.downloads[index].state = .downloading
                     if progress.bytesWritten > 0 {
@@ -473,6 +482,7 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
                 self.downloads[index].destinationFileName = destination.lastPathComponent
                 self.downloads[index].errorMessage = nil
                 self.downloads[index].requiresLoginHost = nil
+                self.lastProgressPublishByID[id] = nil
                 self.sortAndPersist()
                 self.hlsTasks[id] = nil
             }
@@ -504,6 +514,7 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
         if let index = downloads.firstIndex(where: { $0.id == download.id }) {
             downloads[index].state = .cancelled
             downloads[index].errorMessage = "Cancelled"
+            lastProgressPublishByID[download.id] = nil
             persist()
         }
     }
@@ -541,6 +552,10 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     ) {
         guard let descriptor = descriptor(from: downloadTask.taskDescription) else { return }
         DispatchQueue.main.async {
+            let now = Date()
+            if let last = self.lastProgressPublishByID[descriptor.id],
+               now.timeIntervalSince(last) < 0.25 { return }
+            self.lastProgressPublishByID[descriptor.id] = now
             guard let index = self.downloads.firstIndex(where: { $0.id == descriptor.id }) else { return }
             self.downloads[index].state = .downloading
             self.downloads[index].bytesWritten = totalBytesWritten
@@ -605,6 +620,7 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
                 }
                 self.downloads[index].destinationFileName = destination.lastPathComponent
                 self.downloads[index].errorMessage = nil
+                self.lastProgressPublishByID[descriptor.id] = nil
                 self.sortAndPersist()
             }
         } catch {
@@ -660,6 +676,7 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
             guard let index = self.downloads.firstIndex(where: { $0.id == id }),
                   self.downloads[index].state != .completed else { return }
             self.downloads[index].state = .failed
+            self.lastProgressPublishByID[id] = nil
             if isTemporarySignedURL {
                 self.downloads[index].requiresLoginHost = nil
                 self.downloads[index].errorMessage = "\u{627}\u{646}\u{62A}\u{647}\u{62A} \u{635}\u{644}\u{627}\u{62D}\u{64A}\u{629} \u{647}\u{630}\u{627} \u{627}\u{644}\u{631}\u{627}\u{628}\u{637} \u{623}\u{648} \u{623}\u{64F}\u{646}\u{634}\u{626} \u{644}\u{634}\u{628}\u{643}\u{629} \u{645}\u{62E}\u{62A}\u{644}\u{641}\u{629}\u{60C} \u{627}\u{633}\u{62D}\u{628} \u{631}\u{627}\u{628}\u{637}\u{627}\u{64B} \u{62C}\u{62F}\u{64A}\u{62F}\u{627}\u{64B} \u{648}\u{62D}\u{627}\u{648}\u{644} \u{645}\u{62C}\u{62F}\u{62F}\u{627}\u{64B}"
@@ -689,6 +706,7 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
                   self.downloads[index].state != .completed else { return }
             self.downloads[index].state = .failed
             self.downloads[index].errorMessage = message
+            self.lastProgressPublishByID[id] = nil
             self.persist()
         }
     }
@@ -788,8 +806,12 @@ final class VideoDownloadManager: NSObject, ObservableObject, URLSessionDownload
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(downloads) else { return }
-        UserDefaults.standard.set(data, forKey: persistenceKey)
+        let snapshot = downloads
+        let key = persistenceKey
+        persistenceQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            UserDefaults.standard.set(data, forKey: key)
+        }
     }
 
     private func sortAndPersist() {
