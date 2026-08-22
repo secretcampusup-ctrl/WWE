@@ -75,6 +75,12 @@ private struct EpisodeMetadataBatch {
     }
 }
 
+private struct DetailsArtworkRequest: Sendable {
+    let entryID: String
+    let cacheKey: String
+    let url: URL
+}
+
 @MainActor
 final class UnifiedContentModel: ObservableObject {
     @Published var movies: [UnifiedMediaEntry] = []
@@ -87,7 +93,9 @@ final class UnifiedContentModel: ObservableObject {
     private var lastMetadataSignature = ""
     private var adultEnrichmentTask: Task<Void, Never>?
     private var episodeEnrichmentTask: Task<Void, Never>?
+    private var detailsArtworkTask: Task<Void, Never>?
     private var prioritizedEpisodeSeries: Set<String> = []
+    private var prioritizedDetailsArtwork: Set<String> = []
     private var pendingForcedRefresh = false
     private let cloud = OffcloudViewModel()
     private static var snapshotURL: URL {
@@ -127,6 +135,8 @@ final class UnifiedContentModel: ObservableObject {
             adultEnrichmentTask = nil
             episodeEnrichmentTask?.cancel()
             episodeEnrichmentTask = nil
+            detailsArtworkTask?.cancel()
+            detailsArtworkTask = nil
         }
         let metadataSignature = Self.currentMetadataSignature()
         let baseSourceSignature = vm.servers.map {
@@ -138,11 +148,8 @@ final class UnifiedContentModel: ObservableObject {
         // it must not trigger an automatic scan that temporarily replaces/empties
         // Home. The next manual refresh performs the append-only discovery pass.
         if loaded && !force {
-            if !startEpisodeEnrichmentIfNeeded(),
-               ThePornDBSettings.hasValidAPIKey,
-               unknown.contains(where: { $0.adultLookupCompleted != true }) {
-                startAdultEnrichmentIfNeeded()
-            }
+            if !startEpisodeEnrichmentIfNeeded() { _ = startAdultEnrichmentIfNeeded() }
+            startDetailsArtworkPrefetchIfNeeded()
             return
         }
         isLoading = true
@@ -389,11 +396,8 @@ final class UnifiedContentModel: ObservableObject {
         // Adult fallback runs after the usable Content screen has finished loading.
         // It also runs on the first normal scan; results are persisted below by
         // enrichUnknownWithAdultMetadata and are not requested again next launch.
-        if !startEpisodeEnrichmentIfNeeded(),
-           ThePornDBSettings.hasValidAPIKey,
-           !unknownItems.isEmpty {
-            startAdultEnrichmentIfNeeded()
-        }
+        if !startEpisodeEnrichmentIfNeeded() { _ = startAdultEnrichmentIfNeeded() }
+        startDetailsArtworkPrefetchIfNeeded()
         loaded = true
         lastSourceSignature = sourceSignature
         lastMetadataSignature = metadataSignature
@@ -595,16 +599,19 @@ final class UnifiedContentModel: ObservableObject {
         return nil
     }
 
-    private func startAdultEnrichmentIfNeeded() {
+    @discardableResult
+    private func startAdultEnrichmentIfNeeded() -> Bool {
         guard ThePornDBSettings.hasValidAPIKey,
               unknown.contains(where: { $0.adultLookupCompleted != true }),
-              adultEnrichmentTask == nil else { return }
+              adultEnrichmentTask == nil else { return adultEnrichmentTask != nil }
         adultEnrichmentTask = Task { [weak self] in
             guard let self else { return }
             await self.enrichUnknownWithAdultMetadata()
             guard !Task.isCancelled else { return }
             self.adultEnrichmentTask = nil
+            self.startDetailsArtworkPrefetchIfNeeded()
         }
+        return true
     }
 
     /// Warms episode names, descriptions, and still artwork very gently. Only
@@ -629,15 +636,93 @@ final class UnifiedContentModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             self.episodeEnrichmentTask = nil
-            self.startAdultEnrichmentIfNeeded()
+            if !self.startAdultEnrichmentIfNeeded() {
+                self.startDetailsArtworkPrefetchIfNeeded()
+            }
         }
         return true
     }
 
     func prioritizeEpisodeMetadata(for entry: UnifiedMediaEntry) {
-        guard entry.details?.isSeries == true, !entry.episodes.isEmpty else { return }
-        prioritizedEpisodeSeries.insert(entry.id)
-        _ = startEpisodeEnrichmentIfNeeded()
+        prioritizedDetailsArtwork.insert(entry.id)
+        if entry.details?.isSeries == true, !entry.episodes.isEmpty {
+            prioritizedEpisodeSeries.insert(entry.id)
+            _ = startEpisodeEnrichmentIfNeeded()
+        }
+        startDetailsArtworkPrefetchIfNeeded()
+    }
+
+    /// Downloads the exact No-Language/English portrait consumed by Details,
+    /// one item at a time and only after metadata enrichment has gone idle.
+    private func startDetailsArtworkPrefetchIfNeeded() {
+        guard detailsArtworkTask == nil else { return }
+        let requests = detailsArtworkRequests()
+        guard !requests.isEmpty else { return }
+
+        detailsArtworkTask = Task(priority: .background) { [weak self] in
+            guard let self else { return }
+            // Give the visible library a moment to finish its own first render.
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            var pending = requests
+            while !pending.isEmpty, !Task.isCancelled {
+                let preferredIndex = pending.firstIndex {
+                    self.prioritizedDetailsArtwork.contains($0.entryID)
+                } ?? pending.startIndex
+                let request = pending.remove(at: preferredIndex)
+                self.prioritizedDetailsArtwork.remove(request.entryID)
+                await self.prefetchDetailsArtwork(request)
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            self.detailsArtworkTask = nil
+        }
+    }
+
+    private func detailsArtworkRequests() -> [DetailsArtworkRequest] {
+        (movies + shows).compactMap { entry in
+            guard let url = entry.details?.detailsPosterURL else { return nil }
+            let cacheKey = detailsArtworkCacheKey(for: entry)
+            guard VideoThumbnailLoader.cachedImage(forStableKey: cacheKey) == nil else { return nil }
+            return DetailsArtworkRequest(entryID: entry.id, cacheKey: cacheKey, url: url)
+        }
+    }
+
+    private func detailsArtworkCacheKey(for entry: UnifiedMediaEntry) -> String {
+        let metadataKey: String
+        if !entry.episodes.isEmpty, let details = entry.details {
+            metadataKey = "series|tmdb|\(details.id)"
+        } else {
+            let normalizedTitle = VideoTitleFormatter.title(from: entry.title)
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .lowercased()
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            metadataKey = (entry.episodes.isEmpty ? "movie|" : "series|") + normalizedTitle
+        }
+        return VideoThumbnailLoader.tmdbDetailsPosterCacheKey(forMetadataIdentity: metadataKey)
+    }
+
+    private func prefetchDetailsArtwork(_ request: DetailsArtworkRequest) async {
+        let ready = await Task.detached(priority: .background) {
+            if VideoThumbnailLoader.cachedImage(forStableKey: request.cacheKey) != nil { return true }
+            var urlRequest = URLRequest(url: request.url)
+            urlRequest.networkServiceType = .background
+            urlRequest.timeoutInterval = 45
+            guard let (data, response) = try? await URLSession.shared.data(for: urlRequest),
+                  let http = response as? HTTPURLResponse,
+                  200..<300 ~= http.statusCode,
+                  let image = UIImage(data: data),
+                  !Task.isCancelled else { return false }
+            VideoThumbnailLoader.cacheHighQualityImage(
+                image,
+                forStableKey: request.cacheKey,
+                maximumBytes: ThumbnailPipeline.largeMaximumBytes
+            )
+            return true
+        }.value
+        if !ready {
+            DiagnosticLogger.log("Details artwork prefetch failed: \(request.entryID)")
+        }
     }
 
     private func episodeMetadataBatches() -> [EpisodeMetadataBatch] {
@@ -974,6 +1059,11 @@ struct UnifiedPosterArtwork: View {
                 KFImage(url)
                     .placeholder { ProgressView().tint(AppPalette.accent) }
                     .cacheOriginalImage()
+                    .onSuccess { result in
+                        // Kingfisher's URL cache is disposable. Keep the library
+                        // poster under the same persistent key every screen reads.
+                        VideoThumbnailLoader.cacheImage(result.image, forStableKey: cacheKey)
+                    }
                     .fade(duration: 0.12)
                     .resizable()
                     .scaledToFill()

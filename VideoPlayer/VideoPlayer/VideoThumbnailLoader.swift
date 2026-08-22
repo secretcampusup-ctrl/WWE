@@ -84,6 +84,84 @@ class ThumbnailDiagnosticLogger {
     }
 }
 
+private struct ThePornDBPersistentMetadataRecord: Codable {
+    let source: String
+    let title: String?
+    let performers: [String]
+    let tags: [String]
+    let date: String?
+    let siteName: String?
+}
+
+/// Stores textual ThePornDB results independently from the in-memory Details
+/// view. Covers use the shared persistent artwork store, so reopening the app
+/// does not repeat either request.
+private actor ThePornDBPersistentMetadataStore {
+    static let shared = ThePornDBPersistentMetadataStore()
+
+    private var records: [String: ThePornDBPersistentMetadataRecord]
+    private let fileURL: URL
+
+    init() {
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PersistentMetadata/ThePornDB", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(resourceValues)
+        fileURL = directory.appendingPathComponent("metadata-v1.json")
+        if let data = try? Data(contentsOf: fileURL),
+           let decoded = try? JSONDecoder().decode([String: ThePornDBPersistentMetadataRecord].self, from: data) {
+            records = decoded
+        } else {
+            records = [:]
+        }
+    }
+
+    nonisolated static func normalizedKey(for query: String) -> String {
+        query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func posterKey(for query: String) -> String {
+        "theporndb-metadata|\(normalizedKey(for: query))"
+    }
+
+    func metadata(for query: String) -> VideoThumbnailLoader.ThePornDBMetadata? {
+        let key = Self.normalizedKey(for: query)
+        guard let record = records[key],
+              let source = VideoThumbnailLoader.ThePornDBMetadata.Source(rawValue: record.source) else { return nil }
+        return VideoThumbnailLoader.ThePornDBMetadata(
+            source: source,
+            title: record.title,
+            performers: record.performers,
+            tags: record.tags,
+            date: record.date,
+            siteName: record.siteName,
+            coverImage: VideoThumbnailLoader.cachedImage(forStableKey: Self.posterKey(for: query))
+        )
+    }
+
+    func save(_ metadata: VideoThumbnailLoader.ThePornDBMetadata, for query: String) {
+        let key = Self.normalizedKey(for: query)
+        guard !key.isEmpty else { return }
+        records[key] = ThePornDBPersistentMetadataRecord(
+            source: metadata.source.rawValue,
+            title: metadata.title,
+            performers: metadata.performers,
+            tags: metadata.tags,
+            date: metadata.date,
+            siteName: metadata.siteName
+        )
+        guard let data = try? JSONEncoder().encode(records) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+}
+
 extension NSLock {
     func withLock<T>(_ body: () -> T) -> T {
         lock()
@@ -196,6 +274,7 @@ enum ThumbnailPipeline {
 
         let cache = ImageCache.default
         cache.diskStorage.config.sizeLimit = 180 * 1_024 * 1_024
+        cache.diskStorage.config.expiration = .never
         cache.memoryStorage.config.totalCostLimit = 32 * 1_024 * 1_024
         cache.memoryStorage.config.countLimit = 120
 
@@ -333,12 +412,44 @@ enum VideoThumbnailLoader {
     /// Previous cache folder names to clean up
     private static let oldCacheFolderNames = ["VideoPosters", "VideoPostersV2"]
 
-    private static var cacheDirectory: URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent(cacheFolderName, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
+    /// Posters are user-visible library state, not disposable URL cache data.
+    /// Library/Caches can be removed by iOS after the app stays closed for a
+    /// while; Application Support survives those cleanups.
+    private static let persistentCacheDirectory: URL = {
+        let fileManager = FileManager.default
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let directory = base.appendingPathComponent("PersistentArtwork/\(cacheFolderName)", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(resourceValues)
+
+        // Preserve already-downloaded posters from releases that used Caches.
+        let legacyDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent(cacheFolderName, isDirectory: true)
+        if let files = try? fileManager.contentsOfDirectory(
+            at: legacyDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for source in files {
+                let destination = directory.appendingPathComponent(source.lastPathComponent)
+                guard !fileManager.fileExists(atPath: destination.path) else { continue }
+                do {
+                    // Both Library locations are on the same volume, so this is
+                    // normally an instant rename even for a large poster library.
+                    try fileManager.moveItem(at: source, to: destination)
+                } catch {
+                    try? fileManager.copyItem(at: source, to: destination)
+                }
+            }
+        }
+        return directory
+    }()
+
+    private static var cacheDirectory: URL { persistentCacheDirectory }
 
     /// Generate cache key with optional namespace (no sensitive data)
     private static func cacheKey(for remote: URL) -> String {
@@ -369,6 +480,10 @@ enum VideoThumbnailLoader {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return "canonical-poster|\(normalized)"
+    }
+
+    static func tmdbDetailsPosterCacheKey(forMetadataIdentity identity: String) -> String {
+        "tmdb-details-poster-nolang-en-original-v1|\(identity)"
     }
 
     // MARK: - Cache API (for stable keys)
@@ -959,7 +1074,7 @@ enum VideoThumbnailLoader {
     /// Combined metadata pulled from ThePornDB for a video: whichever of a scene or a
     /// performer matched first, plus the cover image already downloaded.
     struct ThePornDBMetadata {
-        enum Source { case scene, jav, performer }
+        enum Source: String { case scene, jav, performer }
         let source: Source
         let title: String?
         let performers: [String]
@@ -981,6 +1096,20 @@ enum VideoThumbnailLoader {
     static func fetchThePornDBMetadata(for query: String) async -> ThePornDBMetadata? {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, ThePornDBSettings.hasValidAPIKey else { return nil }
+
+        if let cached = await ThePornDBPersistentMetadataStore.shared.metadata(for: text) {
+            return cached
+        }
+
+        guard let fetched = await fetchThePornDBMetadataFromNetwork(for: text) else { return nil }
+        if let cover = fetched.coverImage {
+            cacheImage(cover, forStableKey: ThePornDBPersistentMetadataStore.posterKey(for: text))
+        }
+        await ThePornDBPersistentMetadataStore.shared.save(fetched, for: text)
+        return fetched
+    }
+
+    private static func fetchThePornDBMetadataFromNetwork(for text: String) async -> ThePornDBMetadata? {
 
         // 1) Catalogue codes belong to ThePornDB's dedicated JAV endpoint. Sending
         // them only to /scenes is why valid codes such as JUR-174 returned nothing.

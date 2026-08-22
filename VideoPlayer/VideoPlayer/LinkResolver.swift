@@ -337,26 +337,18 @@ enum LinkResolver {
         "wav": "audio/wav", "ogg": "audio/ogg"
     ]
 
-    /// AVPlayer/AVKit has a known limitation: it often refuses to treat a URL as
-    /// playable when the URL has no recognizable file extension and the server's
-    /// Content-Type isn't a video MIME type it trusts (common for CDN "download"
-    /// endpoints like PikPak's `/download/?fid=...` links, which have no extension
-    /// in the path). Passing an explicit `AVURLAssetOutOfBandMIMETypeKey` works
-    /// around this. Returns nil when the URL's own extension should already be
-    /// enough for AVPlayer to figure it out.
+    /// Provide an explicit MIME hint only when the URL carries a trustworthy
+    /// extension. Extensionless signed links are intentionally left unguessed.
     static func mimeTypeHint(for url: URL) -> String? {
         let ext = url.pathExtension.lowercased()
         if !ext.isEmpty, let known = mimeByExtension[ext] {
             // WebDAV can report a generic type; give AVPlayer the real video type.
             return known
         }
-        // No usable extension — PikPak direct/download links and similar
-        // tokenized CDN URLs land here. "category=original" downloads are
-        // almost always progressive MP4/MOV containers.
-        let lower = url.absoluteString.lowercased()
-        if lower.contains("mypikpak.com") || lower.contains("pikpak.com") || lower.contains("pikpak.net") {
-            return "video/mp4"
-        }
+        // Never guess MP4 for extensionless PikPak URLs. `category=original`
+        // describes source quality, not its container, and many such links are
+        // MKV. VideoPlayerView routes unknown PikPak containers to LibVLC so it
+        // can inspect the actual bytes.
         return nil
     }
 }

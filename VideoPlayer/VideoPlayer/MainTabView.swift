@@ -557,20 +557,7 @@ struct HomeLibraryView: View {
     private var heroPinnedBackground: some View {
         ZStack {
             ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
-                Group {
-                    if let imageURL = entry.details?.detailsPosterURL
-                        ?? entry.posterURL
-                        ?? entry.details?.detailsBackdropURL
-                        ?? entry.details?.imageURL {
-                        KFImage(imageURL)
-                            .cacheOriginalImage()
-                            .fade(duration: 0.18)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        AppTheme.bg
-                    }
-                }
+                PersistentHeroArtwork(entry: entry)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .opacity(index == currentHeroIndex ? 1 : 0)
@@ -1420,6 +1407,51 @@ private struct HomeHeroZoomContainer<Content: View>: View {
         content
             .scaleEffect(scale, anchor: .top)
             .transaction { transaction in transaction.animation = nil }
+    }
+}
+
+private struct PersistentHeroArtwork: View {
+    let entry: UnifiedMediaEntry
+    @State private var image: UIImage?
+
+    private var cacheKey: String { "unified-hero|\(entry.id)" }
+    private var remoteURL: URL? {
+        entry.details?.detailsPosterURL
+            ?? entry.posterURL
+            ?? entry.details?.detailsBackdropURL
+            ?? entry.details?.imageURL
+    }
+
+    init(entry: UnifiedMediaEntry) {
+        self.entry = entry
+        _image = State(initialValue:
+            VideoThumbnailLoader.cachedImage(forStableKey: "unified-hero|\(entry.id)")
+                ?? VideoThumbnailLoader.cachedImage(forStableKey: "unified|\(entry.id)")
+        )
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if let remoteURL {
+                KFImage(remoteURL)
+                    .cacheOriginalImage()
+                    .onSuccess { result in
+                        image = result.image
+                        VideoThumbnailLoader.cacheHighQualityImage(
+                            result.image,
+                            forStableKey: cacheKey,
+                            maximumBytes: ThumbnailPipeline.largeMaximumBytes
+                        )
+                    }
+                    .fade(duration: 0.18)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                AppTheme.bg
+            }
+        }
     }
 }
 

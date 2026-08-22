@@ -903,7 +903,9 @@ struct VideoDetailsView: View {
     }
 
     private var tmdbTitleArtworkCacheKey: String {
-        (isMovieDetailsPage ? "tmdb-details-poster-nolang-en-original-v1|" : "tmdb-title|") + stableMetadataCacheKey
+        isMovieDetailsPage
+            ? VideoThumbnailLoader.tmdbDetailsPosterCacheKey(forMetadataIdentity: stableMetadataCacheKey)
+            : "tmdb-title|" + stableMetadataCacheKey
     }
 
     private var topSafeAreaInset: CGFloat {

@@ -64,8 +64,8 @@ struct VideoPlayerView: View {
     @State private var isPlayerLandscape = false
     @State private var isClosingPlayer = false
 
-    // Temporary test mode: every file uses the main Apple player only.
-    // The MKV player remains in the project but is not selected.
+    // Keep formats Apple handles well on AVPlayer; route MKV and other extended
+    // containers through MobileVLCKit.
     private var usesMKVPlayer: Bool {
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
         let explicitExtension = url.pathExtension.lowercased()
@@ -73,6 +73,15 @@ struct VideoPlayerView: View {
             return false
         }
         if explicitExtension == "mkv" || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil {
+            return true
+        }
+        // PikPak signs extensionless `/download/?fid=...` URLs. They can carry
+        // MKV/WebM just as easily as MP4, so treating every one as MP4 makes
+        // AVPlayer spend a long time probing (or fail outright). LibVLC sniffs
+        // the container bytes and is the safe route when the real extension is
+        // unavailable. A known `.mp4` title still takes the native path above.
+        if explicitExtension.isEmpty,
+           LinkResolver.isPikPakDirectDownload(url.absoluteString) {
             return true
         }
         if useExtendedPlayer { return true }
@@ -357,7 +366,6 @@ struct VideoPlayerView: View {
                 // downloads use the independent viewport overlay below.
                 mkvControls.selectSubtitleTrack(id: nil)
             }
-            beginAutomaticSubtitleDownloadIfNeeded()
             scheduleAutoHide()
         }
         .onDisappear {
@@ -1130,6 +1138,10 @@ struct VideoPlayerView: View {
     private func playbackRunningChanged(_ running: Bool) {
         hideTask?.cancel()
         if running {
+            // Let the video establish its first CDN connection before the
+            // optional subtitle search starts. This keeps startup bandwidth and
+            // DNS/TLS work dedicated to playback without disabling auto-download.
+            beginAutomaticSubtitleDownloadIfNeeded()
             // Start the eight-second chrome timeout from the first real playback
             // frame/rate, never from the moment the player screen was presented.
             showControls = true
@@ -1429,9 +1441,13 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         }
         if let userAgent = httpHeaders?["User-Agent"] { media.addOption(":http-user-agent=\(userAgent)") }
         if let referer = httpHeaders?["Referer"] ?? httpHeaders?["Referrer"] { media.addOption(":http-referrer=\(referer)") }
-        media.addOption(":network-caching=1000")
+        let isPikPakStream = LinkResolver.isPikPakDirectDownload(url.absoluteString)
+        // One second was too shallow for signed cloud URLs, especially 4K MKV
+        // remuxes where every Range request pays CDN latency. Keep a larger
+        // read-ahead for PikPak while retaining responsive startup elsewhere.
+        media.addOption(":network-caching=\(isPikPakStream ? 6000 : 2500)")
         media.addOption(":http-reconnect")
-        media.addOption(":file-caching=500")
+        media.addOption(":file-caching=1000")
         media.addOption(":drop-late-frames")
         media.addOption(":freetype-font=\(subtitleStyle.fontName)")
         media.addOption(":sub-text-scale=\(vlcTextScale(for: subtitleStyle.fontSize))")

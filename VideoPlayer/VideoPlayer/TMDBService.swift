@@ -112,10 +112,25 @@ actor TMDBService {
     }()
 
     init() {
-        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("TMDBMetadata", isDirectory: true)
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PersistentMetadata/TMDB", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(resourceValues)
         cacheURL = directory.appendingPathComponent("metadata-v6.json")
+
+        // Versions before persistent metadata stored this file in Library/Caches,
+        // which iOS is allowed to purge at any time. Migrate it once so an update
+        // does not throw away metadata the user already downloaded.
+        let legacyURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TMDBMetadata/metadata-v6.json")
+        if !fileManager.fileExists(atPath: cacheURL.path),
+           fileManager.fileExists(atPath: legacyURL.path) {
+            try? fileManager.copyItem(at: legacyURL, to: cacheURL)
+        }
         if let data = try? Data(contentsOf: cacheURL),
            let payload = try? JSONDecoder().decode(TMDBPersistentCache.self, from: data) {
             detailsCache = payload.details
