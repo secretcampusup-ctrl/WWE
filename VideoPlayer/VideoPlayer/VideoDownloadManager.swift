@@ -945,6 +945,9 @@ struct DownloadManagerView: View {
                     DownloadManagerCard(download: download)
                         .onTapGesture {
                             guard download.state == .completed, let url = manager.fileURL(for: download) else { return }
+                            // Local downloads bypass AppViewModel.startPlayback,
+                            // so request landscape before presenting their cover.
+                            ScreenOrientationLock.setPlayerLandscape(true)
                             playback = DownloadPlayback(url: url, title: download.title)
                         }
                 }

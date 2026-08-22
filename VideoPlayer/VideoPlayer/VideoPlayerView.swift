@@ -3486,9 +3486,6 @@ struct RoutedVideoPlayerView: View {
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
     init(url: URL, title: String, subtitleMediaContext: SubtitleMediaContext? = nil, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
-        // The cover builds this value before presenting it. Rotating here avoids
-        // one portrait player frame before VideoPlayerView.onAppear is called.
-        ScreenOrientationLock.setPlayerLandscape(true)
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
         self.subtitleMediaContext = subtitleMediaContext
         self.httpHeaders = httpHeaders; self.onProgress = onProgress
