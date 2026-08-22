@@ -766,6 +766,11 @@ class AppViewModel: ObservableObject {
         linkId: UUID? = nil,
         headers: [String: String]? = nil
     ) {
+        // Request landscape before publishing `nowPlayingURL`. Player covers
+        // observe that state immediately, so doing this first prevents their
+        // initial frame/loading view from ever being laid out in portrait.
+        ScreenOrientationLock.setPlayerLandscape(true)
+
         // Prefer matching library entry for resume
         let matchedId = linkId ?? savedLinks.first(where: {
             $0.url?.absoluteString == url.absoluteString
@@ -1445,7 +1450,11 @@ class AppViewModel: ObservableObject {
         do {
             _ = try await PikPakClient.shared.addOfflineTask(urlOrMagnet: magnet)
             _ = saveDirectLink(magnet, source: .pikpak, title: "Magnet task")
-            try await refreshPikPakFiles()
+            // PikPak may accept the offline task before its new file becomes
+            // listable. The transfer succeeded even if this immediate refresh
+            // races the server, so refresh opportunistically without turning a
+            // successful add into an error toast.
+            try? await refreshPikPakFiles(force: true)
             return nil
         } catch {
             return error.localizedDescription

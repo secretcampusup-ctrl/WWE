@@ -601,7 +601,26 @@ enum VideoThumbnailLoader {
         if let memoryImage = memoryCache.object(forKey: key as NSString) { return memoryImage }
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: cachedImage(forStableKey: key))
+                let fileURL = stableCacheFileURL(for: key)
+                guard let data = try? Data(contentsOf: fileURL),
+                      let encodedImage = UIImage(data: data) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                // UIImage(data:) can defer pixel decoding until SwiftUI draws
+                // the image. Hero posters are large enough for that first draw
+                // to miss a carousel frame, so force the decode on this utility
+                // queue and retain the display-ready image in memory.
+                let image = encodedImage.preparingForDisplay() ?? encodedImage
+                let pixelWidth = image.cgImage?.width ?? Int(image.size.width)
+                let pixelHeight = image.cgImage?.height ?? Int(image.size.height)
+                memoryCache.setObject(
+                    image,
+                    forKey: key as NSString,
+                    cost: pixelWidth * pixelHeight * 4
+                )
+                continuation.resume(returning: image)
             }
         }
     }

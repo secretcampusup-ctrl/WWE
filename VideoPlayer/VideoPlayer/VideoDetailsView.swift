@@ -2162,6 +2162,20 @@ struct ResolvedPlayerScreen: View {
     var episodeOptions: [PlayerEpisodeOption] = []
     var onSelectEpisode: ((String) -> Void)? = nil
 
+    init(
+        vm: AppViewModel,
+        episodeOptions: [PlayerEpisodeOption] = [],
+        onSelectEpisode: ((String) -> Void)? = nil
+    ) {
+        // Some sources present this screen while their signed URL is still
+        // resolving. Lock here, before the loading cover is constructed,
+        // instead of waiting for VideoPlayerView.onAppear after resolution.
+        ScreenOrientationLock.setPlayerLandscape(true)
+        self.vm = vm
+        self.episodeOptions = episodeOptions
+        self.onSelectEpisode = onSelectEpisode
+    }
+
     var body: some View {
         Group {
         if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
@@ -2188,6 +2202,11 @@ struct ResolvedPlayerScreen: View {
         } else {
             ImmediatePlayerLoadingView()
         }
+        }
+        .onAppear {
+            // Defensive retry for the rare case where the foreground scene was
+            // not yet available while the full-screen cover was being built.
+            ScreenOrientationLock.setPlayerLandscape(true)
         }
         .onDisappear {
             vm.endPlaybackPresentation()

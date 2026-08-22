@@ -60,9 +60,19 @@ enum ScreenOrientationLock {
     }
 
     static func setPlayerLandscape(_ landscape: Bool) {
-        allowedOrientations = landscape ? .landscapeRight : .portrait
+        let requested: UIInterfaceOrientationMask = landscape ? .landscapeRight : .portrait
+        allowedOrientations = requested
         guard let scene = activeScene else { return }
-        apply(allowedOrientations, to: scene)
+
+        // SwiftUI may rebuild a presented player value while playback state is
+        // publishing. Avoid sending redundant geometry updates once the scene
+        // already reached the requested orientation.
+        if landscape, scene.interfaceOrientation == .landscapeRight { return }
+        if !landscape,
+           scene.interfaceOrientation == .portrait || scene.interfaceOrientation == .portraitUpsideDown {
+            return
+        }
+        apply(requested, to: scene)
     }
 
     private static var activeScene: UIWindowScene? {

@@ -47,11 +47,11 @@ struct VideoPlayerView: View {
     @StateObject private var mkvControls = MKVPlaybackControls()
     @State private var showPlaybackSettings = false
     @State private var showQuickSettings = false
-    @State private var showSubtitleActions = false
     @State private var showSubtitleSearch = false
     @State private var showSubtitleFileImporter = false
     @State private var subtitleImportError: String?
     @State private var showEpisodePicker = false
+    @State private var playbackRate: Float = 1
     @State private var subtitleSize: Double = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.size) as? Double ?? 24
     @State private var subtitleColor: PlayerSubtitleColor = PlayerSubtitleColor(rawValue: UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.color) ?? "") ?? .white
     @State private var selectedAudioTrack = ""
@@ -182,6 +182,74 @@ struct VideoPlayerView: View {
                 }
             }
 
+            if showQuickSettings {
+                ZStack {
+                    Color.black.opacity(0.24)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                                showQuickSettings = false
+                            }
+                        }
+
+                    PlayerQuickSettingsPanel(
+                        audioTracks: usesMKVPlayer ? mkvControls.audioTracks : engine.audioTracks,
+                        selectedAudioTrackID: usesMKVPlayer ? mkvControls.selectedAudioTrackID : engine.selectedAudioTrackID,
+                        subtitleFileName: externalSubtitleFileName,
+                        selectedSpeed: $playbackRate,
+                        onRateChange: { rate in
+                            if usesMKVPlayer { mkvControls.setRate(rate) }
+                            else { engine.setRate(rate) }
+                        },
+                        onAudioTrackChange: { id in
+                            if usesMKVPlayer { mkvControls.selectAudioTrack(id: id) }
+                            else { engine.selectAudioTrack(id: id) }
+                        },
+                        onSearchSubtitles: {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                showQuickSettings = false
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                                showSubtitleSearch = true
+                                hideTask?.cancel()
+                                hideTask = nil
+                            }
+                        },
+                        onChooseSubtitleFile: {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                showQuickSettings = false
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                                showSubtitleFileImporter = true
+                                hideTask?.cancel()
+                                hideTask = nil
+                            }
+                        },
+                        onAdvanced: {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                showQuickSettings = false
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                                showPlaybackSettings = true
+                            }
+                        }
+                    )
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                }
+                .zIndex(80)
+            }
+
+            if !playbackDidEnd {
+                PlayerLoadingReadout(
+                    isLoading: playbackIsBuffering,
+                    bytesPerSecond: usesMKVPlayer
+                        ? mkvControls.networkSpeedBytesPerSecond
+                        : engine.networkSpeedBytesPerSecond
+                )
+                .zIndex(20)
+            }
+
             if shouldShowSkipIntro && !playbackDidEnd {
                 VStack {
                     Spacer()
@@ -276,6 +344,7 @@ struct VideoPlayerView: View {
                             else { engine.selectAudioTrack(id: id) }
                         },
                 onRateChange: { rate in
+                    playbackRate = rate
                     if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
                 },
                 onSubtitleSelected: { subtitle in
@@ -294,15 +363,6 @@ struct VideoPlayerView: View {
                     showSubtitleSearch = false
                 }
             )
-        }
-        .confirmationDialog("Subtitles", isPresented: $showSubtitleActions, titleVisibility: .visible) {
-            Button("Search Online") {
-                DispatchQueue.main.async { showSubtitleSearch = true }
-            }
-            Button("Choose File") {
-                DispatchQueue.main.async { showSubtitleFileImporter = true }
-            }
-            Button("Cancel", role: .cancel) { scheduleAutoHide() }
         }
         .fileImporter(
             isPresented: $showSubtitleFileImporter,
@@ -707,9 +767,11 @@ struct VideoPlayerView: View {
 
             VStack(spacing: 10) {
                 edgeControlButton("captions.bubble.fill") {
-                    showSubtitleActions = true
                     hideTask?.cancel()
                     hideTask = nil
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
+                        showQuickSettings = true
+                    }
                 }
             }
         }
@@ -1236,6 +1298,10 @@ struct VideoPlayerView: View {
         usesMKVPlayer ? mkvControls.isPlaying : engine.isPlaying
     }
 
+    private var playbackIsBuffering: Bool {
+        usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering
+    }
+
     private func playbackRunningChanged(_ running: Bool) {
         hideTask?.cancel()
         if running {
@@ -1305,6 +1371,7 @@ private final class MKVPlaybackControls: ObservableObject {
     @Published var resolutionLabel = "MKV"
     @Published var didReachEnd = false
     @Published var isBuffering = true
+    @Published var networkSpeedBytesPerSecond: Double = 0
     @Published var audioTracks: [PlayerAudioTrackOption] = []
     @Published var subtitleTracks: [PlayerSubtitleTrackOption] = []
     @Published var selectedAudioTrackID: String?
@@ -1350,6 +1417,9 @@ private final class MKVPlaybackControls: ObservableObject {
     func updateVideoSize(_ size: CGSize) {
         videoWidth = Int(size.width)
         videoHeight = Int(size.height)
+    }
+    func updateNetworkSpeed(_ bytesPerSecond: Double) {
+        networkSpeedBytesPerSecond = max(0, bytesPerSecond)
     }
     func skip(by seconds: Int) {
         guard durationSeconds > 0 else { surface?.skip(by: seconds); return }
@@ -1448,6 +1518,8 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private var currentHTTPHeaders: [String: String]?
     private var subtitleStyle = (fontSize: 24.0, fontName: "Helvetica Neue", color: 0xFFFFFF, background: true, shadow: true, margin: 0, delay: 0.0)
     private var loadingTimer: Timer?
+    private var lastStatisticsBytes: Double?
+    private var lastStatisticsSampleTime: TimeInterval?
     private var videoSize: CGSize = .zero
     private var sourceFormat = "Video"
     private var isFillMode = false
@@ -1527,6 +1599,9 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         let extensionName = url.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceFormat = extensionName.isEmpty ? "Video" : extensionName.uppercased()
         controls?.isBuffering = true
+        controls?.updateNetworkSpeed(0)
+        lastStatisticsBytes = nil
+        lastStatisticsSampleTime = nil
         embeddedTrackRefreshAttempts = 0
         didLoadEmbeddedTracks = false
         controls?.updateEmbeddedTracks(audio: [], subtitles: [], selectedAudio: nil, selectedSubtitle: nil)
@@ -1578,6 +1653,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             let currentTime = Double(self.mediaPlayer.time.intValue) / 1000
             let duration = Double(self.mediaPlayer.media?.length.intValue ?? 0) / 1000
             self.controls?.updateTime(current: currentTime, duration: duration)
+            self.updateNetworkTelemetry()
             let size = self.mediaPlayer.videoSize
             if size.width > 1, size.height > 1 {
                 self.controls?.resolutionLabel = "\(Int(size.width))×\(Int(size.height)) · \(self.sourceFormat)"
@@ -1597,6 +1673,47 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
                     self.refreshEmbeddedTracks()
                 }
             }
+        }
+    }
+
+    private func updateNetworkTelemetry() {
+        guard let media = mediaPlayer.media else { return }
+        var statistics: NSDictionary?
+        for name in ["statistics", "stats"] {
+            let selector = NSSelectorFromString(name)
+            guard media.responds(to: selector),
+                  let value = media.perform(selector)?.takeUnretainedValue() as? NSDictionary else { continue }
+            statistics = value
+            break
+        }
+        guard let statistics else { return }
+
+        func number(matching fragments: [String]) -> Double? {
+            for (rawKey, rawValue) in statistics {
+                let key = String(describing: rawKey)
+                    .lowercased()
+                    .replacingOccurrences(of: "_", with: "")
+                guard fragments.contains(where: { key.contains($0) }) else { continue }
+                if let value = rawValue as? NSNumber { return value.doubleValue }
+            }
+            return nil
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let totalBytes = number(matching: ["demuxreadbytes", "readbytes", "inputbytes"])
+        if let totalBytes,
+           let previousBytes = lastStatisticsBytes,
+           let previousTime = lastStatisticsSampleTime,
+           now > previousTime,
+           totalBytes >= previousBytes {
+            controls?.updateNetworkSpeed((totalBytes - previousBytes) / (now - previousTime))
+        } else if let bitrate = number(matching: ["inputbitrate", "demuxbitrate"]), bitrate > 0 {
+            // libVLC exposes this field in kilobytes per second.
+            controls?.updateNetworkSpeed(bitrate * 1_000)
+        }
+        if let totalBytes {
+            lastStatisticsBytes = totalBytes
+            lastStatisticsSampleTime = now
         }
     }
 
@@ -1688,6 +1805,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         onSingleTap = nil
         controls?.isBuffering = false
         controls?.isPlaying = false
+        controls?.updateNetworkSpeed(0)
         if controls?.surface === self {
             controls?.surface = nil
         }
@@ -1945,6 +2063,71 @@ private enum ExternalSubtitleParser {
     }
 }
 
+private struct PlayerLoadingReadout: View {
+    let isLoading: Bool
+    let bytesPerSecond: Double
+    @State private var percent = 3
+    @State private var isVisible = false
+    @State private var countingTask: Task<Void, Never>?
+
+    private var speedText: String {
+        let speed = max(0, bytesPerSecond)
+        if speed >= 1_000_000 { return String(format: "%.1f MB/s", speed / 1_000_000) }
+        if speed >= 1_000 { return String(format: "%.0f KB/s", speed / 1_000) }
+        return "0 KB/s"
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text(speedText)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .monospacedDigit()
+
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(AppPalette.gradient)
+                .frame(width: 7, height: 7)
+                .rotationEffect(.degrees(45))
+                .shadow(color: AppPalette.accent.opacity(0.75), radius: 5)
+
+            Text("\(percent)%")
+                .font(.system(size: 17, weight: .heavy, design: .rounded))
+                .monospacedDigit()
+        }
+        .foregroundColor(.white)
+        .shadow(color: .black.opacity(0.95), radius: 4, y: 2)
+        .shadow(color: .black.opacity(0.72), radius: 12, y: 5)
+        .opacity(isVisible ? 1 : 0)
+        .scaleEffect(isVisible ? 1 : 0.94)
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.2), value: isVisible)
+        .onAppear { updateLoadingState(isLoading) }
+        .onChange(of: isLoading) { updateLoadingState($0) }
+        .onDisappear { countingTask?.cancel() }
+    }
+
+    private func updateLoadingState(_ loading: Bool) {
+        countingTask?.cancel()
+        if loading {
+            percent = 3
+            isVisible = true
+            countingTask = Task { @MainActor in
+                while !Task.isCancelled, percent < 96 {
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    guard !Task.isCancelled else { return }
+                    percent = min(96, percent + max(1, (100 - percent) / 10))
+                }
+            }
+        } else if isVisible {
+            percent = 100
+            countingTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 320_000_000)
+                guard !Task.isCancelled else { return }
+                isVisible = false
+            }
+        }
+    }
+}
+
 private struct PlayerQualityBadge: View {
     let width: Int
     let height: Int
@@ -2108,35 +2291,73 @@ private extension View {
     }
 }
 
-private struct PlayerQuickSettingsPopover: View {
+private struct PlayerQuickSettingsPanel: View {
     let audioTracks: [PlayerAudioTrackOption]
     let selectedAudioTrackID: String?
-    let subtitleTracks: [PlayerSubtitleTrackOption]
-    let selectedSubtitleTrackID: String?
     let subtitleFileName: String?
+    @Binding var selectedSpeed: Float
     let onRateChange: (Float) -> Void
     let onAudioTrackChange: (String) -> Void
-    let onDisableSubtitles: () -> Void
+    let onSearchSubtitles: () -> Void
+    let onChooseSubtitleFile: () -> Void
     let onAdvanced: () -> Void
     @State private var page: QuickSettingsPage = .main
-    @State private var selectedSpeed: Float = 1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(AppPalette.accent)
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.09), in: Circle())
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(page == .main ? "Playback Controls" : pageTitle)
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text(page == .main ? "Video and audio options" : "Choose an option")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .padding(.bottom, 11)
+
+            Divider().overlay(Color.white.opacity(0.12))
+                .padding(.bottom, 5)
+
             if page == .main {
                 mainMenu
             } else {
                 submenu
-                    .frame(height: submenuHeight, alignment: .top)
+                    .frame(maxHeight: submenuHeight, alignment: .top)
             }
         }
-        .frame(width: 242)
-        .padding(9)
-        .background(Color(uiColor: .secondarySystemBackground))
+        .frame(width: min(330, UIScreen.main.bounds.width - 54))
+        .padding(13)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 25, style: .continuous))
+        .background(Color.black.opacity(0.54), in: RoundedRectangle(cornerRadius: 25, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 25, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+        }
+        .shadow(color: .black.opacity(0.65), radius: 30, y: 14)
     }
 
     private var submenuHeight: CGFloat {
-        min(420, max(230, UIScreen.main.bounds.height * 0.58))
+        min(330, max(190, UIScreen.main.bounds.height * 0.48))
+    }
+
+    private var pageTitle: String {
+        switch page {
+        case .speed: return "Playback Speed"
+        case .audio: return "Audio Track"
+        case .subtitles: return "Subtitles"
+        case .main: return "Playback Controls"
+        }
     }
 
     private var mainMenu: some View {
@@ -2144,7 +2365,7 @@ private struct PlayerQuickSettingsPopover: View {
             row("Playback Speed", icon: "speedometer", value: selectedSpeed == 1 ? "Normal" : "\(selectedSpeed)×") { page = .speed }
             row("Audio", icon: "music.note", value: selectedAudioTitle) { page = .audio }
             row("Subtitles", icon: "captions.bubble.fill", value: selectedSubtitleTitle) { page = .subtitles }
-            Divider().padding(.vertical, 5)
+            Divider().overlay(Color.white.opacity(0.12)).padding(.vertical, 5)
             row("Advanced Options", icon: "gearshape.fill", value: nil, action: onAdvanced)
         }
     }
@@ -2152,11 +2373,13 @@ private struct PlayerQuickSettingsPopover: View {
     @ViewBuilder private var submenu: some View {
         VStack(alignment: .leading, spacing: 5) {
             Button { page = .main } label: {
-                Label("Back", systemImage: "chevron.left").font(.headline).foregroundColor(.primary)
-            }.font(.system(size: 13, weight: .semibold))
+                Label("Back", systemImage: "chevron.left")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white)
+            }
             .padding(.bottom, 5)
-            Divider()
-            ScrollView(.vertical, showsIndicators: true) {
+            Divider().overlay(Color.white.opacity(0.12))
+            ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 5) {
                     submenuChoices
                 }
@@ -2180,13 +2403,21 @@ private struct PlayerQuickSettingsPopover: View {
                     choice(track.title, selected: selectedAudioTrackID == track.id) { onAudioTrackChange(track.id) }
                 }
             } else {
-                Text("One audio track").foregroundColor(.secondary).padding(10)
+                Text("One audio track").foregroundColor(Color.white.opacity(0.58)).padding(10)
             }
         case .subtitles:
-            choice("None", selected: subtitleFileName == nil && selectedSubtitleTrackID == nil, action: onDisableSubtitles)
-            if let subtitleFileName {
-                choice(subtitleFileName, selected: true, action: {})
-            }
+            submenuAction(
+                "Search Online",
+                subtitle: "Find a subtitle using this video's metadata",
+                icon: "magnifyingglass",
+                action: onSearchSubtitles
+            )
+            submenuAction(
+                "Choose File",
+                subtitle: "Open a subtitle stored on this device",
+                icon: "doc.badge.plus",
+                action: onChooseSubtitleFile
+            )
         case .main:
             EmptyView()
         }
@@ -2197,28 +2428,90 @@ private struct PlayerQuickSettingsPopover: View {
     }
 
     private var selectedSubtitleTitle: String {
-        if let subtitleFileName { return subtitleFileName }
-        guard let selectedSubtitleTrackID else { return "None" }
-        return subtitleTracks.first(where: { $0.id == selectedSubtitleTrackID })?.title ?? "On"
+        subtitleFileName ?? "Search or choose file"
     }
 
     private func row(_ title: String, icon: String, value: String?, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: icon).font(.system(size: 14, weight: .semibold)).frame(width: 21).foregroundColor(.secondary)
-                Text(title).font(.system(size: 13.5, weight: .medium)).foregroundColor(.primary)
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 34, height: 34)
+                    .foregroundColor(AppPalette.accent)
+                    .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Text(title).font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
                 Spacer()
-                if let value { Text(value).font(.system(size: 10.5)).foregroundColor(.secondary).lineLimit(1) }
-                Image(systemName: "chevron.right").font(.caption.bold()).foregroundColor(.secondary)
-            }.padding(.horizontal, 6).frame(height: 38)
+                if let value {
+                    Text(value)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.5))
+                        .lineLimit(1)
+                        .frame(maxWidth: 105, alignment: .trailing)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundColor(Color.white.opacity(0.38))
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 47)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(PremiumPressButtonStyle())
     }
 
     private func choice(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack { Image(systemName: selected ? "checkmark" : "").frame(width: 18); Text(title); Spacer() }
-                .font(.system(size: 13)).foregroundColor(.primary).padding(.horizontal, 6).frame(height: 33)
+            HStack(spacing: 11) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? AppPalette.accent : Color.white.opacity(0.24))
+                    .frame(width: 20)
+                Text(title).lineLimit(1)
+                Spacer()
+            }
+            .font(.system(size: 13.5, weight: selected ? .semibold : .medium))
+            .foregroundColor(.white)
+            .padding(.horizontal, 8)
+            .frame(height: 39)
+            .background(selected ? Color.white.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .contentShape(Rectangle())
         }
+        .buttonStyle(PremiumPressButtonStyle())
+    }
+
+    private func submenuAction(
+        _ title: String,
+        subtitle: String,
+        icon: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(AppPalette.accent)
+                    .frame(width: 38, height: 38)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text(subtitle)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(Color.white.opacity(0.38))
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 52)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PremiumPressButtonStyle())
     }
 }
 
@@ -3193,6 +3486,9 @@ struct RoutedVideoPlayerView: View {
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
 
     init(url: URL, title: String, subtitleMediaContext: SubtitleMediaContext? = nil, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+        // The cover builds this value before presenting it. Rotating here avoids
+        // one portrait player frame before VideoPlayerView.onAppear is called.
+        ScreenOrientationLock.setPlayerLandscape(true)
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
         self.subtitleMediaContext = subtitleMediaContext
         self.httpHeaders = httpHeaders; self.onProgress = onProgress

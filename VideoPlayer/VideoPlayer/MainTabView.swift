@@ -7,7 +7,6 @@ struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
     @StateObject private var catalog = UnifiedContentModel()
     @State private var selectedTab = 0
-    @State private var dockIsCompact = false
     @Namespace private var dockSelection
 
     var body: some View {
@@ -25,16 +24,14 @@ struct MainTabView: View {
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
 
-            dockSurface
-                .padding(.horizontal, dockIsCompact ? 0 : 34)
-                .frame(maxWidth: .infinity, alignment: dockIsCompact ? .leading : .center)
-                .padding(.leading, dockIsCompact ? 18 : 0)
+            HStack(spacing: 10) {
+                dockSurface
+                    .frame(maxWidth: .infinity)
+
+                settingsSurface
+            }
+                .padding(.horizontal, 24)
                 .padding(.bottom, -16)
-                .animation(.spring(response: 0.42, dampingFraction: 0.76), value: dockIsCompact)
-        }
-        .background {
-            DockScrollGestureBridge { compact in setDockCompact(compact) }
-                .frame(width: 1, height: 1)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
@@ -64,66 +61,68 @@ struct MainTabView: View {
             .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
     }
 
-    @ViewBuilder
     private var dockContent: some View {
-        if dockIsCompact {
-            Button {
-                UISelectionFeedbackGenerator().selectionChanged()
-                setDockCompact(false)
-            } label: {
-                Image(systemName: selectedDockIcon)
-                    .font(.system(size: 23, weight: .medium))
-                    .foregroundStyle(AppPalette.accent)
-                    .frame(width: 52, height: 48)
-                    .background(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.16), AppPalette.accent.opacity(0.14)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: Capsule()
-                    )
-                    .overlay(Capsule().stroke(AppPalette.accent.opacity(0.45), lineWidth: 0.8))
-                    .shadow(color: AppPalette.accent.opacity(0.36), radius: 7)
-                    .matchedGeometryEffect(id: "dock-icon-\(selectedTab)", in: dockSelection)
-            }
-            .buttonStyle(.plain)
-            .transition(.scale(scale: 0.72).combined(with: .opacity))
-            .accessibilityLabel(selectedDockTitle)
-        } else {
-            HStack(spacing: 3) {
-                dockButton("Home", "house.fill", 0)
-                dockButton("Content", "rectangle.stack.fill", 1)
-                dockButton("Discover", "sailboat.fill", 2)
-                dockButton("Settings", "gearshape.fill", 3)
-            }
-            .transition(.scale(scale: 0.92).combined(with: .opacity))
+        HStack(spacing: 3) {
+            dockButton("Home", "house.fill", 0)
+            dockButton("Content", "rectangle.stack.fill", 1)
+            dockButton("Discover", "sailboat.fill", 2)
         }
     }
 
-    private var selectedDockIcon: String {
-        ["house.fill", "rectangle.stack.fill", "sailboat.fill", "gearshape.fill"][min(3, max(0, selectedTab))]
-    }
-
-    private var selectedDockTitle: String {
-        ["Home", "Content", "Discover", "Settings"][min(3, max(0, selectedTab))]
-    }
-
-    private func setDockCompact(_ compact: Bool) {
-        guard dockIsCompact != compact else { return }
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.76)) {
-            dockIsCompact = compact
+    private var settingsSurface: some View {
+        let isSelected = selectedTab == 3
+        return Button {
+            selectTab(3)
+        } label: {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 23, weight: .medium))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(isSelected ? AppPalette.accent : Color.white.opacity(0.9))
+                .scaleEffect(isSelected ? 1.08 : 1)
+                .shadow(color: isSelected ? AppPalette.accent.opacity(0.44) : .clear, radius: 6)
+                .frame(width: 50, height: 50)
+                .background {
+                    if isSelected {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.18), AppPalette.accent.opacity(0.14)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .matchedGeometryEffect(id: "dock", in: dockSelection)
+                    }
+                }
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .padding(4)
+        .background {
+            ZStack {
+                Circle().fill(.ultraThinMaterial).opacity(0.68)
+                Circle().fill(Color.black.opacity(0.13))
+            }
+        }
+        .overlay {
+            Circle().stroke(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.34), Color.white.opacity(0.09)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: 0.9
+            )
+        }
+        .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
+        .animation(.spring(response: 0.38, dampingFraction: 0.7), value: isSelected)
+        .accessibilityLabel("Settings")
     }
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
         let isSelected = selectedTab == tab
         return Button {
-            guard selectedTab != tab else { return }
-            UISelectionFeedbackGenerator().selectionChanged()
-            withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
-                selectedTab = tab
-            }
+            selectTab(tab)
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 23, weight: .medium))
@@ -154,110 +153,12 @@ struct MainTabView: View {
         .animation(.spring(response: 0.38, dampingFraction: 0.7), value: isSelected)
         .accessibilityLabel(title)
     }
-}
 
-/// Watches vertical pan gestures at the window level so nested SwiftUI
-/// ScrollViews in every tab produce the same compact/expanded dock behavior.
-private struct DockScrollGestureBridge: UIViewRepresentable {
-    let onDirectionChange: (Bool) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(onDirectionChange: onDirectionChange) }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
-        view.isUserInteractionEnabled = false
-        DispatchQueue.main.async { context.coordinator.attach(from: view) }
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.onDirectionChange = onDirectionChange
-        if !context.coordinator.isAttached {
-            DispatchQueue.main.async { context.coordinator.attach(from: uiView) }
-        }
-    }
-
-    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
-        coordinator.detach()
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var onDirectionChange: (Bool) -> Void
-        private weak var hostView: UIView?
-        private var recognizer: UIPanGestureRecognizer?
-        private var didTrigger = false
-        private var attachAttempts = 0
-        private var gestureStartedInScrollView = false
-        var isAttached: Bool { recognizer?.view != nil }
-
-        init(onDirectionChange: @escaping (Bool) -> Void) {
-            self.onDirectionChange = onDirectionChange
-        }
-
-        func attach(from view: UIView) {
-            guard recognizer == nil else { return }
-            guard let host = view.window else {
-                guard attachAttempts < 20 else { return }
-                attachAttempts += 1
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak view] in
-                    guard let self, let view else { return }
-                    self.attach(from: view)
-                }
-                return
-            }
-            let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-            pan.cancelsTouchesInView = false
-            pan.delaysTouchesBegan = false
-            pan.delaysTouchesEnded = false
-            pan.delegate = self
-            host.addGestureRecognizer(pan)
-            hostView = host
-            recognizer = pan
-            attachAttempts = 0
-        }
-
-        func detach() {
-            if let recognizer { hostView?.removeGestureRecognizer(recognizer) }
-            recognizer = nil
-            hostView = nil
-            attachAttempts = 0
-        }
-
-        @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-            switch gesture.state {
-            case .began:
-                didTrigger = false
-                gestureStartedInScrollView = isInsideScrollView(gesture)
-            case .changed where !didTrigger:
-                guard gestureStartedInScrollView else { return }
-                let translation = gesture.translation(in: gesture.view)
-                let velocity = gesture.velocity(in: gesture.view)
-                guard abs(translation.y) > 18,
-                      abs(velocity.y) > abs(velocity.x) * 1.1 else { return }
-                didTrigger = true
-                onDirectionChange(velocity.y < 0)
-            case .ended, .cancelled, .failed:
-                didTrigger = false
-                gestureStartedInScrollView = false
-            default:
-                break
-            }
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool { true }
-
-        private func isInsideScrollView(_ gesture: UIGestureRecognizer) -> Bool {
-            guard let hostView else { return false }
-            let point = gesture.location(in: hostView)
-            var view = hostView.hitTest(point, with: nil)
-            while let current = view {
-                if current is UIScrollView { return true }
-                view = current.superview
-            }
-            return false
+    private func selectTab(_ tab: Int) {
+        guard selectedTab != tab else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
+            selectedTab = tab
         }
     }
 }
@@ -441,7 +342,7 @@ struct HomeLibraryView: View {
             .onChange(of: heroRotationSlot) { _ in scheduleDerivedDataRebuild() }
             .onReceive(heroSlideTimer) { _ in
                 guard isActive, featuredItems.count > 1 else { return }
-                withAnimation(.easeInOut(duration: 0.55)) {
+                withAnimation(.easeInOut(duration: 0.48)) {
                     heroIndex = (heroIndex + 1) % featuredItems.count
                 }
             }
@@ -533,17 +434,18 @@ struct HomeLibraryView: View {
                     .id(featuredItems[currentHeroIndex].id)
                     .frame(width: pageWidth, height: 610)
                     .clipped()
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)
-                    ))
+                    // Moving the complete 610pt hierarchy forced layout and
+                    // material recomposition during every carousel frame. A
+                    // subtle GPU-backed crossfade/scale keeps the cinematic
+                    // motion without hitching on lower-memory iPhones.
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
 
                 VStack {
                     Spacer()
                     HStack(spacing: 7) {
                         ForEach(heroIndicatorIndices, id: \.self) { index in
                             Button {
-                                withAnimation(.easeInOut(duration: 0.42)) { heroIndex = index }
+                                withAnimation(.easeInOut(duration: 0.48)) { heroIndex = index }
                             } label: {
                                 Capsule()
                                     .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
@@ -566,7 +468,7 @@ struct HomeLibraryView: View {
                         guard abs(value.translation.width) > abs(value.translation.height),
                               abs(value.translation.width) > 42,
                               featuredItems.count > 1 else { return }
-                        withAnimation(.easeInOut(duration: 0.42)) {
+                        withAnimation(.easeInOut(duration: 0.48)) {
                             if value.translation.width < 0 {
                                 heroIndex = (heroIndex + 1) % featuredItems.count
                             } else {
@@ -583,7 +485,11 @@ struct HomeLibraryView: View {
     private var heroPinnedBackground: some View {
         ZStack {
             ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
-                PersistentHeroArtwork(entry: entry, isActive: index == currentHeroIndex)
+                PersistentHeroArtwork(
+                    entry: entry,
+                    shouldPrepare: shouldPrepareHeroArtwork(at: index),
+                    isCurrent: index == currentHeroIndex
+                )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .opacity(index == currentHeroIndex ? 1 : 0)
@@ -615,7 +521,7 @@ struct HomeLibraryView: View {
         }
         .frame(width: UIScreen.main.bounds.width, height: 670 + homeTopSafeAreaInset)
         .clipped()
-        .animation(.easeInOut(duration: 0.5), value: currentHeroIndex)
+        .animation(.easeInOut(duration: 0.48), value: currentHeroIndex)
     }
 
     private func heroSlide(_ entry: UnifiedMediaEntry, viewportWidth: CGFloat) -> some View {
@@ -987,10 +893,10 @@ struct HomeLibraryView: View {
 
     private func buildFeaturedItems(from libraryItems: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
         let candidates = (catalog.movies + catalog.shows).filter { entry in
-            guard entry.details != nil else { return false }
-            return entry.details?.detailsBackdropURL != nil
-                || entry.details?.imageURL != nil
-                || entry.posterURL != nil
+            // Hero must never start from the 342px grid poster and replace it
+            // after metadata arrives. Only titles with an original-size TMDB
+            // poster are eligible for the carousel.
+            entry.details?.heroPosterURL != nil
         }
 
         let candidateIDs = Set(candidates.map(\.id))
@@ -1092,6 +998,15 @@ struct HomeLibraryView: View {
         let count = featuredItems.count
         guard count > 0 else { return 0 }
         return min(max(0, heroIndex), count - 1)
+    }
+
+    private func shouldPrepareHeroArtwork(at index: Int) -> Bool {
+        let count = featuredItems.count
+        guard count > 0 else { return false }
+        let current = currentHeroIndex
+        let previous = (current - 1 + count) % count
+        let next = (current + 1) % count
+        return index == current || index == previous || index == next
     }
 
     private var heroIndicatorIndices: [Int] {
@@ -1491,9 +1406,9 @@ private struct HomeHeroZoomContainer<Content: View>: View {
 
 private struct PersistentHeroArtwork: View {
     let entry: UnifiedMediaEntry
-    let isActive: Bool
+    let shouldPrepare: Bool
+    let isCurrent: Bool
     @State private var image: UIImage?
-    @State private var placeholderImage: UIImage?
     @State private var didCheckStableCache = false
 
     // v2 invalidates Hero files that older builds populated from the tiny grid
@@ -1502,24 +1417,20 @@ private struct PersistentHeroArtwork: View {
         "unified-hero-nolang-original-v2|\(entry.id)|\(remoteURL?.absoluteString ?? "local")"
     }
     private var remoteURL: URL? {
+        // heroPosterURL is always an /original TMDB URL and already applies
+        // No Language -> English -> title-poster fallback ordering.
         entry.details?.heroPosterURL
-            ?? entry.details?.detailsPosterURL
-            ?? entry.details?.detailsBackdropURL
-            ?? entry.details?.imageURL
-            ?? entry.posterURL
     }
 
     var body: some View {
         ZStack {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
-            } else if let placeholderImage {
-                Image(uiImage: placeholderImage).resizable().scaledToFill()
             } else {
                 AppTheme.bg
             }
 
-            if image == nil, didCheckStableCache, isActive, let remoteURL {
+            if image == nil, didCheckStableCache, shouldPrepare, let remoteURL {
                 KFImage(remoteURL)
                     .placeholder { Color.clear }
                     .cacheOriginalImage()
@@ -1535,28 +1446,29 @@ private struct PersistentHeroArtwork: View {
                     .scaledToFill()
             }
         }
-        .task(id: "\(cacheKey)|\(isActive)") {
-            if !isActive {
+        .task(id: "\(cacheKey)|\(shouldPrepare)") {
+            if !shouldPrepare {
                 // Preserve the outgoing artwork through the carousel fade, then
                 // release its decoded pixels. Returning to it reuses disk cache.
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 guard !Task.isCancelled else { return }
                 image = nil
-                placeholderImage = nil
                 didCheckStableCache = false
                 return
             }
+            // A carousel step changes which off-screen item is the new "next"
+            // poster. Starting its disk/network decode in the same frame as the
+            // visible crossfade caused a small hitch. The incoming/current image
+            // is already warm, so defer only this new neighbor until the fade is
+            // complete; it still has several seconds before becoming visible.
+            if !isCurrent, image == nil {
+                try? await Task.sleep(nanoseconds: 620_000_000)
+                guard !Task.isCancelled else { return }
+            }
             didCheckStableCache = false
             image = nil
-            placeholderImage = nil
             if let primary = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey) {
                 image = primary
-            } else {
-                // A small poster may appear for the first frame only; unlike the
-                // old implementation it never blocks the original-image request.
-                placeholderImage = await VideoThumbnailLoader.cachedImageAsync(
-                    forStableKey: "unified|\(entry.id)"
-                )
             }
             didCheckStableCache = true
         }
@@ -2013,7 +1925,7 @@ private struct PirateBayView: View {
     }
 
     private func resultCard(_ item: PirateBayResult) -> some View {
-        NavigationLink { PirateBayDetailsView(item: item, tint: section.tint) } label: {
+        NavigationLink { PirateBayDetailsView(vm: vm, item: item, tint: section.tint) } label: {
             VStack(alignment: .leading, spacing: 11) {
                 HStack(alignment: .top) { Text(item.name).font(.headline).foregroundStyle(.white).lineLimit(3); Spacer(minLength: 8); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 4) }
                 HStack(spacing: 12) {
@@ -2089,10 +2001,16 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
 }
 
 private struct PirateBayDetailsView: View {
+    @ObservedObject var vm: AppViewModel
     let item: PirateBayResult; let tint: Color
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = PirateBayDetailsModel()
-    @State private var sendingOffcloud = false; @State private var sendingTorBox = false; @State private var message: String?; @State private var selectedImage = 0; @State private var showViewer = false
+    @State private var sendingOffcloud = false
+    @State private var sendingTorBox = false
+    @State private var sendingPikPak = false
+    @State private var message: String?
+    @State private var selectedImage = 0
+    @State private var showViewer = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -2102,7 +2020,10 @@ private struct PirateBayDetailsView: View {
                         actionButton("Offcloud", icon: "cloud.fill", busy: sendingOffcloud) { sendToOffcloud() }
                         actionButton("TorBox", icon: "shippingbox.fill", busy: sendingTorBox) { sendToTorBox() }
                     }
-                    actionButton("Copy Magnet", icon: "doc.on.doc.fill") { UIPasteboard.general.string = item.magnet; toast("Magnet copied") }
+                    HStack(spacing: 10) {
+                        actionButton("PikPak", icon: "bolt.horizontal.cloud.fill", busy: sendingPikPak) { sendToPikPak() }
+                        actionButton("Copy Magnet", icon: "doc.on.doc.fill") { UIPasteboard.general.string = item.magnet; toast("Magnet copied") }
+                    }
                 }
                 HStack(spacing: 14) { Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green); Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange); Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary) }.font(.caption.bold())
                 if model.isLoading { ProgressView("Loading images…").frame(maxWidth: .infinity).padding(.top, 35) }
@@ -2155,6 +2076,21 @@ private struct PirateBayDetailsView: View {
                 toast("Sent to TorBox")
             } catch { toast(error.localizedDescription) }
             sendingTorBox = false
+        }
+    }
+    private func sendToPikPak() {
+        guard vm.pikpakAccount != nil || PikPakClient.shared.loadAccount() != nil else {
+            toast("Connect PikPak from Settings first")
+            return
+        }
+        sendingPikPak = true
+        Task { @MainActor in
+            if let error = await vm.addMagnetToPikPak(item.magnet) {
+                toast(error)
+            } else {
+                toast("Sent to PikPak")
+            }
+            sendingPikPak = false
         }
     }
     private func toast(_ value: String) { message = value; Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if message == value { message = nil } } }

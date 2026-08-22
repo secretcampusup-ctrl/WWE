@@ -149,19 +149,32 @@ final class PikPakClient {
     // MARK: - Account storage
 
     func loadAccount() -> PikPakAccount? {
-        guard let data = UserDefaults.standard.data(forKey: accountKey),
-              let acc = try? JSONDecoder().decode(PikPakAccount.self, from: data) else { return nil }
-        return acc
+        if let data = SecureCredentialStore.data(for: AppCredentialKeys.pikpakAccount),
+           let account = try? JSONDecoder().decode(PikPakAccount.self, from: data) {
+            return account
+        }
+
+        // One-time migration for builds that stored the native PikPak session
+        // in UserDefaults before the rclone import flow was introduced.
+        guard let legacyData = UserDefaults.standard.data(forKey: accountKey),
+              let account = try? JSONDecoder().decode(PikPakAccount.self, from: legacyData) else {
+            return nil
+        }
+        if SecureCredentialStore.set(legacyData, for: AppCredentialKeys.pikpakAccount) {
+            UserDefaults.standard.removeObject(forKey: accountKey)
+        }
+        return account
     }
 
     func saveAccount(_ account: PikPakAccount) {
         if let data = try? JSONEncoder().encode(account) {
-            UserDefaults.standard.set(data, forKey: accountKey)
-            UserDefaults.standard.synchronize()
+            _ = SecureCredentialStore.set(data, for: AppCredentialKeys.pikpakAccount)
+            UserDefaults.standard.removeObject(forKey: accountKey)
         }
     }
 
     func logout() {
+        _ = SecureCredentialStore.remove(AppCredentialKeys.pikpakAccount)
         UserDefaults.standard.removeObject(forKey: accountKey)
     }
 
@@ -181,8 +194,14 @@ final class PikPakClient {
             displayName: label
         )
         saveAccount(account)
-        _ = try await listFiles(parentId: "")
-        return account
+        do {
+            _ = try await listFiles(parentId: "")
+            return loadAccount() ?? account
+        } catch {
+            // Do not leave an invalid or mismatched rclone session connected.
+            logout()
+            throw error
+        }
     }
 
     private func parseRcloneOrBearerToken(_ rawToken: String) throws -> (accessToken: String, refreshToken: String?, expiry: Date?, deviceId: String?) {
@@ -192,18 +211,48 @@ final class PikPakClient {
             raw = String(raw.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        let jsonText = Self.extractAccessTokenJSON(from: raw) ?? raw
+        // A full rclone.conf may contain multiple PikPak remotes. Select the
+        // exact section that owns a token so its device_id cannot accidentally
+        // be taken from another, incomplete remote.
+        let scopedRaw = Self.preferredRclonePikPakSection(from: raw) ?? raw
+        let jsonText = Self.extractAccessTokenJSON(from: scopedRaw) ?? scopedRaw
         if jsonText.hasPrefix("{"), let data = jsonText.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let access = json["access_token"] as? String,
            access.count > 20 {
             let refresh = json["refresh_token"] as? String
             let expiryText = json["expiry"] as? String
-            return (access, refresh, Self.parseRcloneDate(expiryText), Self.extractConfigValue(named: "device_id", from: raw))
+            return (access, refresh, Self.parseRcloneDate(expiryText), Self.extractConfigValue(named: "device_id", from: scopedRaw))
         }
 
-        guard raw.count > 20, !raw.contains("...") else { throw PikPakError.invalidCredentials }
-        return (raw, nil, nil, Self.extractConfigValue(named: "device_id", from: raw))
+        guard scopedRaw.count > 20, !scopedRaw.contains("...") else { throw PikPakError.invalidCredentials }
+        return (scopedRaw, nil, nil, Self.extractConfigValue(named: "device_id", from: scopedRaw))
+    }
+
+    private static func preferredRclonePikPakSection(from raw: String) -> String? {
+        var sections: [String] = []
+        var current: [Substring] = []
+
+        func appendCurrent() {
+            guard !current.isEmpty else { return }
+            sections.append(current.map(String.init).joined(separator: "\n"))
+        }
+
+        for line in raw.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }) {
+            let trimmed = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
+                appendCurrent()
+                current = [line]
+            } else {
+                current.append(line)
+            }
+        }
+        appendCurrent()
+
+        return sections.first { section in
+            let isPikPak = extractConfigValue(named: "type", from: section)?.lowercased() == "pikpak"
+            return isPikPak && extractAccessTokenJSON(from: section) != nil
+        }
     }
 
     private static func extractConfigValue(named name: String, from raw: String) -> String? {

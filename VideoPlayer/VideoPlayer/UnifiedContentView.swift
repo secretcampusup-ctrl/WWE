@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import Kingfisher
+import UniformTypeIdentifiers
 
 enum UnifiedMediaSection: String, CaseIterable, Identifiable {
     case movies = "Movies"
@@ -1704,7 +1705,7 @@ struct UnifiedSettingsView: View {
                     }
 
                     VStack(spacing: 12) {
-                        settingsRow("Servers", "WebDAV, Offcloud and TorBox accounts", "server.rack", .servers)
+                        settingsRow("Servers", "WebDAV, PikPak, Offcloud and TorBox accounts", "server.rack", .servers)
                         settingsRow("Downloads", "Current downloads and downloaded videos", "arrow.down.circle.fill", .downloads)
                         settingsRow("Subtitles", "Language, appearance and automatic search", "captions.bubble.fill", .subtitles)
                         settingsRow("Direct Links", "Add PikPak or any direct video link", "link.badge.plus", .directLinks)
@@ -1783,7 +1784,7 @@ private struct ServerAccountsSettingsView: View {
     @State private var destination: ServerDestination?
 
     private enum ServerDestination: String, Identifiable {
-        case webdav, offcloud, torbox
+        case webdav, pikpak, offcloud, torbox
         var id: String { rawValue }
     }
 
@@ -1792,6 +1793,7 @@ private struct ServerAccountsSettingsView: View {
             List {
                 Section("Servers") {
                     serverRow("WebDAV", "PikPak, NAS and other WebDAV servers", "externaldrive.connected.to.line.below", .webdav)
+                    serverRow("PikPak", "Import a secure rclone session for Discover", "bolt.horizontal.cloud.fill", .pikpak)
                     serverRow("Offcloud", "Offcloud account and cloud transfers", "cloud.fill", .offcloud)
                     serverRow("TorBox", "TorBox account and torrent library", "shippingbox.fill", .torbox)
                 }
@@ -1831,6 +1833,8 @@ private struct ServerAccountsSettingsView: View {
         switch item {
         case .webdav:
             WebDAVSettingsView(vm: vm)
+        case .pikpak:
+            PikPakAccountSettingsView(vm: vm)
         case .offcloud:
             NavigationStack {
                 Form {
@@ -1918,6 +1922,127 @@ private struct ServerAccountsSettingsView: View {
             } catch {
                 torBoxStatus = error.localizedDescription
                 isSavingTorBox = false
+            }
+        }
+    }
+}
+
+private struct PikPakAccountSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: AppViewModel
+    @State private var showRcloneImporter = false
+    @State private var isConnecting = false
+    @State private var status = ""
+
+    private var isConnected: Bool {
+        vm.pikpakAccount != nil || PikPakClient.shared.loadAccount() != nil
+    }
+
+    private var allowedConfigurationTypes: [UTType] {
+        var types: [UTType] = [.plainText, .data]
+        if let conf = UTType(filenameExtension: "conf") { types.insert(conf, at: 0) }
+        return types
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("PikPak Session") {
+                    HStack(spacing: 12) {
+                        Image(systemName: isConnected ? "checkmark.circle.fill" : "person.crop.circle.badge.questionmark")
+                            .font(.title2)
+                            .foregroundStyle(isConnected ? Color.green : AppPalette.accent)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(isConnected ? "Connected" : "Not Connected")
+                                .font(.headline)
+                            Text(isConnected
+                                 ? "The renewable session is stored in this iPhone's Keychain."
+                                 : "Import the rclone.conf created on your computer.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Import from rclone") {
+                    Button {
+                        showRcloneImporter = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            if isConnecting { ProgressView() }
+                            else { Image(systemName: "doc.badge.arrow.up.fill") }
+                            Text(isConnecting ? "Checking PikPak Session…" : "Import rclone.conf")
+                        }
+                    }
+                    .disabled(isConnecting)
+
+                    Text("Move rclone.conf to iCloud Drive or On My iPhone, then select it here. The token is read locally and is never displayed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !status.isEmpty {
+                    Section("Status") {
+                        Text(status)
+                            .font(.footnote)
+                            .foregroundStyle(status.hasPrefix("Connected") ? Color.green : Color.secondary)
+                    }
+                }
+
+                if isConnected {
+                    Section {
+                        Button("Disconnect PikPak", role: .destructive) {
+                            vm.pikpakLogout()
+                            status = ""
+                        }
+                    }
+                }
+            }
+            .navigationTitle("PikPak Account")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
+            }
+            .fileImporter(
+                isPresented: $showRcloneImporter,
+                allowedContentTypes: allowedConfigurationTypes,
+                allowsMultipleSelection: false,
+                onCompletion: importRcloneConfiguration
+            )
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func importRcloneConfiguration(_ result: Result<[URL], Error>) {
+        switch result {
+        case let .failure(error):
+            status = error.localizedDescription
+        case let .success(urls):
+            guard let url = urls.first else { return }
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+
+            do {
+                let data = try Data(contentsOf: url)
+                guard let configuration = String(data: data, encoding: .utf8),
+                      !configuration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw PikPakError.invalidCredentials
+                }
+                isConnecting = true
+                status = "Checking the imported session…"
+                Task { @MainActor in
+                    if let error = await vm.pikpakLoginWithPersonalAccessToken(configuration) {
+                        status = error
+                    } else {
+                        status = "Connected · PikPak is ready in Discover"
+                    }
+                    isConnecting = false
+                }
+            } catch {
+                status = error.localizedDescription
             }
         }
     }
