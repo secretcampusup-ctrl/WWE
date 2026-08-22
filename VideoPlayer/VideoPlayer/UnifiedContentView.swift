@@ -1012,7 +1012,12 @@ struct UnifiedContentView: View {
 
     private func play(_ source: UnifiedSource) {
         switch source {
-        case let .webDAV(server, file): vm.play(file: file, server: server)
+        case let .webDAV(server, file):
+            Task { @MainActor in
+                guard await vm.preparePlayback(file: file, server: server) else { return }
+                showPlayer = true
+            }
+            return
         case let .offcloud(_, file):
             guard let url = file.streamURL else { return }
             if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
@@ -1398,7 +1403,12 @@ struct UnifiedMediaDetailsHost: View {
         vm.preparePlaybackHistory(for: currentDetailsItem)
         let source = selectedEpisode?.source ?? activeEntry.source
         switch source {
-        case let .webDAV(server, file): vm.play(file: file, server: server)
+        case let .webDAV(server, file):
+            Task { @MainActor in
+                guard await vm.preparePlayback(file: file, server: server) else { return }
+                showPlayer = true
+            }
+            return
         case let .offcloud(_, file):
             guard let url = file.streamURL else { return }
             if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {

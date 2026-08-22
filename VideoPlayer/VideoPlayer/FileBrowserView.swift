@@ -65,8 +65,10 @@ struct FileBrowserView: View {
                             }
                         } else if file.isVideo {
                             Button(action: {
-                                vm.play(file: file, server: server)
-                                showingPlayer = true
+                                Task { @MainActor in
+                                    guard await vm.preparePlayback(file: file, server: server) else { return }
+                                    showingPlayer = true
+                                }
                             }) {
                                 FileRow(file: file, isNowPlaying: vm.nowPlaying?.id == file.id)
                             }

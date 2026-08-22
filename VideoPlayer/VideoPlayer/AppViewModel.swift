@@ -640,22 +640,9 @@ class AppViewModel: ObservableObject {
             return
         }
 
-        // Tokenized PikPak direct download links - preserve fid/sign/userid/etc.
-        if LinkResolver.isPikPakDirectDownload(link.urlString)
-            || (link.source == .pikpak && LinkResolver.isPikPakDirectDownload(link.resolvedStreamURL ?? "")) {
-            if let stream = LinkResolver.resolvePikPakDirectStream(link.resolvedStreamURL ?? link.urlString)
-                ?? LinkResolver.resolvePikPakDirectStream(link.urlString) {
-                startPlayback(
-                    url: stream,
-                    title: link.title,
-                    linkId: link.id,
-                    headers: PikPakClient.shared.directPlaybackHeaders()
-                )
-                return
-            }
-        }
-
-        // Re-resolve PikPak cloud file id if needed
+        // Account/file entries must resolve a fresh signed URL before consulting
+        // the persisted fallback. Reusing yesterday's CDN signature is a common
+        // cause of VLC/AVPlayer reporting that the media cannot be opened.
         if link.source == .pikpak, let fileId = link.pikpakFileId {
             isLoading = true
             defer { isLoading = false }
@@ -668,7 +655,22 @@ class AppViewModel: ObservableObject {
                 }
                 return
             } catch {
-                // Fall through to stored URL
+                // A pasted direct link may still be usable as the final fallback.
+            }
+        }
+
+        // Tokenized PikPak direct download links - preserve fid/sign/userid/etc.
+        if LinkResolver.isPikPakDirectDownload(link.urlString)
+            || (link.source == .pikpak && LinkResolver.isPikPakDirectDownload(link.resolvedStreamURL ?? "")) {
+            if let stream = LinkResolver.resolvePikPakDirectStream(link.resolvedStreamURL ?? link.urlString)
+                ?? LinkResolver.resolvePikPakDirectStream(link.urlString) {
+                startPlayback(
+                    url: stream,
+                    title: link.title,
+                    linkId: link.id,
+                    headers: PikPakClient.shared.directPlaybackHeaders()
+                )
+                return
             }
         }
 
@@ -1059,37 +1061,52 @@ class AppViewModel: ObservableObject {
         await browse(server: server, path: path)
     }
 
-    func play(file: WebDAVFile, server: WebDAVServer) {
+    /// Resolve WebDAV redirects completely before presenting a player.
+    @discardableResult
+    func preparePlayback(file: WebDAVFile, server: WebDAVServer) async -> Bool {
         let client = WebDAVClient(server: server)
         guard client.streamURL(for: file) != nil else {
             errorMessage = "Could not build stream URL for this file"
-            return
+            return false
         }
         isLoading = true
+        defer { isLoading = false }
         errorMessage = nil
         // Never leave the previous video mounted while a fresh signed URL resolves.
         nowPlaying = nil
         nowPlayingURL = nil
         nowPlayingHeaders = nil
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isLoading = false }
-            guard let url = await client.resolvedStreamURL(for: file) else {
-                self.errorMessage = "Could not resolve the signed playback URL"
-                return
-            }
-            // A signed cross-host CDN URL no longer needs WebDAV Basic auth.
-            // Keep headers only when playback remains on the configured DAV host.
-            let sameHost = url.host?.caseInsensitiveCompare(server.baseURL?.host ?? "") == .orderedSame
-            let headers = sameHost ? client.streamHeaders() : [:]
-            let saved = self.saveDirectLink(
-                url.absoluteString,
-                resolvedStream: url,
-                source: .webdav,
-                title: file.name,
-                fileSizeBytes: file.size
-            )
-            self.startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
+        guard let url = await client.resolvedStreamURL(for: file) else {
+            errorMessage = "Could not resolve the signed playback URL"
+            return false
+        }
+
+        let sameHost = url.host?.caseInsensitiveCompare(server.baseURL?.host ?? "") == .orderedSame
+        let headers: [String: String]
+        if sameHost {
+            headers = client.streamHeaders()
+        } else if LinkResolver.isPikPakDirectDownload(url.absoluteString) {
+            // Match Direct Links without leaking WebDAV Basic auth to PikPak's CDN.
+            headers = PikPakClient.shared.directPlaybackHeaders()
+        } else {
+            headers = [:]
+        }
+
+        let saved = saveDirectLink(
+            url.absoluteString,
+            resolvedStream: url,
+            source: .webdav,
+            title: file.name,
+            fileSizeBytes: file.size
+        )
+        startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
+        return nowPlayingURL != nil
+    }
+
+    /// Compatibility entry point for callers that do not present a player.
+    func play(file: WebDAVFile, server: WebDAVServer) {
+        Task { [weak self] in
+            _ = await self?.preparePlayback(file: file, server: server)
         }
     }
 

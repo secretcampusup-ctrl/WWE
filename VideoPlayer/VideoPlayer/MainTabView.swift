@@ -1234,8 +1234,10 @@ struct HomeLibraryView: View {
 
         switch source {
         case let .webDAV(server, file):
-            vm.play(file: file, server: server)
-            showHeroPlayer = true
+            Task { @MainActor in
+                guard await vm.preparePlayback(file: file, server: server) else { return }
+                showHeroPlayer = true
+            }
 
         case let .offcloud(_, file):
             guard let url = file.streamURL else { return }

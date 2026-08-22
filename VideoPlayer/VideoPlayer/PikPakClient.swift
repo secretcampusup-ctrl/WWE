@@ -135,15 +135,10 @@ final class PikPakClient {
     /// Headers required by PikPak's signed download servers when AVPlayer opens
     /// a direct CDN URL outside the app's normal web session.
     func directPlaybackHeaders() -> [String: String] {
-        // The signature in the URL authorizes the download. Do not forward API
-        // headers such as Content-Type: application/json or X-Client-* to the
-        // CDN media request; generic players (and PikPak's own web download)
-        // perform a normal byte-range GET here.
-        return [
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-            "Referer": "https://mypikpak.com/",
-            "Accept": "*/*"
-        ]
+        var headers = commonHeaders(token: nil)
+        headers["Referer"] = "https://mypikpak.com/"
+        headers["Accept"] = "*/*"
+        return headers
     }
 
     // MARK: - Account storage
@@ -349,7 +344,7 @@ final class PikPakClient {
         return (item, stream)
     }
 
-    /// Best playable URL for a cloud file (original web link first, media variants as fallback).
+    /// Best playable URL for a cloud file (playable media variant first, original download as fallback).
     func streamURL(forFileId id: String) async throws -> URL {
         let (_, url) = try await getFile(id: id)
         guard let url else { throw PikPakError.noStreamURL }
@@ -534,25 +529,22 @@ final class PikPakClient {
     }
 
     private func extractStreamURL(from dict: [String: Any]) -> URL? {
-        // Prefer PikPak's original file link. `medias` is a set of generated
-        // playback variants and its ordering is not a quality guarantee; taking
-        // the last entry made identical files resolve to different pipelines.
-        if let web = dict["web_content_link"] as? String,
-           let url = URL(string: web),
-           !web.isEmpty {
-            return url
-        }
-
-        // Fall back to a generated media link when no original link is exposed
-        // (some public-share responses only contain `medias`).
+        // `medias[].link.url` is the playback endpoint returned for this file.
+        // `web_content_link` can be an authenticated download endpoint and is
+        // not accepted by every iOS playback stack.
         if let medias = dict["medias"] as? [[String: Any]], !medias.isEmpty {
-            for media in medias {
+            for media in medias.reversed() {
                 if let link = media["link"] as? [String: Any],
                    let u = link["url"] as? String,
                    let url = URL(string: u), !u.isEmpty {
                     return url
                 }
             }
+        }
+        if let web = dict["web_content_link"] as? String,
+           let url = URL(string: web),
+           !web.isEmpty {
+            return url
         }
         // 3) links map (mime → { url })
         if let links = dict["links"] as? [String: Any] {

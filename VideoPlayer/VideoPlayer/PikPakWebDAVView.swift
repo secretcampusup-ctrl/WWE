@@ -504,11 +504,13 @@ struct PikPakWebDAVView: View {
 
     @MainActor
     private func play(_ file: WebDAVFile, on server: WebDAVServer, fromDetails: Bool = false) {
-        vm.play(file: file, server: server)
-        if fromDetails {
-            detailShowingPlayer = vm.nowPlayingURL != nil
-        } else {
-            showingPlayer = vm.nowPlayingURL != nil
+        Task { @MainActor in
+            guard await vm.preparePlayback(file: file, server: server) else { return }
+            if fromDetails {
+                detailShowingPlayer = true
+            } else {
+                showingPlayer = true
+            }
         }
     }
 
