@@ -885,7 +885,7 @@ struct HomeLibraryView: View {
                     LazyHStack(alignment: .top, spacing: 14) {
                         ForEach(vm.favoriteLinks.prefix(20)) { link in
                             MoviePosterCard(link: link, width: posterWidth, height: posterHeight) {
-                                if let entry = entry(matching: link) { selectedEntry = entry }
+                                if let matchedEntry = matchingEntry(for: link) { selectedEntry = matchedEntry }
                                 else { selectedSavedLink = link }
                             } onDelete: {
                                 vm.deleteSavedLink(link)
@@ -1001,10 +1001,14 @@ struct HomeLibraryView: View {
             for episode in entry.episodes { episodeOwners[episode.id] = entry }
         }
         var seenFavorites = Set<String>()
-        let favorites = vm.favoriteLinks.compactMap { link -> UnifiedMediaEntry? in
-            guard let matched = entriesByID[link.favoriteIdentity ?? ""]
-                    ?? link.favoriteIdentity.flatMap { episodeOwners[$0] }
-                    ?? entriesByURL[link.urlString],
+        let favorites: [UnifiedMediaEntry] = vm.favoriteLinks.compactMap { link -> UnifiedMediaEntry? in
+            let identity = normalizedLibraryIdentity(link.favoriteIdentity)
+            let identityMatch = identity.flatMap { value in
+                entriesByID[value] ?? episodeOwners[value]
+            }
+            let urlMatch = entriesByURL[link.resolvedStreamURL ?? link.urlString]
+                ?? entriesByURL[link.urlString]
+            guard let matched = identityMatch ?? urlMatch,
                   candidateIDs.contains(matched.id),
                   seenFavorites.insert(matched.id).inserted else { return nil }
             return matched
@@ -1013,15 +1017,46 @@ struct HomeLibraryView: View {
         // Favorites always lead the Hero and are never capped. With fewer than
         // five favorites, fill only the remaining slots from a deterministic
         // two-hour shuffle so the carousel is stable while the user is browsing.
-        let orderedFavorites = heroShuffled(favorites, salt: heroRotationSlot &* 31 &+ 7)
+        let orderedFavorites: [UnifiedMediaEntry] = heroShuffled(
+            favorites,
+            salt: heroRotationSlot &* 31 &+ 7
+        )
         guard orderedFavorites.count < 5 else { return orderedFavorites }
 
-        let favoriteIDs = Set(orderedFavorites.map(\.id))
+        let favoriteIDs = Set<String>(orderedFavorites.map { $0.id })
         let randomFill = heroShuffled(
             candidates.filter { !favoriteIDs.contains($0.id) },
             salt: heroRotationSlot
         )
         return orderedFavorites + Array(randomFill.prefix(5 - orderedFavorites.count))
+    }
+
+    private func matchingEntry(for link: SavedVideoLink) -> UnifiedMediaEntry? {
+        let identity = normalizedLibraryIdentity(link.favoriteIdentity)
+        if let identity {
+            if let direct = allItems.first(where: { $0.id == identity }) { return direct }
+            if let owner = allItems.first(where: { entry in
+                entry.episodes.contains(where: { $0.id == identity })
+            }) { return owner }
+        }
+
+        var candidateURLs: Set<String> = [link.urlString]
+        if let resolvedStreamURL = link.resolvedStreamURL {
+            candidateURLs.insert(resolvedStreamURL)
+        }
+        return allItems.first { candidateURLs.contains($0.streamURL.absoluteString) }
+    }
+
+    private func normalizedLibraryIdentity(_ identity: String?) -> String? {
+        guard var identity = identity?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !identity.isEmpty else { return nil }
+        for prefix in ["unified-manual|", "unified-adult|", "unified-hero|", "unified|"] {
+            if identity.hasPrefix(prefix) {
+                identity.removeFirst(prefix.count)
+                break
+            }
+        }
+        return identity
     }
 
     private func heroShuffled(
