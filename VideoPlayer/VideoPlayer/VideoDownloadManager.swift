@@ -885,7 +885,7 @@ struct DownloadManagerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
                 if !finished.isEmpty {
                     ToolbarItem(placement: .primaryAction) {

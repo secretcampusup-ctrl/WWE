@@ -36,6 +36,9 @@ struct VideoDetailsItem: Identifiable {
     var source: String = "Stream"
     var resumePositionSeconds: Double? = nil
     var relatedEpisodes: [VideoEpisodeItem] = []
+    /// Stable library/folder identity shared by every episode in one series.
+    /// Episode URLs and poster keys may differ, but header artwork must not.
+    var seriesIdentity: String? = nil
     var suppliedTMDBDetails: TMDBTitleDetails? = nil
     var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? = nil
     var manualMetadataProvider: String? = nil
@@ -135,6 +138,12 @@ private enum VideoDetailsMemoryCache {
     static var details: [String: TMDBTitleDetails] = [:]
     static var episodes: [String: TMDBEpisodeDetails] = [:]
     static var adultMetadata: [String: VideoThumbnailLoader.ThePornDBMetadata] = [:]
+    static let seriesArtwork: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 12
+        cache.totalCostLimit = 48 * 1_024 * 1_024
+        return cache
+    }()
 }
 
 struct VideoDetailsView: View {
@@ -164,7 +173,7 @@ struct VideoDetailsView: View {
     @State private var movieScrollMotion = DetailsScrollMotionModel()
     @State private var standardScrollMotion = DetailsScrollMotionModel()
     @State private var displayedSeriesSeason: Int?
-    @State private var episodeArtworkModel = SeriesEpisodeArtworkModel()
+    @StateObject private var episodeArtworkModel = SeriesEpisodeArtworkModel()
 
     var body: some View {
         NavigationStack {
@@ -261,26 +270,50 @@ struct VideoDetailsView: View {
 
             if let fileName = item.customPosterFileName,
                let custom = VideoThumbnailLoader.loadCustomPoster(fileName: fileName) {
-                frame = custom
+                setArtworkFrame(custom)
                 return
             }
             if let custom = item.customPosterImage {
-                frame = custom
+                setArtworkFrame(custom)
+                return
+            }
+            if let memoryKey = seriesMemoryArtworkKey,
+               let remembered = VideoDetailsMemoryCache.seriesArtwork.object(
+                   forKey: memoryKey as NSString
+               ) {
+                frame = remembered
                 return
             }
 
-            if let seriesKey = item.automaticSeriesPosterCacheKey {
-                if let cachedSeriesPoster = await VideoThumbnailLoader.cachedImageAsync(forStableKey: seriesKey) {
-                    frame = cachedSeriesPoster
+            if let seriesKey = seriesPosterCacheKey {
+                let legacySeriesKey = item.automaticSeriesPosterCacheKey
+                var cachedSeriesPoster = await VideoThumbnailLoader.cachedImageAsync(forStableKey: seriesKey)
+                if cachedSeriesPoster == nil,
+                   let legacySeriesKey,
+                   legacySeriesKey != seriesKey {
+                    cachedSeriesPoster = await VideoThumbnailLoader.cachedImageAsync(
+                        forStableKey: legacySeriesKey
+                    )
+                    if let cachedSeriesPoster {
+                        VideoThumbnailLoader.cacheImageInBackground(
+                            cachedSeriesPoster,
+                            forStableKey: seriesKey
+                        )
+                    }
+                }
+                if let cachedSeriesPoster {
+                    setArtworkFrame(cachedSeriesPoster)
                     return
                 }
-                if let seriesPoster = await VideoThumbnailLoader.loadSeriesPoster(named: item.displayTitle) {
+                let seriesTitle = item.suppliedTMDBDetails?.title ?? item.displayTitle
+                if let seriesPoster = await VideoThumbnailLoader.loadSeriesPoster(named: seriesTitle) {
                     guard !Task.isCancelled, requestedURL == item.url else { return }
                     VideoThumbnailLoader.cacheImageInBackground(
                         seriesPoster,
-                        forStableKeys: [seriesKey] + [item.posterCacheKey].compactMap { $0 }
+                        forStableKeys: [seriesKey]
+                            + [legacySeriesKey, item.posterCacheKey].compactMap { $0 }
                     )
-                    frame = seriesPoster
+                    setArtworkFrame(seriesPoster)
                     return
                 }
             }
@@ -300,22 +333,22 @@ struct VideoDetailsView: View {
                 )
             }
             if let cachedMetadataArtwork {
-                frame = cachedMetadataArtwork
+                setArtworkFrame(cachedMetadataArtwork)
                 return
             }
 
             let detailKey = "details-artwork|\(stableMetadataCacheKey)"
             if let highResolution = await VideoThumbnailLoader.cachedImageAsync(forStableKey: detailKey) {
-                frame = highResolution
+                setArtworkFrame(highResolution)
                 return
             }
 
             // Show the lightweight grid image immediately, then upgrade it.
             if let key = item.posterCacheKey,
                let lightweight = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
-                frame = lightweight
+                setArtworkFrame(lightweight)
             } else if let cached = await VideoThumbnailLoader.cachedImageAsync(for: requestedURL) {
-                frame = cached
+                setArtworkFrame(cached)
             }
 
             if let highResolution = await VideoThumbnailLoader.loadPoster(
@@ -325,7 +358,7 @@ struct VideoDetailsView: View {
                 targetPointSize: ThumbnailPipeline.targetPointSize(for: .large)
             ) {
                 guard !Task.isCancelled, requestedURL == item.url else { return }
-                frame = highResolution
+                setArtworkFrame(highResolution)
             }
             // Note: the ThePornDB cover/metadata fallback runs in its own `.task`
             // below (always on), so it isn't duplicated here.
@@ -335,6 +368,14 @@ struct VideoDetailsView: View {
         }
         .onChange(of: item.id) { _ in
             isPreparingPlayback = false
+            // Changing an episode changes only the playable file. The series
+            // header artwork and title metadata are shared and must remain in
+            // memory; clearing them here caused a fresh spinner/network load on
+            // every episode tap.
+            guard item.relatedEpisodes.isEmpty else {
+                tmdbEpisode = nil
+                return
+            }
             movieScrollMotion.offset = 0
             standardScrollMotion.offset = 0
             prepareForCurrentItem()
@@ -348,7 +389,7 @@ struct VideoDetailsView: View {
                   key == item.posterCacheKey else { return }
             Task {
                 if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
-                    frame = cached
+                    setArtworkFrame(cached)
                 }
             }
         }
@@ -371,9 +412,9 @@ struct VideoDetailsView: View {
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
             let titleArtworkKey = tmdbTitleArtworkCacheKey
             if let cachedEpisode = await VideoThumbnailLoader.cachedImageAsync(forStableKey: episodeArtworkKey) {
-                frame = cachedEpisode
+                setArtworkFrame(cachedEpisode)
             } else if let cachedTitle = await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) {
-                frame = cachedTitle
+                setArtworkFrame(cachedTitle)
             }
             if item.relatedEpisodes.isEmpty,
                tmdbEpisode == nil,
@@ -387,7 +428,7 @@ struct VideoDetailsView: View {
                    let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled, requestedItemID == item.id else { return }
-                    frame = image
+                    setArtworkFrame(image)
                     VideoThumbnailLoader.cacheImageInBackground(
                         image,
                         forStableKeys: [episodeArtworkKey] + [item.posterCacheKey].compactMap { $0 }
@@ -408,7 +449,7 @@ struct VideoDetailsView: View {
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
-                frame = image
+                setArtworkFrame(image)
                 if isMovieDetailsPage {
                     VideoThumbnailLoader.cacheHighQualityImageInBackground(
                         image,
@@ -437,7 +478,7 @@ struct VideoDetailsView: View {
             }
             if ThePornDBSettings.isEnabled, let cover = thePornDBMetadata?.coverImage {
                 if frame == nil || item.suppliedAdultMetadata != nil || item.manualMetadataProvider == "theporndb" {
-                    frame = cover
+                    setArtworkFrame(cover)
                 }
                 VideoThumbnailLoader.cacheImageInBackground(
                     cover,
@@ -737,15 +778,7 @@ struct VideoDetailsView: View {
     }
 
     private func movieTopButton(icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 42, height: 42)
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().stroke(Color.white.opacity(0.18)))
-        }
-        .buttonStyle(DetailsBackButtonStyle())
+        AppAnimatedBackButton(icon: icon, size: 42, action: action)
     }
 
     private func movieCastAndCrew(_ details: TMDBTitleDetails) -> some View {
@@ -856,18 +889,9 @@ struct VideoDetailsView: View {
 
                 VStack {
                     HStack {
-                        Button { dismissDetailsWithFeedback() } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.ultraThinMaterial, in: Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                                )
+                        AppAnimatedBackButton(size: 44) {
+                            dismissDetailsWithFeedback()
                         }
-                        .buttonStyle(DetailsBackButtonStyle())
 
                         Spacer()
                     }
@@ -888,7 +912,6 @@ struct VideoDetailsView: View {
     }
 
     private func dismissDetailsWithFeedback() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         dismiss()
     }
 
@@ -1082,6 +1105,12 @@ struct VideoDetailsView: View {
         if !item.relatedEpisodes.isEmpty, let details = item.suppliedTMDBDetails {
             return "series|tmdb|\(details.id)"
         }
+        if !item.relatedEpisodes.isEmpty, let seriesIdentity = item.seriesIdentity {
+            return "series|identity|\(seriesIdentity)"
+        }
+        if !item.relatedEpisodes.isEmpty, let posterCacheKey = item.posterCacheKey {
+            return "series|library|\(posterCacheKey)"
+        }
         let normalizedTitle = item.displayTitle
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
@@ -1091,6 +1120,20 @@ struct VideoDetailsView: View {
             return "episode|\(normalizedTitle)|s\(episode.season)e\(episode.episode)"
         }
         return (item.relatedEpisodes.isEmpty ? "movie|" : "series|") + normalizedTitle
+    }
+
+    private var seriesPosterCacheKey: String? {
+        guard !item.relatedEpisodes.isEmpty else { return item.automaticSeriesPosterCacheKey }
+        if let details = item.suppliedTMDBDetails {
+            return "series-poster|tmdb|\(details.id)"
+        }
+        if let seriesIdentity = item.seriesIdentity {
+            return "series-poster|identity|\(seriesIdentity)"
+        }
+        if let posterCacheKey = item.posterCacheKey {
+            return "series-poster|library|\(posterCacheKey)"
+        }
+        return item.automaticSeriesPosterCacheKey
     }
 
     private var resolvedMovieDetails: TMDBTitleDetails? {
@@ -1141,7 +1184,26 @@ struct VideoDetailsView: View {
             // Artwork is loaded by the async details task. Never perform disk
             // reads from onAppear or a scroll-driven render transaction.
             frame = item.customPosterImage
+                ?? seriesMemoryArtworkKey.flatMap {
+                    VideoDetailsMemoryCache.seriesArtwork.object(forKey: $0 as NSString)
+                }
         }
+    }
+
+    private var seriesMemoryArtworkKey: String? {
+        guard !item.relatedEpisodes.isEmpty else { return nil }
+        return seriesPosterCacheKey ?? stableMetadataCacheKey
+    }
+
+    private func setArtworkFrame(_ image: UIImage?) {
+        frame = image
+        guard let image, let memoryKey = seriesMemoryArtworkKey else { return }
+        let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+        VideoDetailsMemoryCache.seriesArtwork.setObject(
+            image,
+            forKey: memoryKey as NSString,
+            cost: cost
+        )
     }
 
     private var selectedEpisodeItem: VideoEpisodeItem? {
@@ -1250,11 +1312,7 @@ struct VideoDetailsView: View {
                 .frame(width: 166, height: 94)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .stroke(current ? AppPalette.accent : Color.white.opacity(0.10), lineWidth: current ? 2 : 1)
-                )
-                .overlay(alignment: .bottom) {
+                .overlay(alignment: .bottomLeading) {
                     let progress = seriesEpisodeProgress(episode)
                     if progress > 0 {
                         GeometryReader { proxy in
@@ -1262,8 +1320,17 @@ struct VideoDetailsView: View {
                                 .frame(width: proxy.size.width * progress)
                         }
                         .frame(height: 4)
+                        .clipShape(Capsule())
+                        // Keep the resume indicator fully inside the rounded
+                        // video artwork instead of drawing over/outside its edge.
+                        .padding(.horizontal, 6)
+                        .padding(.bottom, 5)
                     }
                 }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(current ? AppPalette.accent : Color.white.opacity(0.10), lineWidth: current ? 2 : 1)
+                )
 
                 Text(String(episode.episode) + ". " + episodeDisplayName(episode))
                     .font(.system(size: 11.5, weight: .semibold))
@@ -1567,25 +1634,6 @@ struct VideoDetailsView: View {
     }
 }
 
-/// Deliberately stronger than the shared card press animation: navigation
-/// controls need immediate, unmistakable touch feedback before dismissal.
-private struct DetailsBackButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.84 : 1)
-            .opacity(configuration.isPressed ? 0.72 : 1)
-            .brightness(configuration.isPressed ? 0.14 : 0)
-            .shadow(
-                color: AppPalette.accent.opacity(configuration.isPressed ? 0.55 : 0),
-                radius: configuration.isPressed ? 9 : 0
-            )
-            .animation(
-                .spring(response: 0.20, dampingFraction: 0.58),
-                value: configuration.isPressed
-            )
-    }
-}
-
 // MARK: - إضافة الفيديو لقائمة تشغيل
 
 private final class DetailsScrollMotionModel: ObservableObject {
@@ -1885,11 +1933,20 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
         guard !loadedSeasons.contains(seasonKey), !loadingSeasons.contains(seasonKey) else { return }
         loadingSeasons.insert(seasonKey)
 
-        let details = await TMDBService.shared.seasonEpisodeDetails(
-            seriesID: seriesID,
-            season: season,
-            episodeNumbers: episodeNumbers
-        )
+        var details: [Int: TMDBEpisodeDetails] = [:]
+        // A failed metadata request used to permanently turn the spinner into an
+        // empty placeholder. Retry short transient failures while Details is open.
+        for attempt in 0..<3 {
+            details = await TMDBService.shared.seasonEpisodeDetails(
+                seriesID: seriesID,
+                season: season,
+                episodeNumbers: episodeNumbers
+            )
+            if !details.isEmpty || Task.isCancelled { break }
+            if attempt < 2 {
+                try? await Task.sleep(nanoseconds: UInt64(450_000_000 * (attempt + 1)))
+            }
+        }
         guard !Task.isCancelled else {
             loadingSeasons.remove(seasonKey)
             return
@@ -1904,7 +1961,9 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
         imageURLs = updatedURLs
         episodeNames = updatedNames
         loadingSeasons.remove(seasonKey)
-        loadedSeasons.insert(seasonKey)
+        // Only finish the visual loading state when TMDB returned episode
+        // records. A total network failure remains retryable on the next task.
+        if !details.isEmpty { loadedSeasons.insert(seasonKey) }
     }
 
     private func episodeKey(seriesID: Int, season: Int, episode: Int) -> String {
@@ -2065,9 +2124,8 @@ struct PlaylistPickerView: View {
             .navigationTitle("Add to Playlist")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                        .tint(AppTheme.accent)
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
         }

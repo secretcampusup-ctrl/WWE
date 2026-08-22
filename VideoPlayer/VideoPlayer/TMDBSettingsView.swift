@@ -32,7 +32,9 @@ struct TMDBSettingsView: View {
             .navigationTitle("TMDB Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { TMDBSettings.readAccessToken = token; dismiss() }
                 }

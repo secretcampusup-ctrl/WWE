@@ -583,7 +583,7 @@ struct HomeLibraryView: View {
     private var heroPinnedBackground: some View {
         ZStack {
             ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
-                PersistentHeroArtwork(entry: entry)
+                PersistentHeroArtwork(entry: entry, isActive: index == currentHeroIndex)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .opacity(index == currentHeroIndex ? 1 : 0)
@@ -1491,46 +1491,72 @@ private struct HomeHeroZoomContainer<Content: View>: View {
 
 private struct PersistentHeroArtwork: View {
     let entry: UnifiedMediaEntry
+    let isActive: Bool
     @State private var image: UIImage?
+    @State private var placeholderImage: UIImage?
     @State private var didCheckStableCache = false
 
-    private var cacheKey: String { "unified-hero|\(entry.id)" }
+    // v2 invalidates Hero files that older builds populated from the tiny grid
+    // poster. Including the source also refreshes a manually changed match.
+    private var cacheKey: String {
+        "unified-hero-nolang-original-v2|\(entry.id)|\(remoteURL?.absoluteString ?? "local")"
+    }
     private var remoteURL: URL? {
-        entry.details?.detailsPosterURL
-            ?? entry.posterURL
+        entry.details?.heroPosterURL
+            ?? entry.details?.detailsPosterURL
             ?? entry.details?.detailsBackdropURL
             ?? entry.details?.imageURL
+            ?? entry.posterURL
     }
 
     var body: some View {
-        Group {
+        ZStack {
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
-            } else if didCheckStableCache, let remoteURL {
+            } else if let placeholderImage {
+                Image(uiImage: placeholderImage).resizable().scaledToFill()
+            } else {
+                AppTheme.bg
+            }
+
+            if image == nil, didCheckStableCache, isActive, let remoteURL {
                 KFImage(remoteURL)
+                    .placeholder { Color.clear }
                     .cacheOriginalImage()
                     .onSuccess { result in
                         image = result.image
-                        VideoThumbnailLoader.cacheHighQualityImageInBackground(
+                        VideoThumbnailLoader.cacheHeroImageInBackground(
                             result.image,
-                            forStableKey: cacheKey,
-                            maximumBytes: ThumbnailPipeline.largeMaximumBytes
+                            forStableKey: cacheKey
                         )
                     }
                     .fade(duration: 0.18)
                     .resizable()
                     .scaledToFill()
-            } else {
-                AppTheme.bg
             }
         }
-        .task(id: cacheKey) {
+        .task(id: "\(cacheKey)|\(isActive)") {
+            if !isActive {
+                // Preserve the outgoing artwork through the carousel fade, then
+                // release its decoded pixels. Returning to it reuses disk cache.
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                guard !Task.isCancelled else { return }
+                image = nil
+                placeholderImage = nil
+                didCheckStableCache = false
+                return
+            }
             didCheckStableCache = false
             image = nil
+            placeholderImage = nil
             if let primary = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey) {
                 image = primary
             } else {
-                image = await VideoThumbnailLoader.cachedImageAsync(forStableKey: "unified|\(entry.id)")
+                // A small poster may appear for the first frame only; unlike the
+                // old implementation it never blocks the original-image request.
+                placeholderImage = await VideoThumbnailLoader.cachedImageAsync(
+                    forStableKey: "unified|\(entry.id)"
+                )
             }
             didCheckStableCache = true
         }
@@ -1703,7 +1729,9 @@ private struct HomeCollectionView: View {
             .navigationTitle(collection.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Close") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
             }
             .fullScreenCover(item: $selected) { entry in
                 UnifiedMediaDetailsHost(
@@ -2062,6 +2090,7 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
 
 private struct PirateBayDetailsView: View {
     let item: PirateBayResult; let tint: Color
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var model = PirateBayDetailsModel()
     @State private var sendingOffcloud = false; @State private var sendingTorBox = false; @State private var message: String?; @State private var selectedImage = 0; @State private var showViewer = false
     var body: some View {
@@ -2100,6 +2129,12 @@ private struct PirateBayDetailsView: View {
                 }
             }.padding(16).padding(.bottom, 90)
         }.background(AppTheme.bg.ignoresSafeArea()).navigationTitle("Details").navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                AppAnimatedBackButton(size: 36) { dismiss() }
+            }
+        }
         .overlay(alignment: .top) { if let message { Text(message).font(.subheadline.bold()).padding(.horizontal, 16).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
         .task { await model.load(id: item.id) }.fullScreenCover(isPresented: $showViewer) { PirateBayImageViewer(urls: model.imageURLs, selection: $selectedImage) }
     }
@@ -2127,7 +2162,7 @@ private struct PirateBayDetailsView: View {
 
 private struct PirateBayImageViewer: View {
     let urls: [URL]; @Binding var selection: Int; @Environment(\.dismiss) private var dismiss
-    var body: some View { ZStack(alignment: .topTrailing) { Color.black.ignoresSafeArea(); TabView(selection: $selection) { ForEach(Array(urls.enumerated()), id: \.offset) { index, url in PirateBayZoomImage(url: url).tag(index) } }.tabViewStyle(.page(indexDisplayMode: .always)); Button { dismiss() } label: { Image(systemName: "xmark").font(.headline.bold()).padding(12).background(.ultraThinMaterial, in: Circle()) }.foregroundStyle(.white).padding() } }
+    var body: some View { ZStack(alignment: .topLeading) { Color.black.ignoresSafeArea(); TabView(selection: $selection) { ForEach(Array(urls.enumerated()), id: \.offset) { index, url in PirateBayZoomImage(url: url).tag(index) } }.tabViewStyle(.page(indexDisplayMode: .always)); AppAnimatedBackButton(size: 40) { dismiss() }.padding() } }
 }
 
 private struct PirateBayZoomImage: View {

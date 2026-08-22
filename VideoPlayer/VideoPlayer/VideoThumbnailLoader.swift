@@ -262,6 +262,7 @@ struct StrictWebPThumbnailSerializer: CacheSerializer {
 enum ThumbnailPipeline {
     static let gridMaximumBytes = 200 * 1_024
     static let largeMaximumBytes = 900 * 1_024
+    static let heroMaximumBytes = 2 * 1_024 * 1_024
     static let sourceHardLimitBytes = 1 * 1_024 * 1_024
 
     private static var configured = false
@@ -530,6 +531,20 @@ enum VideoThumbnailLoader {
         )
     }
 
+    /// Hero fills almost the entire 3x iPhone viewport. Keep a dedicated
+    /// 2048px copy so the regular 1200px details/grid cache is never enlarged.
+    static func cacheHeroImage(_ image: UIImage, forStableKey key: String) {
+        setStableImageSuppressed(false, forKey: key)
+        storeStableImage(
+            image,
+            forKey: key,
+            maxSide: 2_048,
+            quality: 0.86,
+            maximumBytes: ThumbnailPipeline.heroMaximumBytes,
+            preferredBytes: ThumbnailPipeline.heroMaximumBytes
+        )
+    }
+
     /// Remove a selected/search cover and prevent automatic regeneration until a new cover is chosen.
     static func removeCachedImage(forStableKey key: String) {
         setStableImageSuppressed(true, forKey: key)
@@ -627,6 +642,12 @@ enum VideoThumbnailLoader {
     ) {
         DispatchQueue.global(qos: .utility).async {
             cacheHighQualityImage(image, forStableKey: key, maximumBytes: maximumBytes)
+        }
+    }
+
+    static func cacheHeroImageInBackground(_ image: UIImage, forStableKey key: String) {
+        DispatchQueue.global(qos: .utility).async {
+            cacheHeroImage(image, forStableKey: key)
         }
     }
 

@@ -175,7 +175,8 @@ struct PikPakWebDAVView: View {
                         fileExtension: file.fileExtension,
                         source: "PikPak",
                         resumePositionSeconds: saved?.resumePositionSeconds,
-                        relatedEpisodes: episodeItems(server: server)
+                        relatedEpisodes: episodeItems(server: server),
+                        seriesIdentity: "pikpak|\(server.id.uuidString)|\(location.path)"
                     ),
                     onPlay: { play(file, on: server, fromDetails: true) },
                     onDelete: { delete(file, on: server) },

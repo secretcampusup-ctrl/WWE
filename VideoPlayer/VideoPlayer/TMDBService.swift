@@ -43,6 +43,7 @@ struct TMDBTitleDetails: Identifiable, Codable {
     let director: TMDBCrewMember?
     let logoPath: String?
     let noLanguageBackdropPath: String?
+    let noLanguagePosterPath: String?
     let detailsPosterPath: String?
 
     var isSeries: Bool { mediaType == "tv" }
@@ -61,6 +62,12 @@ struct TMDBTitleDetails: Identifiable, Codable {
     }
     var detailsPosterURL: URL? {
         guard let path = detailsPosterPath ?? posterPath else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
+    }
+    var heroPosterURL: URL? {
+        // detailsPosterPath keeps old on-disk metadata compatible; it already
+        // preferred a No-Language poster before the explicit field was added.
+        guard let path = noLanguagePosterPath ?? detailsPosterPath ?? posterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var logoURL: URL? {
@@ -231,6 +238,12 @@ actor TMDBService {
                 .first(where: { !$0.certification.isEmpty })?.certification
                 ?? payload.releaseDates?.results.flatMap(\.releaseDates)
                     .first(where: { !$0.certification.isEmpty })?.certification
+            let noLanguagePosterPath = payload.images?.posters?
+                .filter { $0.iso6391 == nil }
+                .max { $0.qualityScore < $1.qualityScore }?.filePath
+            let englishPosterPath = payload.images?.posters?
+                .filter { $0.iso6391 == "en" }
+                .max { $0.qualityScore < $1.qualityScore }?.filePath
             let details = TMDBTitleDetails(
                 id: match.id, mediaType: match.mediaType,
                 title: payload.title ?? payload.name ?? match.title ?? match.name ?? normalizedQuery,
@@ -248,14 +261,11 @@ actor TMDBService {
                 // TMDB's No Language section is represented by iso_639_1 = null.
                 // Preserve API order and use its first backdrop exactly.
                 noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath,
+                noLanguagePosterPath: noLanguagePosterPath,
                 // Prefer any high-quality portrait poster from No Language;
                 // API ordering is not treated as meaningful. English is next.
-                detailsPosterPath: payload.images?.posters?
-                    .filter { $0.iso6391 == nil }
-                    .max { $0.qualityScore < $1.qualityScore }?.filePath
-                    ?? payload.images?.posters?
-                        .filter { $0.iso6391 == "en" }
-                        .max { $0.qualityScore < $1.qualityScore }?.filePath
+                detailsPosterPath: noLanguagePosterPath
+                    ?? englishPosterPath
                     ?? payload.posterPath
             )
             // One successful response is shared by the Content scan and Details
@@ -435,31 +445,60 @@ actor TMDBService {
             })
         }
 
+        var cacheChanged = false
         let cached = cachedResults()
-        if completedSeasonCache.contains(seasonKey),
-           requestedNumbers.allSatisfy({ cached[$0] != nil }) {
-            return cached
+
+        // A season marked complete by older builds may contain episode names but
+        // no still_path. Do not treat that poisoned entry as finished artwork.
+        // The bulk season request is only needed when an episode record itself is
+        // missing; missing artwork is repaired below through the images endpoint.
+        let hasEveryEpisodeRecord = requestedNumbers.allSatisfy { cached[$0] != nil }
+        if !completedSeasonCache.contains(seasonKey) || !hasEveryEpisodeRecord {
+            do {
+                let payload: SeasonEpisodesPayload = try await request(
+                    "/3/tv/\(seriesID)/season/\(season)",
+                    query: [:]
+                )
+                for episode in payload.episodes where requestedNumbers.contains(episode.episodeNumber) {
+                    let details = TMDBEpisodeDetails(
+                        name: episode.name ?? "Episode \(episode.episodeNumber)",
+                        overview: episode.overview ?? "",
+                        stillPath: episode.stillPath
+                    )
+                    episodeCache["\(seriesID)|s\(season)|e\(episode.episodeNumber)"] = details
+                }
+                completedSeasonCache.insert(seasonKey)
+                cacheChanged = true
+            } catch {
+                // Keep any disk-cached episode records usable during a temporary
+                // TMDB/network failure. Missing records will be retried next time.
+            }
         }
 
-        do {
-            let payload: SeasonEpisodesPayload = try await request(
-                "/3/tv/\(seriesID)/season/\(season)",
+        // Some TMDB season responses (and caches written from them) have a nil
+        // still_path even though the episode images endpoint contains artwork.
+        // Resolve only those missing cards, preserving the one-request fast path
+        // for normal seasons.
+        var results = cachedResults()
+        for episode in requestedNumbers.sorted() where results[episode]?.stillPath == nil {
+            let key = "\(seriesID)|s\(season)|e\(episode)"
+            guard let existing = results[episode] else { continue }
+            guard let payload: EpisodeImagesPayload = try? await request(
+                "/3/tv/\(seriesID)/season/\(season)/episode/\(episode)/images",
                 query: [:]
+            ), let stillPath = payload.stills.first?.filePath else { continue }
+            let repaired = TMDBEpisodeDetails(
+                name: existing.name,
+                overview: existing.overview,
+                stillPath: stillPath
             )
-            for episode in payload.episodes where requestedNumbers.contains(episode.episodeNumber) {
-                let details = TMDBEpisodeDetails(
-                    name: episode.name ?? "Episode \(episode.episodeNumber)",
-                    overview: episode.overview ?? "",
-                    stillPath: episode.stillPath
-                )
-                episodeCache["\(seriesID)|s\(season)|e\(episode.episodeNumber)"] = details
-            }
-            completedSeasonCache.insert(seasonKey)
-            persistCache()
-            return cachedResults()
-        } catch {
-            return cached
+            episodeCache[key] = repaired
+            results[episode] = repaired
+            cacheChanged = true
         }
+
+        if cacheChanged { persistCache() }
+        return results
     }
 
     private func request<T: Decodable>(_ path: String, query: [String: String]) async throws -> T {
@@ -545,6 +584,8 @@ private struct SeasonEpisodePayload: Decodable {
     let overview: String?
     let stillPath: String?
 }
+private struct EpisodeImagesPayload: Decodable { let stills: [EpisodeImagePayload] }
+private struct EpisodeImagePayload: Decodable { let filePath: String }
 
 
 private struct AuthenticationPayload: Decodable { let success: Bool }

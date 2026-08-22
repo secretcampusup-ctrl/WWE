@@ -1069,7 +1069,7 @@ private struct OffcloudSettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { onSave(currentKey) }
@@ -1265,6 +1265,7 @@ private struct OffcloudFilesSkeleton: View {
 }
 
 private struct OffcloudFilesView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
     @State private var detailFile: OffcloudFile?
     @State private var searchCoverKey: String?
@@ -1354,6 +1355,12 @@ private struct OffcloudFilesView: View {
         .background(OffcloudPalette.bgPrimary.ignoresSafeArea())
         .navigationTitle(VideoTitleFormatter.title(from: transfer.fileName))
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                AppAnimatedBackButton(size: 36) { dismiss() }
+            }
+        }
         .preferredColorScheme(.dark)
         .task(id: offcloudPosterPrefetchID) {
             prefetchVisibleVideoPosters()
@@ -1441,8 +1448,7 @@ private struct OffcloudFolderFilesView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Close") { dismiss() }
-                        .foregroundColor(AppPalette.accent)
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
         }

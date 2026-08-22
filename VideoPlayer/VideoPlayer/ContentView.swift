@@ -895,8 +895,7 @@ struct FavoritesAllView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") { dismiss() }
-                        .tint(AppTheme.accent)
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
         }
@@ -1057,8 +1056,7 @@ struct PlaylistAllView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") { dismiss() }
-                        .tint(AppTheme.accent)
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -1255,7 +1253,9 @@ struct CoverImageSearchView: View {
             .navigationTitle("Search cover")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
                 if isSelecting { ToolbarItem(placement: .topBarTrailing) { ProgressView() } }
             }
             .onAppear { startSearch() }
@@ -1492,7 +1492,7 @@ struct YandexImageSearchView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") { dismiss() }
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
         }

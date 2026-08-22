@@ -83,8 +83,8 @@ struct PikPakAutoSyncSettingsView: View {
             .navigationTitle("Auto Download")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
         }

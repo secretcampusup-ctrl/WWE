@@ -73,8 +73,7 @@ struct ThePornDBSearchView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                        .tint(AppTheme.accent)
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
             .onAppear {

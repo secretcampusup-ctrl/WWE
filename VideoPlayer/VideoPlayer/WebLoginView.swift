@@ -13,7 +13,11 @@ struct WebLoginView: View {
                 .navigationTitle(url.host ?? "\u{62A}\u{633}\u{62C}\u{64A}\u{644} \u{627}\u{644}\u{62F}\u{62E}\u{648}\u{644}")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("\u{625}\u{63A}\u{644}\u{627}\u{642}") { dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) {
+                        AppAnimatedBackButton(size: 36, accessibilityLabel: "\u{625}\u{63A}\u{644}\u{627}\u{642}") {
+                            dismiss()
+                        }
+                    }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("\u{62A}\u{645} \u{62A}\u{633}\u{62C}\u{64A}\u{644} \u{627}\u{644}\u{62F}\u{62E}\u{648}\u{644}") {
                             onLoginDetected?()

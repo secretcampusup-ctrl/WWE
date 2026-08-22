@@ -132,7 +132,11 @@ struct WebDAVFolderSelectionView: View {
         }
         .navigationTitle("Content Folders")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                AppAnimatedBackButton(size: 36) { dismiss() }
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
                     WebDAVContentSelectionStore.save(selected, for: server.id)

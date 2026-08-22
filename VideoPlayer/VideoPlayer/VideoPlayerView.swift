@@ -4,6 +4,15 @@ import AVFoundation
 import UIKit
 import MobileVLCKit
 import CoreFoundation
+import UniformTypeIdentifiers
+
+private enum SubtitleFileImportError: LocalizedError {
+    case unreadableText
+
+    var errorDescription: String? {
+        "This file does not contain a supported text subtitle."
+    }
+}
 
 // MARK: - Player screen
 
@@ -38,6 +47,10 @@ struct VideoPlayerView: View {
     @StateObject private var mkvControls = MKVPlaybackControls()
     @State private var showPlaybackSettings = false
     @State private var showQuickSettings = false
+    @State private var showSubtitleActions = false
+    @State private var showSubtitleSearch = false
+    @State private var showSubtitleFileImporter = false
+    @State private var subtitleImportError: String?
     @State private var showEpisodePicker = false
     @State private var subtitleSize: Double = UserDefaults.standard.object(forKey: SubtitlePreferenceKeys.size) as? Double ?? 24
     @State private var subtitleColor: PlayerSubtitleColor = PlayerSubtitleColor(rawValue: UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.color) ?? "") ?? .white
@@ -49,6 +62,7 @@ struct VideoPlayerView: View {
     @State private var selectedEmbeddedMKVSubtitleTrackID: String?
     @State private var mkvSubtitleExtractionTask: Task<Void, Never>?
     @State private var automaticSubtitleTask: Task<Void, Never>?
+    @State private var automaticSubtitleStartTask: Task<Void, Never>?
     @State private var didAttemptAutomaticSubtitle = false
     @State private var subtitleSelectionWasUserDriven = false
     @State private var screenBrightness: Double = 0.5
@@ -61,9 +75,10 @@ struct VideoPlayerView: View {
     @State private var endCountdownTask: Task<Void, Never>?
     @State private var didTearDownPlayback = false
     @State private var didResetNetworkAfterPlayback = false
-    @State private var isPlayerLandscape = false
+    // Every video opens directly in landscape; the rest of the app remains
+    // portrait-only and the in-player rotation button can still opt back in.
+    @State private var isPlayerLandscape = true
     @State private var isClosingPlayer = false
-    @State private var isMuted = false
 
     // Keep formats Apple handles well on AVPlayer; route MKV and other extended
     // containers through MobileVLCKit.
@@ -157,6 +172,7 @@ struct VideoPlayerView: View {
             // Concept 05 — Edge Controls. AVPlayer and VLC now share one chrome.
             if showControls {
                 ZStack {
+                    playerChromeShade
                     VStack(spacing: 0) {
                         topOverlay
                         Spacer(minLength: 0).allowsHitTesting(false)
@@ -267,11 +283,46 @@ struct VideoPlayerView: View {
                 }
             )
         }
+        .fullScreenCover(isPresented: $showSubtitleSearch, onDismiss: {
+            scheduleAutoHide()
+        }) {
+            SubtitleSearchView(
+                mediaTitle: title,
+                mediaContext: subtitleMediaContext,
+                onSubtitleSelected: { subtitle in
+                    loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
+                    showSubtitleSearch = false
+                }
+            )
+        }
+        .confirmationDialog("Subtitles", isPresented: $showSubtitleActions, titleVisibility: .visible) {
+            Button("Search Online") {
+                DispatchQueue.main.async { showSubtitleSearch = true }
+            }
+            Button("Choose File") {
+                DispatchQueue.main.async { showSubtitleFileImporter = true }
+            }
+            Button("Cancel", role: .cancel) { scheduleAutoHide() }
+        }
+        .fileImporter(
+            isPresented: $showSubtitleFileImporter,
+            allowedContentTypes: subtitleDocumentTypes,
+            allowsMultipleSelection: false,
+            onCompletion: importSubtitleFile
+        )
+        .alert("Subtitle File", isPresented: Binding(
+            get: { subtitleImportError != nil },
+            set: { if !$0 { subtitleImportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { scheduleAutoHide() }
+        } message: {
+            Text(subtitleImportError ?? "The subtitle file could not be opened.")
+        }
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
-            isPlayerLandscape = false
-            ScreenOrientationLock.setPlayerLandscape(false)
+            isPlayerLandscape = true
+            ScreenOrientationLock.setPlayerLandscape(true)
             didTearDownPlayback = false
             didResetNetworkAfterPlayback = false
             screenBrightness = Double(UIScreen.main.brightness)
@@ -429,6 +480,8 @@ struct VideoPlayerView: View {
         mkvSubtitleExtractionTask = nil
         automaticSubtitleTask?.cancel()
         automaticSubtitleTask = nil
+        automaticSubtitleStartTask?.cancel()
+        automaticSubtitleStartTask = nil
 
         if usesMKVPlayer {
             if mkvControls.durationSeconds > 0 {
@@ -455,15 +508,9 @@ struct VideoPlayerView: View {
 
     private var topOverlay: some View {
         HStack(spacing: 12) {
-            Button {
+            AppAnimatedBackButton(size: 40) {
                 UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 closePlayer()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(.ultraThinMaterial, in: Circle())
             }
 
             PlayerQualityBadge(
@@ -497,15 +544,6 @@ struct VideoPlayerView: View {
         .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 16)
-        .background(
-            LinearGradient(
-                colors: [Color.black.opacity(0.72), Color.black.opacity(0)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .top)
-            .allowsHitTesting(false)
-        )
     }
 
     // MARK: - Bottom chrome
@@ -546,15 +584,36 @@ struct VideoPlayerView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 18)
         }
-        .background(
-            LinearGradient(
-                colors: [Color.black.opacity(0.82), Color.black.opacity(0)],
-                startPoint: .bottom,
-                endPoint: .top
-            )
-            .ignoresSafeArea(edges: .bottom)
-            .allowsHitTesting(false)
-        )
+    }
+
+    /// Chrome shading belongs to the complete player viewport, not the safe
+    /// area-sized control stacks. Keeping it here removes the two vertical seams
+    /// that appeared beside the video in landscape/fill mode on notched iPhones.
+    /// The video surfaces continue to calculate fit/fill from each file's real
+    /// presentation size; this layer only supplies consistent edge contrast.
+    private var playerChromeShade: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                LinearGradient(
+                    colors: [Color.black.opacity(0.72), Color.black.opacity(0)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: min(170, max(96, proxy.size.height * 0.22)))
+
+                Spacer(minLength: 0)
+
+                LinearGradient(
+                    colors: [Color.black.opacity(0), Color.black.opacity(0.84)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: min(340, max(210, proxy.size.height * 0.43)))
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
     }
 
     private func toggleMKVControls() {
@@ -636,12 +695,6 @@ struct VideoPlayerView: View {
     private var edgeControlsOverlay: some View {
         HStack {
             VStack(spacing: 10) {
-                edgeControlButton(isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-                    isMuted.toggle()
-                    if usesMKVPlayer { mkvControls.setMuted(isMuted) }
-                    else { engine.player.isMuted = isMuted }
-                    scheduleAutoHide()
-                }
                 edgeControlButton("sun.max.fill") {
                     let next = screenBrightness >= 0.95 ? 0.25 : min(1, screenBrightness + 0.18)
                     screenBrightness = next
@@ -654,36 +707,7 @@ struct VideoPlayerView: View {
 
             VStack(spacing: 10) {
                 edgeControlButton("captions.bubble.fill") {
-                    showQuickSettings = true
-                    hideTask?.cancel()
-                    hideTask = nil
-                }
-                .popover(isPresented: $showQuickSettings, attachmentAnchor: .rect(.bounds), arrowEdge: .trailing) {
-                    PlayerQuickSettingsPopover(
-                        audioTracks: usesMKVPlayer ? mkvControls.audioTracks : engine.audioTracks,
-                        selectedAudioTrackID: usesMKVPlayer ? mkvControls.selectedAudioTrackID : engine.selectedAudioTrackID,
-                        subtitleTracks: playerSubtitleTracks,
-                        selectedSubtitleTrackID: playerSelectedSubtitleTrackID,
-                        subtitleFileName: externalSubtitleFileName,
-                        onRateChange: { rate in
-                            if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
-                        },
-                        onAudioTrackChange: { id in
-                            if usesMKVPlayer { mkvControls.selectAudioTrack(id: id) }
-                            else { engine.selectAudioTrack(id: id) }
-                        },
-                        onDisableSubtitles: { disableAllSubtitles() },
-                        onAdvanced: {
-                            showQuickSettings = false
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                showPlaybackSettings = true
-                            }
-                        }
-                    )
-                    .playerPopoverAdaptation()
-                }
-                edgeControlButton("gearshape.fill") {
-                    showPlaybackSettings = true
+                    showSubtitleActions = true
                     hideTask?.cancel()
                     hideTask = nil
                 }
@@ -722,6 +746,31 @@ struct VideoPlayerView: View {
         else { engine.selectSubtitleTrack(id: nil) }
     }
 
+    private var subtitleDocumentTypes: [UTType] {
+        let extensions = ["srt", "vtt", "ass", "ssa", "txt"]
+        let detected = extensions.compactMap { UTType(filenameExtension: $0) }
+        return detected.isEmpty ? [.plainText, .data] : detected
+    }
+
+    private func importSubtitleFile(_ result: Result<[URL], Error>) {
+        defer { scheduleAutoHide() }
+        do {
+            guard let fileURL = try result.get().first else { return }
+            let accessed = fileURL.startAccessingSecurityScopedResource()
+            defer { if accessed { fileURL.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+            guard let content = decodeSubtitleText(data),
+                  !ExternalSubtitleParser.parse(content).isEmpty else {
+                throw SubtitleFileImportError.unreadableText
+            }
+            loadExternalSubtitle(data: data, fileName: fileURL.lastPathComponent)
+        } catch let error as CocoaError where error.code == .userCancelled {
+            return
+        } catch {
+            subtitleImportError = error.localizedDescription
+        }
+    }
+
     private func beginAutomaticSubtitleDownloadIfNeeded() {
         guard SubtitlePreferences.automaticDownloadEnabled,
               !didAttemptAutomaticSubtitle else { return }
@@ -742,6 +791,29 @@ struct VideoPlayerView: View {
             } catch {
                 DiagnosticLogger.log("Automatic subtitles: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Start the online subtitle request after one continuous second of real
+    /// playback. This gives the video stream first use of the connection and
+    /// avoids firing while the player is merely presented or still buffering.
+    private func scheduleAutomaticSubtitleAfterFirstPlaybackSecond() {
+        guard SubtitlePreferences.automaticDownloadEnabled,
+              !didAttemptAutomaticSubtitle,
+              automaticSubtitleStartTask == nil else { return }
+        automaticSubtitleStartTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                automaticSubtitleStartTask = nil
+                return
+            }
+            guard playbackIsActuallyRunning, !Task.isCancelled else {
+                automaticSubtitleStartTask = nil
+                return
+            }
+            automaticSubtitleStartTask = nil
+            beginAutomaticSubtitleDownloadIfNeeded()
         }
     }
 
@@ -1167,15 +1239,18 @@ struct VideoPlayerView: View {
     private func playbackRunningChanged(_ running: Bool) {
         hideTask?.cancel()
         if running {
-            // Let the video establish its first CDN connection before the
-            // optional subtitle search starts. This keeps startup bandwidth and
-            // DNS/TLS work dedicated to playback without disabling auto-download.
-            beginAutomaticSubtitleDownloadIfNeeded()
+            scheduleAutomaticSubtitleAfterFirstPlaybackSecond()
             // Start the eight-second chrome timeout from the first real playback
             // frame/rate, never from the moment the player screen was presented.
             showControls = true
             scheduleAutoHide()
-        } else if (usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering) {
+        } else {
+            // Pausing/buffering before the first full second cancels the arm
+            // timer. Resuming starts a fresh continuous playback second.
+            automaticSubtitleStartTask?.cancel()
+            automaticSubtitleStartTask = nil
+        }
+        if !running, (usesMKVPlayer ? mkvControls.isBuffering : engine.isBuffering) {
             // Keep the controls available while a stream is still opening.
             showControls = true
         }
@@ -1900,14 +1975,14 @@ private struct PlayerQualityBadge: View {
     var body: some View {
         HStack(spacing: 0) {
             Text(badge.resolution)
-                .font(.system(size: 11, weight: .black, design: .rounded))
+                .font(.custom("HiRollivBold", fixedSize: 11))
                 .foregroundColor(.black)
                 .padding(.horizontal, 7)
                 .frame(height: 25)
                 .background(Color.white.opacity(0.82))
 
             Text(badge.className)
-                .font(.system(size: 10, weight: .black, design: .rounded))
+                .font(.custom("HiRollivBold", fixedSize: 10))
                 .tracking(0.35)
                 .foregroundColor(.white)
                 .padding(.horizontal, 8)
@@ -2219,12 +2294,7 @@ private struct PlayerAdvancedSettingsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .bold))
-                            .frame(width: 34, height: 34)
-                            .background(Color.white.opacity(0.1), in: Circle())
-                    }
+                    AppAnimatedBackButton(size: 36) { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
