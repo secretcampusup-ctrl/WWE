@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // MARK: - Models
 
@@ -9,6 +10,10 @@ struct PikPakAccount: Codable, Equatable {
     var expiresAt: Date
     var userId: String?
     var displayName: String?
+    /// PikPak requires a short-lived shield token in addition to OAuth.
+    /// rclone stores the same value beside `token` in rclone.conf.
+    var captchaToken: String?
+    var captchaExpiresAt: Date?
 
     var isExpired: Bool {
         // Refresh 2 minutes early
@@ -97,6 +102,24 @@ final class PikPakClient {
     private let session: URLSession
     private let accountKey = "pikpak_account_v1"
     private let deviceKey = "pikpak_device_id_v1"
+    // These salts are part of rclone's PikPak v1.75 shield-token flow.
+    private let captchaSignSalts = [
+        "C9qPpZLN8ucRTaTiUMWYS9cQvWOE",
+        "+r6CQVxjzJV6LCV",
+        "F",
+        "pFJRC",
+        "9WXYIDGrwTCz2OiVlgZa90qpECPD6olt",
+        "/750aCr4lm/Sly/c",
+        "RB+DT/gZCrbV",
+        "",
+        "CyLsf7hdkIRxRm215hl",
+        "7xHvLi2tOYP0Y92b",
+        "ZGTXXxu8E/MIWaEDB+Sm/",
+        "1UI3",
+        "E7fP5Pfijd+7K+t6Tg/NhuLq0eEUVChpJSkrKxpO",
+        "ihtqpG6FMt65+Xk+tWUH2",
+        "NhXXU9rg4XXdzo7u5o"
+    ]
 
     private var deviceId: String {
         if let existing = UserDefaults.standard.string(forKey: deviceKey), !existing.isEmpty {
@@ -118,7 +141,8 @@ final class PikPakClient {
 
     private func commonHeaders(token: String?) -> [String: String] {
         var h: [String: String] = [
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+            "Referer": "https://mypikpak.com/",
             "X-Client-Id": clientId,
             "X-Device-Id": deviceId,
             "X-Client-Version": clientVersion,
@@ -190,21 +214,23 @@ final class PikPakClient {
             accessToken: parsed.accessToken,
             refreshToken: parsed.refreshToken ?? parsed.accessToken,
             expiresAt: parsed.expiry ?? Date().addingTimeInterval(60 * 60),
-            userId: nil,
-            displayName: label
+            userId: Self.subject(fromJWT: parsed.accessToken),
+            displayName: label,
+            captchaToken: parsed.captchaToken,
+            captchaExpiresAt: parsed.captchaExpiry
         )
         saveAccount(account)
         do {
             _ = try await listFiles(parentId: "")
             return loadAccount() ?? account
         } catch {
-            // Do not leave an invalid or mismatched rclone session connected.
-            logout()
+            // Keep the imported session. A transient network/shield failure must
+            // not destroy a valid rclone OAuth token and force another CAPTCHA.
             throw error
         }
     }
 
-    private func parseRcloneOrBearerToken(_ rawToken: String) throws -> (accessToken: String, refreshToken: String?, expiry: Date?, deviceId: String?) {
+    private func parseRcloneOrBearerToken(_ rawToken: String) throws -> (accessToken: String, refreshToken: String?, expiry: Date?, deviceId: String?, captchaToken: String?, captchaExpiry: Date?) {
         var raw = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if raw.lowercased().hasPrefix("bearer ") {
@@ -222,11 +248,48 @@ final class PikPakClient {
            access.count > 20 {
             let refresh = json["refresh_token"] as? String
             let expiryText = json["expiry"] as? String
-            return (access, refresh, Self.parseRcloneDate(expiryText), Self.extractConfigValue(named: "device_id", from: scopedRaw))
+            let captcha = Self.parseRcloneCaptcha(from: scopedRaw)
+            return (
+                access,
+                refresh,
+                Self.parseRcloneDate(expiryText),
+                Self.extractConfigValue(named: "device_id", from: scopedRaw),
+                captcha.token,
+                captcha.expiry
+            )
         }
 
         guard scopedRaw.count > 20, !scopedRaw.contains("...") else { throw PikPakError.invalidCredentials }
-        return (scopedRaw, nil, nil, Self.extractConfigValue(named: "device_id", from: scopedRaw))
+        return (scopedRaw, nil, nil, Self.extractConfigValue(named: "device_id", from: scopedRaw), nil, nil)
+    }
+
+    private static func parseRcloneCaptcha(from raw: String) -> (token: String?, expiry: Date?) {
+        guard let value = extractConfigValue(named: "captcha_token", from: raw),
+              let data = value.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (nil, nil)
+        }
+        return (
+            json["captcha_token"] as? String,
+            parseRcloneDate(json["expiry"] as? String)
+        )
+    }
+
+    private static func subject(fromJWT token: String) -> String? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count > 1 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64 += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let data = Data(base64Encoded: base64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return (json["sub"] as? String) ?? (json["user_id"] as? String)
     }
 
     private static func preferredRclonePikPakSection(from raw: String) -> String? {
@@ -278,9 +341,109 @@ final class PikPakClient {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let date = iso.date(from: raw) { return date }
+        // rclone can serialize micro/nanoseconds while some iOS versions only
+        // accept milliseconds in ISO8601DateFormatter.
+        if let regex = try? NSRegularExpression(
+            pattern: #"^(.*\.\d{3})\d*(Z|[+-]\d{2}:\d{2})$"#
+        ) {
+            let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+            let milliseconds = regex.stringByReplacingMatches(
+                in: raw,
+                range: range,
+                withTemplate: "$1$2"
+            )
+            if let date = iso.date(from: milliseconds) { return date }
+        }
         iso.formatOptions = [.withInternetDateTime]
         return iso.date(from: raw)
     }
+
+    private func captchaToken(for action: String) async throws -> String {
+        if let account = loadAccount(),
+           let token = account.captchaToken,
+           !token.isEmpty,
+           let expiry = account.captchaExpiresAt,
+           expiry.addingTimeInterval(-10) > Date() {
+            return token
+        }
+
+        guard var account = loadAccount() else { throw PikPakError.notLoggedIn }
+        let timestamp = String(Int64(Date().timeIntervalSince1970 * 1_000))
+        var signature = clientId + clientVersion + packageName + deviceId + timestamp
+        for salt in captchaSignSalts {
+            signature = Self.md5Hex(signature + salt)
+        }
+
+        var meta: [String: Any] = [
+            "captcha_sign": "1.\(signature)",
+            "timestamp": timestamp,
+            "client_version": clientVersion,
+            "package_name": packageName
+        ]
+        let resolvedUserId = account.userId ?? Self.subject(fromJWT: account.accessToken)
+        if let resolvedUserId, !resolvedUserId.isEmpty {
+            meta["user_id"] = resolvedUserId
+            account.userId = resolvedUserId
+        }
+
+        var body: [String: Any] = [
+            "action": action,
+            "client_id": clientId,
+            "device_id": deviceId,
+            "meta": meta
+        ]
+        // rclone passes the previous shield token even when it has expired.
+        if let oldToken = account.captchaToken, !oldToken.isEmpty {
+            body["captcha_token"] = oldToken
+        }
+
+        guard let url = URL(string: "\(userBase)/v1/shield/captcha/init") else {
+            throw PikPakError.network("Bad PikPak verification URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        for (key, value) in commonHeaders(token: nil) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let json = try await perform(request)
+
+        if let verificationURL = json["url"] as? String, !verificationURL.isEmpty,
+           (json["captcha_token"] as? String)?.isEmpty != false {
+            throw PikPakError.api("PikPak verification required: \(verificationURL)")
+        }
+        guard let token = json["captcha_token"] as? String, !token.isEmpty else {
+            throw PikPakError.api("PikPak did not return a verification token")
+        }
+        let expiresIn = (json["expires_in"] as? Double)
+            ?? (json["expires_in"] as? Int).map(Double.init)
+            ?? 300
+        account.captchaToken = token
+        account.captchaExpiresAt = Date().addingTimeInterval(expiresIn)
+        saveAccount(account)
+        return token
+    }
+
+    private func invalidateCaptchaToken() {
+        guard var account = loadAccount() else { return }
+        account.captchaToken = nil
+        account.captchaExpiresAt = nil
+        saveAccount(account)
+    }
+
+    private static func md5Hex(_ text: String) -> String {
+        Insecure.MD5.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func isCaptchaFailure(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("captcha")
+            || message.contains("verification code is invalid")
+            || message.contains("verification token")
+    }
+
     func login(email: String, password: String, captchaToken: String = "") async throws -> PikPakAccount {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         let captcha = captchaToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -324,18 +487,14 @@ final class PikPakClient {
             "refresh_token": account.refreshToken
         ]
         do {
-            let json = try await postJSON(
-                url: "\(userBase)/v1/auth/token",
-                body: body,
-                auth: nil
-            )
+            let json = try await postOAuthForm(url: "\(userBase)/v1/auth/token", body: body)
             account = try parseAuth(json, fallbackEmail: account.email)
             saveAccount(account)
             return account
         } catch {
-            // Refresh failed — force re-login
-            logout()
-            throw PikPakError.notLoggedIn
+            // Preserve the imported rclone session. Network and shield failures
+            // are recoverable and must not silently disconnect the account.
+            throw error
         }
     }
 
@@ -355,13 +514,16 @@ final class PikPakClient {
             ?? 7200
         let sub = (json["sub"] as? String) ?? (json["user_id"] as? String)
         let name = (json["name"] as? String)
+        let current = loadAccount()
         let acc = PikPakAccount(
             email: fallbackEmail,
             accessToken: access,
             refreshToken: refresh,
             expiresAt: Date().addingTimeInterval(expiresIn),
-            userId: sub,
-            displayName: name
+            userId: sub ?? Self.subject(fromJWT: access),
+            displayName: name,
+            captchaToken: current?.captchaToken,
+            captchaExpiresAt: current?.captchaExpiresAt
         )
         saveAccount(acc)
         return acc
@@ -638,7 +800,7 @@ final class PikPakClient {
         for (k, v) in commonHeaders(token: token) {
             req.setValue(v, forHTTPHeaderField: k)
         }
-        return try await perform(req)
+        return try await performPikPakRequest(req, url: u, action: "GET:\(u.path)")
     }
 
     private func postJSON(url: String, body: [String: Any], auth: String?) async throws -> [String: Any] {
@@ -649,7 +811,41 @@ final class PikPakClient {
             req.setValue(v, forHTTPHeaderField: k)
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await perform(req)
+        return try await performPikPakRequest(req, url: u, action: "POST:\(u.path)")
+    }
+
+    private func postOAuthForm(url: String, body: [String: Any]) async throws -> [String: Any] {
+        guard let u = URL(string: url) else { throw PikPakError.network("Bad URL") }
+        var request = URLRequest(url: u)
+        request.httpMethod = "POST"
+        for (key, value) in commonHeaders(token: nil) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var components = URLComponents()
+        components.queryItems = body.map { URLQueryItem(name: $0.key, value: String(describing: $0.value)) }
+        request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
+        return try await perform(request)
+    }
+
+    private func performPikPakRequest(_ original: URLRequest, url: URL, action: String) async throws -> [String: Any] {
+        // OAuth refresh is handled by PikPak's OAuth endpoint itself. rclone's
+        // extra shield token is attached to Drive API calls.
+        let needsCaptcha = url.host == URL(string: driveBase)?.host && loadAccount() != nil
+        guard needsCaptcha else { return try await perform(original) }
+
+        var request = original
+        request.setValue(try await captchaToken(for: action), forHTTPHeaderField: "X-Captcha-Token")
+        do {
+            return try await perform(request)
+        } catch {
+            guard isCaptchaFailure(error) else { throw error }
+            // A token can be revoked before its nominal five-minute expiry.
+            // Match rclone: invalidate it, initialize a fresh token, retry once.
+            invalidateCaptchaToken()
+            request.setValue(try await captchaToken(for: action), forHTTPHeaderField: "X-Captcha-Token")
+            return try await perform(request)
+        }
     }
 
     private func perform(_ request: URLRequest) async throws -> [String: Any] {
