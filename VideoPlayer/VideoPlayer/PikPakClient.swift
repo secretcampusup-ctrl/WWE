@@ -135,10 +135,15 @@ final class PikPakClient {
     /// Headers required by PikPak's signed download servers when AVPlayer opens
     /// a direct CDN URL outside the app's normal web session.
     func directPlaybackHeaders() -> [String: String] {
-        var headers = commonHeaders(token: nil)
-        headers["Referer"] = "https://mypikpak.com/"
-        headers["Accept"] = "*/*"
-        return headers
+        // These are media GET/Range requests, not Drive API JSON requests.
+        // Sending Content-Type: application/json and the API-only X-* headers
+        // makes AVURLAsset's request differ from the request VLC successfully
+        // sends for the same signed URL, and some PikPak CDN edges reject it.
+        return [
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Referer": "https://mypikpak.com/",
+            "Accept": "*/*"
+        ]
     }
 
     // MARK: - Account storage

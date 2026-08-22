@@ -69,17 +69,15 @@ struct VideoPlayerView: View {
     private var usesMKVPlayer: Bool {
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
         let explicitExtension = url.pathExtension.lowercased()
+
         if explicitExtension == "mp4" || decoded.range(of: #"(?i)\.mp4(?:$|[?\s])"#, options: .regularExpression) != nil {
             return false
         }
         if explicitExtension == "mkv" || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil {
             return true
         }
-        // PikPak signs extensionless `/download/?fid=...` URLs. They can carry
-        // MKV/WebM just as easily as MP4, so treating every one as MP4 makes
-        // AVPlayer spend a long time probing (or fail outright). LibVLC sniffs
-        // the container bytes and is the safe route when the real extension is
-        // unavailable. A known `.mp4` title still takes the native path above.
+        // Extensionless PikPak download URLs do not reveal their container. VLC
+        // remains the safe fallback only when neither the URL nor title says MP4.
         if explicitExtension.isEmpty,
            LinkResolver.isPikPakDirectDownload(url.absoluteString) {
             return true

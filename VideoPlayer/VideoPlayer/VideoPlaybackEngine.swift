@@ -252,7 +252,18 @@ final class VideoPlaybackEngine: ObservableObject {
         // extension (e.g. PikPak's `/download/?fid=...` direct links) are often
         // rejected as "not playable" even though the bytes are a perfectly
         // normal video — other players just don't rely on the extension.
-        if let mimeHint = LinkResolver.mimeTypeHint(for: url) {
+        // PikPak CDN URLs are extensionless. Media still knows the WebDAV file
+        // name, so pass its real MP4 type to AVPlayer instead of making AVURLAsset
+        // guess from `/download/?fid=...`.
+        let titleExtension = (title as NSString).pathExtension.lowercased()
+        let titleMIMEHint: String? = {
+            switch titleExtension {
+            case "mp4", "m4v": return "video/mp4"
+            case "mov": return "video/quicktime"
+            default: return nil
+            }
+        }()
+        if let mimeHint = LinkResolver.mimeTypeHint(for: url) ?? titleMIMEHint {
             options["AVURLAssetOutOfBandMIMETypeKey"] = mimeHint
         }
         let asset = AVURLAsset(url: url, options: options)
