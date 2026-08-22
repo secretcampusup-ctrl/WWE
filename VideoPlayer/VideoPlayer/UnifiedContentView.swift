@@ -1931,11 +1931,17 @@ private struct PikPakAccountSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
     @State private var showRcloneImporter = false
+    @State private var showRcloneRemotePicker = false
+    @State private var rcloneRemotes: [PikPakRcloneRemote] = []
     @State private var isConnecting = false
     @State private var status = ""
 
     private var isConnected: Bool {
         vm.pikpakAccount != nil || PikPakClient.shared.loadAccount() != nil
+    }
+
+    private var connectedAccountName: String? {
+        (vm.pikpakAccount ?? PikPakClient.shared.loadAccount())?.displayName
     }
 
     private var allowedConfigurationTypes: [UTType] {
@@ -1956,7 +1962,7 @@ private struct PikPakAccountSettingsView: View {
                             Text(isConnected ? "Connected" : "Not Connected")
                                 .font(.headline)
                             Text(isConnected
-                                 ? "The renewable session is stored in this iPhone's Keychain."
+                                 ? "\(connectedAccountName ?? "PikPak") · Session stored in Keychain."
                                  : "Import the rclone.conf created on your computer.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -2012,6 +2018,18 @@ private struct PikPakAccountSettingsView: View {
                 allowsMultipleSelection: false,
                 onCompletion: importRcloneConfiguration
             )
+            .confirmationDialog(
+                "Choose PikPak Account",
+                isPresented: $showRcloneRemotePicker,
+                titleVisibility: .visible
+            ) {
+                ForEach(rcloneRemotes) { remote in
+                    Button(remote.name) { connect(to: remote) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Select the rclone remote that belongs to your Premium account.")
+            }
         }
         .preferredColorScheme(.dark)
     }
@@ -2031,19 +2049,34 @@ private struct PikPakAccountSettingsView: View {
                       !configuration.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw PikPakError.invalidCredentials
                 }
-                isConnecting = true
-                status = "Checking the imported session…"
-                Task { @MainActor in
-                    if let error = await vm.pikpakLoginWithPersonalAccessToken(configuration) {
-                        status = error
-                    } else {
-                        status = "Connected · PikPak is ready in Discover"
-                    }
-                    isConnecting = false
+                let remotes = PikPakClient.shared.rcloneRemotes(from: configuration)
+                guard !remotes.isEmpty else { throw PikPakError.invalidCredentials }
+                if remotes.count == 1, let remote = remotes.first {
+                    connect(to: remote)
+                } else {
+                    rcloneRemotes = remotes
+                    status = "Choose which PikPak account to connect."
+                    showRcloneRemotePicker = true
                 }
             } catch {
                 status = error.localizedDescription
             }
+        }
+    }
+
+    private func connect(to remote: PikPakRcloneRemote) {
+        isConnecting = true
+        status = "Checking \(remote.name)…"
+        Task { @MainActor in
+            if let error = await vm.pikpakLoginWithPersonalAccessToken(
+                remote.configuration,
+                label: remote.name
+            ) {
+                status = error
+            } else {
+                status = "Connected · \(remote.name)"
+            }
+            isConnecting = false
         }
     }
 }

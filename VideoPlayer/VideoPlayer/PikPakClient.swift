@@ -20,6 +20,13 @@ struct PikPakAccount: Codable, Equatable {
         Date() >= expiresAt.addingTimeInterval(-120)
     }
 }
+
+struct PikPakRcloneRemote: Identifiable, Equatable {
+    let name: String
+    let configuration: String
+    var id: String { name }
+}
+
 struct PikPakFileItem: Identifiable, Hashable {
     let id: String
     let name: String
@@ -204,6 +211,20 @@ final class PikPakClient {
 
     // MARK: - Auth
 
+    func rcloneRemotes(from rawConfiguration: String) -> [PikPakRcloneRemote] {
+        Self.rcloneSections(from: rawConfiguration).compactMap { section in
+            guard Self.extractConfigValue(named: "type", from: section)?.lowercased() == "pikpak",
+                  Self.extractAccessTokenJSON(from: section) != nil,
+                  let firstLine = section.split(whereSeparator: { $0.isNewline }).first else {
+                return nil
+            }
+            let header = String(firstLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard header.hasPrefix("["), header.hasSuffix("]"), header.count > 2 else { return nil }
+            let name = String(header.dropFirst().dropLast())
+            return PikPakRcloneRemote(name: name, configuration: section)
+        }
+    }
+
     func loginWithPersonalAccessToken(_ rawToken: String, label: String = "PikPak token") async throws -> PikPakAccount {
         let parsed = try parseRcloneOrBearerToken(rawToken)
         if let deviceId = parsed.deviceId, !deviceId.isEmpty {
@@ -293,6 +314,13 @@ final class PikPakClient {
     }
 
     private static func preferredRclonePikPakSection(from raw: String) -> String? {
+        rcloneSections(from: raw).first { section in
+            let isPikPak = extractConfigValue(named: "type", from: section)?.lowercased() == "pikpak"
+            return isPikPak && extractAccessTokenJSON(from: section) != nil
+        }
+    }
+
+    private static func rcloneSections(from raw: String) -> [String] {
         var sections: [String] = []
         var current: [Substring] = []
 
@@ -311,11 +339,7 @@ final class PikPakClient {
             }
         }
         appendCurrent()
-
-        return sections.first { section in
-            let isPikPak = extractConfigValue(named: "type", from: section)?.lowercased() == "pikpak"
-            return isPikPak && extractAccessTokenJSON(from: section) != nil
-        }
+        return sections
     }
 
     private static func extractConfigValue(named name: String, from raw: String) -> String? {

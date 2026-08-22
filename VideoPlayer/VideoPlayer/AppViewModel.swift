@@ -766,11 +766,6 @@ class AppViewModel: ObservableObject {
         linkId: UUID? = nil,
         headers: [String: String]? = nil
     ) {
-        // Request landscape before publishing `nowPlayingURL`. Player covers
-        // observe that state immediately, so doing this first prevents their
-        // initial frame/loading view from ever being laid out in portrait.
-        ScreenOrientationLock.setPlayerLandscape(true)
-
         // Prefer matching library entry for resume
         let matchedId = linkId ?? savedLinks.first(where: {
             $0.url?.absoluteString == url.absoluteString
@@ -1339,11 +1334,11 @@ class AppViewModel: ObservableObject {
             return error.localizedDescription
         }
     }
-    func pikpakLoginWithPersonalAccessToken(_ token: String) async -> String? {
+    func pikpakLoginWithPersonalAccessToken(_ token: String, label: String = "PikPak") async -> String? {
         isLoading = true
         defer { isLoading = false }
         do {
-            let acc = try await PikPakClient.shared.loginWithPersonalAccessToken(token)
+            let acc = try await PikPakClient.shared.loginWithPersonalAccessToken(token, label: label)
             pikpakAccount = acc
             try await refreshPikPakFiles()
             return nil

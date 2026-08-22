@@ -75,13 +75,9 @@ struct VideoPlayerView: View {
     @State private var endCountdownTask: Task<Void, Never>?
     @State private var didTearDownPlayback = false
     @State private var didResetNetworkAfterPlayback = false
-    // Every video opens directly in landscape; the rest of the app remains
-    // portrait-only and the in-player rotation button can still opt back in.
-    @State private var isPlayerLandscape = true
-    @State private var didRequestInitialOrientation = false
-    @State private var isInitialOrientationReady = false
-    @State private var initialOrientationTask: Task<Void, Never>?
-    @State private var didInitializePlayback = false
+    // Playback opens in the app's normal portrait orientation. Rotation is
+    // exclusively controlled by the in-player button.
+    @State private var isPlayerLandscape = false
     @State private var isClosingPlayer = false
 
     // Keep formats Apple handles well on AVPlayer; route MKV and other extended
@@ -109,56 +105,50 @@ struct VideoPlayerView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // Do not even construct the UIKit/VLC video drawable until the
-            // landscape geometry is stable. Merely covering it with black still
-            // let MobileVLCKit attach/detach a drawable during rotation, which
-            // could crash MKV playback while MP4/AVPlayer appeared unaffected.
-            if isInitialOrientationReady {
-                // Full-bleed video — never reflows when chrome toggles.
-                if usesMKVPlayer {
-                    MKVVideoPlayerView(
-                        url: url,
-                        controls: mkvControls,
-                        resumeAt: resumeAt,
-                        isFillMode: mkvFillMode,
-                        resetZoomToken: mkvResetZoomToken,
-                        httpHeaders: httpHeaders,
-                        subtitleSize: effectiveSubtitlePointSize,
-                        subtitleFontName: effectiveEmbeddedSubtitleVLCFontName,
-                        subtitleColorValue: subtitleColor.vlcColorValue,
-                        subtitleBackground: subtitleBackground,
-                        subtitleShadow: subtitleShadow,
-                        subtitleHeight: Int(subtitleHeight),
-                        subtitleDelay: subtitleDelay,
-                        anchorEmbeddedSubtitlesToViewport: false
-                    )
-                        .contentShape(Rectangle())
-                        .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
-                        .ignoresSafeArea()
-                } else {
-                    ZoomableVideoView(
-                        player: engine.player,
-                        resetToken: engine.resetZoomToken,
-                        fillModeToken: fillModeToken,
-                        isFillMode: isFillMode,
-                        videoSize: CGSize(width: engine.resolutionWidth, height: engine.resolutionHeight),
-                        // AVFoundation captions are emitted as timed text and drawn
-                        // by the fixed overlay below, outside this zoomable surface.
-                        anchorEmbeddedSubtitlesToViewport: false,
-                        onSingleTap: {
-                            withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
-                            scheduleAutoHide()
-                        },
-                        onInteractionChange: { engine.setInteracting($0) },
-                        onDoubleTap: {
-                            withAnimation(.easeInOut(duration: 0.28)) {
-                                isFillMode.toggle(); fillModeToken += 1
-                            }
-                        }
-                    )
-                    .equatable()
+            // Full-bleed video — never reflows when chrome toggles.
+            if usesMKVPlayer {
+                MKVVideoPlayerView(
+                    url: url,
+                    controls: mkvControls,
+                    resumeAt: resumeAt,
+                    isFillMode: mkvFillMode,
+                    resetZoomToken: mkvResetZoomToken,
+                    httpHeaders: httpHeaders,
+                    subtitleSize: effectiveSubtitlePointSize,
+                    subtitleFontName: effectiveEmbeddedSubtitleVLCFontName,
+                    subtitleColorValue: subtitleColor.vlcColorValue,
+                    subtitleBackground: subtitleBackground,
+                    subtitleShadow: subtitleShadow,
+                    subtitleHeight: Int(subtitleHeight),
+                    subtitleDelay: subtitleDelay,
+                    anchorEmbeddedSubtitlesToViewport: false
+                )
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { toggleMKVControls() })
                     .ignoresSafeArea()
-                }
+            } else {
+                ZoomableVideoView(
+                    player: engine.player,
+                    resetToken: engine.resetZoomToken,
+                    fillModeToken: fillModeToken,
+                    isFillMode: isFillMode,
+                    videoSize: CGSize(width: engine.resolutionWidth, height: engine.resolutionHeight),
+                    // AVFoundation captions are emitted as timed text and drawn
+                    // by the fixed overlay below, outside this zoomable surface.
+                    anchorEmbeddedSubtitlesToViewport: false,
+                    onSingleTap: {
+                        withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+                        scheduleAutoHide()
+                    },
+                    onInteractionChange: { engine.setInteracting($0) },
+                    onDoubleTap: {
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            isFillMode.toggle(); fillModeToken += 1
+                        }
+                    }
+                )
+                .equatable()
+                .ignoresSafeArea()
             }
 
             if !usesMKVPlayer, let error = engine.errorMessage {
@@ -322,14 +312,6 @@ struct VideoPlayerView: View {
                     .zIndex(1_000)
             }
 
-            // Geometry updates are asynchronous. Never expose a landscape
-            // control layout while the scene still has portrait dimensions;
-            // that is what produced the sideways, clipped first frame.
-            if !isInitialOrientationReady {
-                Color.black
-                    .ignoresSafeArea()
-                    .zIndex(2_000)
-            }
         }
         .fullScreenCover(isPresented: $showPlaybackSettings, onDismiss: {
             applySubtitlePreferences()
@@ -400,7 +382,6 @@ struct VideoPlayerView: View {
         .statusBar(hidden: true)
         .navigationBarHidden(true)
         .onAppear {
-            prepareInitialPlayerOrientationIfNeeded()
             didTearDownPlayback = false
             didResetNetworkAfterPlayback = false
             screenBrightness = Double(UIScreen.main.brightness)
@@ -410,12 +391,26 @@ struct VideoPlayerView: View {
             engine.onProgressTick = { seconds, duration, w, h in
                 onProgress?(seconds, duration, w, h)
             }
-            initializePlaybackIfOrientationReady()
+            if !usesMKVPlayer {
+                engine.load(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders)
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    guard !Task.isCancelled else { return }
+                    engine.applySubtitleStyle(
+                        fontSize: subtitleSize,
+                        fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
+                        color: subtitleColor.uiColor,
+                        background: subtitleBackground
+                    )
+                }
+            } else {
+                // Embedded MKV/VLC subtitles are disabled by design. Online
+                // downloads use the independent viewport overlay below.
+                mkvControls.selectSubtitleTrack(id: nil)
+            }
             scheduleAutoHide()
         }
         .onDisappear {
-            initialOrientationTask?.cancel()
-            initialOrientationTask = nil
             ScreenOrientationLock.setPlayerLandscape(false)
             tearDownPlayback()
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -490,60 +485,6 @@ struct VideoPlayerView: View {
     }
 
     // MARK: - Top chrome
-
-    private func prepareInitialPlayerOrientationIfNeeded() {
-        guard !isInitialOrientationReady else { return }
-        if !didRequestInitialOrientation {
-            didRequestInitialOrientation = true
-            isPlayerLandscape = true
-            ScreenOrientationLock.setPlayerLandscape(true)
-        }
-        guard initialOrientationTask == nil else { return }
-
-        initialOrientationTask = Task { @MainActor in
-            // `interfaceOrientation` changes before SwiftUI receives its final
-            // landscape safe-area and geometry values. Wait for both phases.
-            for _ in 0..<40 {
-                guard !Task.isCancelled else { return }
-                if ScreenOrientationLock.isInterfaceLandscape {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                    break
-                }
-                try? await Task.sleep(nanoseconds: 25_000_000)
-            }
-            guard !Task.isCancelled else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                isInitialOrientationReady = true
-            }
-            initializePlaybackIfOrientationReady()
-            initialOrientationTask = nil
-        }
-    }
-
-    private func initializePlaybackIfOrientationReady() {
-        guard isInitialOrientationReady, !didInitializePlayback else { return }
-        didInitializePlayback = true
-        if usesMKVPlayer {
-            // Embedded MKV/VLC subtitles are disabled by design. Online
-            // downloads use the independent viewport overlay below.
-            mkvControls.selectSubtitleTrack(id: nil)
-            return
-        }
-
-        engine.load(url: url, title: title, resumeAt: resumeAt, httpHeaders: httpHeaders)
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            guard !Task.isCancelled, !didTearDownPlayback else { return }
-            engine.applySubtitleStyle(
-                fontSize: subtitleSize,
-                fontFamily: effectiveEmbeddedSubtitleAppleFontFamily,
-                color: subtitleColor.uiColor,
-                background: subtitleBackground
-            )
-        }
-    }
 
     private func closePlayer() {
         guard !isClosingPlayer else { return }
@@ -1542,7 +1483,7 @@ private struct MKVVideoPlayerView: UIViewRepresentable {
         view.setFillMode(isFillMode)
         view.setEmbeddedSubtitleViewportAnchoring(anchorEmbeddedSubtitlesToViewport)
         view.configureInitialSubtitleStyle(fontSize: subtitleSize, fontName: subtitleFontName, color: subtitleColorValue, background: subtitleBackground, shadow: subtitleShadow, margin: subtitleHeight, delay: subtitleDelay)
-        view.playWhenReady(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
+        view.play(url: url, resumeAt: resumeAt, httpHeaders: httpHeaders)
         return view
     }
 
@@ -1575,7 +1516,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     private let videoView = UIView()
     private var currentURL: URL?
     private var currentHTTPHeaders: [String: String]?
-    private var pendingPlayback: (url: URL, resumeAt: Double, headers: [String: String]?)?
     private var subtitleStyle = (fontSize: 24.0, fontName: "Helvetica Neue", color: 0xFFFFFF, background: true, shadow: true, margin: 0, delay: 0.0)
     private var loadingTimer: Timer?
     private var lastStatisticsBytes: Double?
@@ -1632,7 +1572,6 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        defer { startPendingPlaybackIfPossible() }
         scrollView.frame = bounds
         // Only recompute the fitted frame (and do the heavier render-scale /
         // clamp work) when the video's un-zoomed size actually changes —
@@ -1651,31 +1590,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         updateVideoRenderScale()
     }
 
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        startPendingPlaybackIfPossible()
-    }
-
-    func playWhenReady(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
-        guard currentURL != url else { return }
-        pendingPlayback = (url, resumeAt, httpHeaders)
-        startPendingPlaybackIfPossible()
-    }
-
-    private func startPendingPlaybackIfPossible() {
-        guard window != nil,
-              bounds.width > 1,
-              bounds.height > 1,
-              let pendingPlayback else { return }
-        self.pendingPlayback = nil
-        play(
-            url: pendingPlayback.url,
-            resumeAt: pendingPlayback.resumeAt,
-            httpHeaders: pendingPlayback.headers
-        )
-    }
-
-    private func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
+    func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
         playbackGeneration &+= 1
         let generation = playbackGeneration
         isStopped = false
@@ -1877,12 +1792,11 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func playIfNeeded(url: URL, httpHeaders: [String: String]? = nil) {
-        guard currentURL != url, pendingPlayback?.url != url else { return }
-        playWhenReady(url: url, httpHeaders: httpHeaders)
+        guard currentURL != url else { return }
+        play(url: url, httpHeaders: httpHeaders)
     }
 
     func stop() {
-        pendingPlayback = nil
         guard !isStopped else { return }
         isStopped = true
         playbackGeneration &+= 1

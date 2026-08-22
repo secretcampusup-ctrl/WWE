@@ -44,11 +44,6 @@ enum ScreenOrientationLock {
         return orientation == .portrait || orientation == .portraitUpsideDown
     }
 
-    static var isInterfaceLandscape: Bool {
-        guard let orientation = activeScene?.interfaceOrientation else { return false }
-        return orientation == .landscapeLeft || orientation == .landscapeRight
-    }
-
     @discardableResult
     static func lockToCurrentOrientation() -> Bool {
         guard let scene = activeScene else { return false }
