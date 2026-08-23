@@ -1591,6 +1591,16 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
     }
 
     func play(url: URL, resumeAt: Double = 0, httpHeaders: [String: String]? = nil) {
+        // Episode changes can reuse this UIView. Fully release the old VLC
+        // drawable before replacing its media so the decoder/render thread can
+        // never keep drawing into a surface whose media is being destroyed.
+        if !isStopped {
+            loadingTimer?.invalidate()
+            loadingTimer = nil
+            mediaPlayer.drawable = nil
+            mediaPlayer.stop()
+            mediaPlayer.media = nil
+        }
         playbackGeneration &+= 1
         let generation = playbackGeneration
         isStopped = false
@@ -1678,43 +1688,19 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
 
     private func updateNetworkTelemetry() {
         guard let media = mediaPlayer.media else { return }
-        var statistics: NSDictionary?
-        for name in ["statistics", "stats"] {
-            let selector = NSSelectorFromString(name)
-            guard media.responds(to: selector),
-                  let value = media.perform(selector)?.takeUnretainedValue() as? NSDictionary else { continue }
-            statistics = value
-            break
-        }
-        guard let statistics else { return }
-
-        func number(matching fragments: [String]) -> Double? {
-            for (rawKey, rawValue) in statistics {
-                let key = String(describing: rawKey)
-                    .lowercased()
-                    .replacingOccurrences(of: "_", with: "")
-                guard fragments.contains(where: { key.contains($0) }) else { continue }
-                if let value = rawValue as? NSNumber { return value.doubleValue }
-            }
-            return nil
-        }
-
+        // Use VLCKit's typed public statistics API. Calling an unknown Objective-C
+        // selector and treating its return as an NSDictionary is unsafe: current
+        // VLCKit returns a value struct, which can crash when bridged as an object.
+        let totalBytes = Double(max(0, media.statistics.readBytes))
         let now = ProcessInfo.processInfo.systemUptime
-        let totalBytes = number(matching: ["demuxreadbytes", "readbytes", "inputbytes"])
-        if let totalBytes,
-           let previousBytes = lastStatisticsBytes,
+        if let previousBytes = lastStatisticsBytes,
            let previousTime = lastStatisticsSampleTime,
            now > previousTime,
            totalBytes >= previousBytes {
             controls?.updateNetworkSpeed((totalBytes - previousBytes) / (now - previousTime))
-        } else if let bitrate = number(matching: ["inputbitrate", "demuxbitrate"]), bitrate > 0 {
-            // libVLC exposes this field in kilobytes per second.
-            controls?.updateNetworkSpeed(bitrate * 1_000)
         }
-        if let totalBytes {
-            lastStatisticsBytes = totalBytes
-            lastStatisticsSampleTime = now
-        }
+        lastStatisticsBytes = totalBytes
+        lastStatisticsSampleTime = now
     }
 
     private func refreshEmbeddedTracks() {
@@ -1810,9 +1796,12 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
             controls?.surface = nil
         }
         controls = nil
+        // Detach first. libVLC may still deliver a final video frame while stop()
+        // tears down its decoder, so leaving the UIView attached here is a crash
+        // window during SwiftUI dismissal/dismantling.
+        mediaPlayer.drawable = nil
         mediaPlayer.stop()
         mediaPlayer.media = nil
-        mediaPlayer.drawable = nil
         currentURL = nil
         currentHTTPHeaders = nil
     }

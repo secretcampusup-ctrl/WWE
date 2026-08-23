@@ -1132,36 +1132,25 @@ class AppViewModel: ObservableObject {
         await browse(server: server, path: path)
     }
 
-    /// Resolve WebDAV redirects completely before presenting a player.
+    /// Prepare the authenticated WebDAV URL without probing the media first.
+    ///
+    /// PikPak DAV returns a signed CDN redirect from the actual media request.
+    /// Consuming that redirect with a separate `Range: bytes=0-0` probe before
+    /// playback can make AVPlayer receive a rejected URL and makes VLC replace
+    /// media while its first request is still being cancelled. Let the selected
+    /// player own the only request and follow the redirect itself instead.
     @discardableResult
     func preparePlayback(file: WebDAVFile, server: WebDAVServer) async -> Bool {
         let client = WebDAVClient(server: server)
-        guard client.streamURL(for: file) != nil else {
+        guard let url = client.streamURL(for: file) else {
             errorMessage = "Could not build stream URL for this file"
             return false
         }
-        isLoading = true
-        defer { isLoading = false }
         errorMessage = nil
-        // Never leave the previous video mounted while a fresh signed URL resolves.
+        // Never leave the previous video mounted while the next player is shown.
         nowPlaying = nil
         nowPlayingURL = nil
         nowPlayingHeaders = nil
-        guard let url = await client.resolvedStreamURL(for: file) else {
-            errorMessage = "Could not resolve the signed playback URL"
-            return false
-        }
-
-        let sameHost = url.host?.caseInsensitiveCompare(server.baseURL?.host ?? "") == .orderedSame
-        let headers: [String: String]
-        if sameHost {
-            headers = client.streamHeaders()
-        } else if LinkResolver.isPikPakDirectDownload(url.absoluteString) {
-            // Match Direct Links without leaking WebDAV Basic auth to PikPak's CDN.
-            headers = PikPakClient.shared.directPlaybackHeaders()
-        } else {
-            headers = [:]
-        }
 
         let saved = saveDirectLink(
             url.absoluteString,
@@ -1170,7 +1159,12 @@ class AppViewModel: ObservableObject {
             title: file.name,
             fileSizeBytes: file.size
         )
-        startPlayback(url: url, title: file.name, linkId: saved?.id, headers: headers)
+        startPlayback(
+            url: url,
+            title: file.name,
+            linkId: saved?.id,
+            headers: client.streamHeaders()
+        )
         return nowPlayingURL != nil
     }
 
