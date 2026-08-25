@@ -671,6 +671,23 @@ actor TMDBOnlineCatalogService {
 
     func cachedSnapshot() -> TMDBOnlineCatalogSnapshot { snapshot }
 
+    func search(_ rawQuery: String) async throws -> [TMDBCatalogItem] {
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2, TMDBSettings.isConfigured else { return [] }
+        let payload: TMDBCatalogListPayload = try await request(
+            "/3/search/multi",
+            query: [
+                "query": query,
+                "language": "en-US",
+                "page": "1",
+                "include_adult": "false"
+            ]
+        )
+        return Self.deduplicated(
+            payload.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
+        )
+    }
+
     func refresh(force: Bool = false) async throws -> TMDBOnlineCatalogSnapshot {
         guard TMDBSettings.isConfigured else { return snapshot }
         if !force, !snapshot.isEmpty, !snapshot.isStale { return snapshot }
