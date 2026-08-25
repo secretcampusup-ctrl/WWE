@@ -276,6 +276,16 @@ struct VideoDetailsView: View {
                 setArtworkFrame(custom)
                 return
             }
+
+            // A catalog movie/show already knows the exact portrait artwork that
+            // Details must use. Do not briefly show the grid poster, a generated
+            // video frame, or a legacy series cover while the original TMDB image
+            // is being decoded. The dedicated supplied-metadata task below owns
+            // that final image and keeps the first presentation visually atomic.
+            if isMovieDetailsPage,
+               item.suppliedTMDBDetails?.detailsPosterURL != nil {
+                return
+            }
             if let memoryKey = seriesMemoryArtworkKey,
                let remembered = VideoDetailsMemoryCache.seriesArtwork.object(
                    forKey: memoryKey as NSString
@@ -384,6 +394,7 @@ struct VideoDetailsView: View {
             withAnimation(.easeOut(duration: 0.18)) { isPreparingPlayback = false }
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
+            guard !(isMovieDetailsPage && item.suppliedTMDBDetails?.detailsPosterURL != nil) else { return }
             guard let key = notification.object as? String,
                   key == item.posterCacheKey else { return }
             Task {
@@ -410,7 +421,10 @@ struct VideoDetailsView: View {
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
             let titleArtworkKey = tmdbTitleArtworkCacheKey
-            if let cachedEpisode = await VideoThumbnailLoader.cachedImageAsync(forStableKey: episodeArtworkKey) {
+            let requiresFinalTMDBPoster = isMovieDetailsPage
+                && item.suppliedTMDBDetails?.detailsPosterURL != nil
+            if !requiresFinalTMDBPoster,
+               let cachedEpisode = await VideoThumbnailLoader.cachedImageAsync(forStableKey: episodeArtworkKey) {
                 setArtworkFrame(cachedEpisode)
             } else if let cachedTitle = await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) {
                 setArtworkFrame(cachedTitle)
@@ -491,6 +505,59 @@ struct VideoDetailsView: View {
                     }
                 }
             }
+        }
+        .task(id: suppliedTMDBRefreshIdentity) {
+            guard item.manualMetadataProvider != "theporndb",
+                  let suppliedDetails = item.suppliedTMDBDetails else { return }
+
+            // Metadata enrichment must update the existing screen in place. It
+            // must not recreate the NavigationStack or reset the scroll/header.
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                tmdbDetails = suppliedDetails
+            }
+            VideoDetailsMemoryCache.details[stableMetadataCacheKey] = suppliedDetails
+
+            guard isMovieDetailsPage,
+                  let posterURL = suppliedDetails.detailsPosterURL else { return }
+            let requestedItemID = item.id
+            let artworkKey = tmdbTitleArtworkCacheKey
+
+            let sharedHeroKey = VideoThumbnailLoader.heroPosterCacheKey(for: posterURL)
+            if let heroImage = await VideoThumbnailLoader.cachedHeroImageAsync(
+                forStableKey: sharedHeroKey
+            ) {
+                guard !Task.isCancelled, requestedItemID == item.id else { return }
+                setArtworkFrame(heroImage)
+                VideoThumbnailLoader.cacheHighQualityImageInBackground(
+                    heroImage,
+                    forStableKey: artworkKey,
+                    maximumBytes: ThumbnailPipeline.largeMaximumBytes
+                )
+                return
+            }
+
+            if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: artworkKey) {
+                guard !Task.isCancelled, requestedItemID == item.id else { return }
+                setArtworkFrame(cached)
+                return
+            }
+
+            guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: posterURL),
+                  let image = UIImage(data: data),
+                  !Task.isCancelled,
+                  requestedItemID == item.id else { return }
+            setArtworkFrame(image)
+            VideoThumbnailLoader.cacheHighQualityImageInBackground(
+                image,
+                forStableKey: artworkKey,
+                maximumBytes: ThumbnailPipeline.largeMaximumBytes
+            )
+            VideoThumbnailLoader.cacheImageInBackground(
+                image,
+                forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
+            )
         }
         .alert("Delete video?", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -935,7 +1002,7 @@ struct VideoDetailsView: View {
     }
 
     private var displayedFrame: UIImage? {
-        frame ?? item.customPosterImage ?? thePornDBMetadata?.coverImage
+        frame ?? suppliedHeroFrame ?? item.customPosterImage ?? thePornDBMetadata?.coverImage
     }
 
     private var movieBackdropFrame: UIImage? {
@@ -944,7 +1011,14 @@ struct VideoDetailsView: View {
            let adultCover = thePornDBMetadata?.coverImage {
             return adultCover
         }
-        return frame
+        return frame ?? suppliedHeroFrame
+    }
+
+    private var suppliedHeroFrame: UIImage? {
+        guard let posterURL = item.suppliedTMDBDetails?.detailsPosterURL else { return nil }
+        return VideoThumbnailLoader.cachedHeroImageInMemory(
+            forStableKey: VideoThumbnailLoader.heroPosterCacheKey(for: posterURL)
+        )
     }
 
     private var tmdbTitleArtworkCacheKey: String {
@@ -1120,6 +1194,15 @@ struct VideoDetailsView: View {
         "metadata|\(stableMetadataCacheKey)"
     }
 
+    private var suppliedTMDBRefreshIdentity: String {
+        guard let details = item.suppliedTMDBDetails else { return "supplied|none|\(item.id)" }
+        let mediaIdentity = item.relatedEpisodes.isEmpty
+            ? item.id
+            : (item.seriesIdentity ?? item.posterCacheKey ?? item.displayTitle)
+        return "supplied|\(mediaIdentity)|\(details.id)|\(details.detailsPosterPath ?? "")"
+            + "|\(details.logoPath ?? "")|\(details.cast.count)|\(details.runtimeMinutes ?? -1)"
+    }
+
     private var stableMetadataCacheKey: String {
         if !item.relatedEpisodes.isEmpty, let details = item.suppliedTMDBDetails {
             return "series|tmdb|\(details.id)"
@@ -1202,10 +1285,14 @@ struct VideoDetailsView: View {
 
             // Artwork is loaded by the async details task. Never perform disk
             // reads from onAppear or a scroll-driven render transaction.
-            frame = item.customPosterImage
-                ?? seriesMemoryArtworkKey.flatMap {
-                    VideoDetailsMemoryCache.seriesArtwork.object(forKey: $0 as NSString)
-                }
+            if !(isMovieDetailsPage
+                 && item.suppliedTMDBDetails?.detailsPosterURL != nil
+                 && item.customPosterImage == nil) {
+                frame = item.customPosterImage
+                    ?? seriesMemoryArtworkKey.flatMap {
+                        VideoDetailsMemoryCache.seriesArtwork.object(forKey: $0 as NSString)
+                    }
+            }
         }
     }
 

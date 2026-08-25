@@ -28,6 +28,7 @@ struct TorBoxFile: Identifiable, Codable, Hashable {
 struct TorBoxTorrent: Identifiable, Codable, Hashable {
     let id: Int
     let name: String?
+    let hash: String?
     let downloadState: String?
     let downloadFinished: Bool?
     let downloadPresent: Bool?
@@ -35,7 +36,7 @@ struct TorBoxTorrent: Identifiable, Codable, Hashable {
     let files: [TorBoxFile]?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, progress, files
+        case id, name, hash, progress, files
         case downloadState = "download_state"
         case downloadFinished = "download_finished"
         case downloadPresent = "download_present"

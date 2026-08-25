@@ -1552,11 +1552,11 @@ struct UnifiedMediaDetailsHost: View {
             suggestions: suggestions,
             onSelectSuggestion: selectSuggestion
         )
-        .id(
-            "\(activeEntry.id)|\(activeEntry.details?.cast.count ?? 0)"
-                + "|\(activeEntry.details?.runtimeMinutes ?? -1)"
-                + "|\(activeEntry.details?.logoPath ?? "")"
-        )
+        // Keep one Details hierarchy for the selected library item. Re-keying
+        // the whole screen when cast/logo/runtime metadata arrived caused the
+        // first open to rebuild and visibly jump from the temporary artwork to
+        // the final poster. VideoDetailsView now adopts enrichment in place.
+        .id(activeEntry.id)
         .task(id: activeEntry.id) {
             guard case let .catalog(mediaType, _) = activeEntry.source else { return }
             if let details = await TMDBService.shared.detailsOriginalFirst(
@@ -1574,7 +1574,17 @@ struct UnifiedMediaDetailsHost: View {
             )
         }
         .fullScreenCover(isPresented: $showOnlineSources) {
-            ExperimentalOnlineSourcesView(entry: activeEntry)
+            ExperimentalOnlineSourcesView(
+                vm: vm,
+                entry: activeEntry,
+                episode: selectedEpisode,
+                onPlaybackReady: {
+                    showOnlineSources = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        showPlayer = true
+                    }
+                }
+            )
         }
     }
 
@@ -1724,16 +1734,33 @@ struct UnifiedMediaDetailsHost: View {
 }
 
 private struct ExperimentalOnlineSourcesView: View {
+    @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
+    let episode: UnifiedEpisode?
+    let onPlaybackReady: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var sources: [OnlineTorrentSource] = []
+    @State private var isSearching = true
+    @State private var resolvingID: String?
+    @State private var message: String?
+    @State private var resolveTask: Task<Void, Never>?
 
     private var activeProviders: [String] {
         var values: [String] = []
+        if PikPakClient.shared.loadAccount() != nil { values.append("PikPak") }
         if !TorBoxKeyStore.load().isEmpty { values.append("TorBox") }
         if !RealDebridKeyStore.key.isEmpty { values.append("Real-Debrid") }
         if !OffcloudKeyStore.load().isEmpty { values.append("Offcloud") }
-        if PikPakClient.shared.loadAccount() != nil { values.append("PikPak") }
         return values
+    }
+
+    private var fastestID: String? {
+        sources.max {
+            if $0.seeders != $1.seeders { return $0.seeders < $1.seeders }
+            if $0.sizeBytes == 0 { return true }
+            if $1.sizeBytes == 0 { return false }
+            return $0.sizeBytes > $1.sizeBytes
+        }?.id
     }
 
     var body: some View {
@@ -1744,45 +1771,47 @@ private struct ExperimentalOnlineSourcesView: View {
                         Text(entry.title)
                             .font(.title2.bold())
                             .foregroundStyle(.white)
-                        Text("Streaming Sources · Experimental")
+                        Text(episodeLabel ?? "Streaming Sources")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
 
-                    statusCard(
-                        title: OrionCredentialStore.isReady ? "Orion Ready" : "Orion App Key Required",
-                        subtitle: OrionCredentialStore.isReady
-                            ? "This title is ready for an automatic Orion lookup."
-                            : "Add a regenerated User API Key and your Custom App API Key in Settings.",
-                        icon: OrionCredentialStore.isReady ? "checkmark.seal.fill" : "key.fill",
-                        tint: OrionCredentialStore.isReady ? .green : .orange
-                    )
+                    providerStrip
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("ACTIVE PLAYBACK SERVICES")
-                            .font(.caption.bold())
-                            .tracking(0.8)
-                            .foregroundStyle(.secondary)
-                        if activeProviders.isEmpty {
-                            Text("No playback service is connected. The app will never contact an unconfigured provider.")
-                                .font(.subheadline)
+                    if isSearching {
+                        VStack(spacing: 13) {
+                            ProgressView().tint(AppPalette.purple)
+                            Text(OrionCredentialStore.isReady ? "Searching Orion by IMDb ID…" : "Searching The Pirate Bay…")
+                                .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(activeProviders, id: \.self) { provider in
-                                Label(provider, systemImage: "checkmark.circle.fill")
-                                    .font(.headline)
-                                    .foregroundStyle(.white)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 55)
+                    } else if sources.isEmpty {
+                        statusCard(
+                            title: "No matching sources",
+                            subtitle: message ?? "No 720p, 1080p, 1440p, or 4K source was found.",
+                            icon: "magnifyingglass",
+                            tint: .orange
+                        )
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("ONE BEST LINK PER QUALITY")
+                                .font(.caption.bold())
+                                .tracking(0.8)
+                                .foregroundStyle(.secondary)
+                            ForEach(sources.sorted(by: { $0.quality < $1.quality })) { source in
+                                sourceCard(source)
                             }
                         }
                     }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
 
-                    Text("Orion searches only after a title is opened. Home browsing never consumes Orion requests.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
+                    if let message, !sources.isEmpty {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                    }
                 }
                 .padding(18)
                 .padding(.bottom, 70)
@@ -1795,8 +1824,158 @@ private struct ExperimentalOnlineSourcesView: View {
                     AppAnimatedBackButton(size: 36) { dismiss() }
                 }
             }
+            .task { await loadSources() }
+            .onDisappear { resolveTask?.cancel() }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var episodeLabel: String? {
+        guard let episode else { return nil }
+        return String(format: "Season %d · Episode %d", episode.season, episode.episode)
+    }
+
+    private var providerStrip: some View {
+        HStack(spacing: 11) {
+            Image(systemName: activeProviders.isEmpty ? "bolt.horizontal.circle.fill" : "icloud.and.arrow.up.fill")
+                .font(.title3)
+                .foregroundStyle(activeProviders.isEmpty ? AppPalette.purple : .green)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activeProviders.isEmpty ? "Direct Torrent Player" : activeProviders.joined(separator: " · "))
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(activeProviders.isEmpty
+                     ? "No cloud service is enabled. Playback uses the built-in torrent engine."
+                     : "The magnet is added automatically, then the prepared video starts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func sourceCard(_ source: OnlineTorrentSource) -> some View {
+        let isFastest = fastestID == source.id
+        let isResolving = resolvingID == source.id
+        return Button {
+            guard resolvingID == nil else { return }
+            resolve(source)
+        } label: {
+            HStack(spacing: 14) {
+                VStack(spacing: 2) {
+                    Text(source.quality.label)
+                        .font(.headline.bold())
+                        .foregroundStyle(isFastest ? .black : .white)
+                    if isFastest {
+                        Text("FASTEST")
+                            .font(.system(size: 8, weight: .black))
+                            .tracking(0.5)
+                            .foregroundStyle(.black.opacity(0.72))
+                    }
+                }
+                .frame(width: 70, height: 58)
+                .background(
+                    isFastest ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)),
+                    in: RoundedRectangle(cornerRadius: 14)
+                )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(isFastest ? "Fastest Link · \(source.quality.label)" : source.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    HStack(spacing: 7) {
+                        Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
+                        Text("·")
+                        Text(source.sizeLabel)
+                        Text("·")
+                        Text(source.origin.rawValue)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                if isResolving {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "play.fill")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(Color.white.opacity(0.1), in: Circle())
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(isResolving ? 0.095 : 0.055), in: RoundedRectangle(cornerRadius: 20))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(isFastest ? AppPalette.purple.opacity(0.75) : Color.white.opacity(0.055), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(resolvingID != nil)
+    }
+
+    @MainActor
+    private func loadSources() async {
+        guard case let .catalog(mediaType, tmdbID) = entry.source else {
+            isSearching = false
+            message = "Online lookup is available for catalog titles only."
+            return
+        }
+        isSearching = true
+        message = nil
+        var imdbID = entry.details?.imdbID
+        if imdbID?.isEmpty != false {
+            imdbID = await TMDBService.shared.externalIMDbID(mediaType: mediaType, tmdbID: tmdbID)
+        }
+        let year = entry.details?.releaseDate.map { String($0.prefix(4)) }
+        let context = OnlineSourceLookupContext(
+            title: entry.details?.title ?? entry.title,
+            year: year,
+            mediaType: mediaType,
+            tmdbID: tmdbID,
+            imdbID: imdbID,
+            season: episode?.season ?? (mediaType == "tv" ? 1 : nil),
+            episode: episode?.episode ?? (mediaType == "tv" ? 1 : nil)
+        )
+        do {
+            sources = try await OnlineSourceSearchService.shared.search(context)
+            if sources.isEmpty {
+                message = OrionCredentialStore.isReady
+                    ? "Orion returned no supported quality for this title."
+                    : "No supported quality was found on The Pirate Bay."
+            }
+        } catch {
+            message = error.localizedDescription
+            sources = []
+        }
+        isSearching = false
+    }
+
+    private func resolve(_ source: OnlineTorrentSource) {
+        resolvingID = source.id
+        message = activeProviders.isEmpty
+            ? "Connecting to peers and reading torrent metadata…"
+            : "Adding the fastest \(source.quality.label) source to your playback service…"
+        resolveTask?.cancel()
+        resolveTask = Task { @MainActor in
+            do {
+                let provider = try await vm.resolveAndPlayOnlineSource(source)
+                guard !Task.isCancelled else { return }
+                message = "Playing through \(provider)."
+                resolvingID = nil
+                onPlaybackReady()
+            } catch {
+                guard !(error is CancellationError) else { return }
+                message = error.localizedDescription
+                resolvingID = nil
+            }
+        }
     }
 
     private func statusCard(title: String, subtitle: String, icon: String, tint: Color) -> some View {

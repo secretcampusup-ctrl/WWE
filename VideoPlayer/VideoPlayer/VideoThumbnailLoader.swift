@@ -514,6 +514,13 @@ enum VideoThumbnailLoader {
         "tmdb-details-poster-nolang-en-original-v1|\(identity)"
     }
 
+    /// Shared identity for the exact original-size TMDB portrait used by both
+    /// Home Hero and Details. Sharing it lets Details reuse Hero's already
+    /// decoded pixels instead of presenting a temporary cover on first open.
+    static func heroPosterCacheKey(for remoteURL: URL) -> String {
+        "unified-hero-nolang-original-v3|\(remoteURL.absoluteString)"
+    }
+
     // MARK: - Cache API (for stable keys)
 
     private static func stableCacheFileURL(for key: String) -> URL {
@@ -684,6 +691,12 @@ enum VideoThumbnailLoader {
                 continuation.resume(returning: image)
             }
         }
+    }
+
+    /// Memory-only lookup safe for SwiftUI's first render. It never touches disk
+    /// or decodes pixels on the UI thread.
+    static func cachedHeroImageInMemory(forStableKey key: String) -> UIImage? {
+        heroMemoryCache.object(forKey: key as NSString)
     }
 
     static func cachedImageAsync(for remote: URL) async -> UIImage? {

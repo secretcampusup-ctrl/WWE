@@ -8,4 +8,7 @@ target 'VideoPlayer' do
   pod 'MobileVLCKit', :podspec => File.expand_path('MobileVLCKit.podspec', __dir__)
   pod 'Kingfisher', '~> 8.0'
   pod 'KingfisherWebP', '~> 1.7'
+  # Direct magnet fallback when no cloud/debrid provider is configured.
+  # The binary is fetched by CocoaPods; it is not committed to this repository.
+  pod 'TorrentBridgeKit', :podspec => File.expand_path('TorrentBridgeKit.podspec', __dir__)
 end

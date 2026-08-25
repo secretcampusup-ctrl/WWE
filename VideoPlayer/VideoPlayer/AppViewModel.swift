@@ -831,7 +831,7 @@ class AppViewModel: ObservableObject {
         return (torrentId, fileId)
     }
 
-    private func startPlayback(
+    func startPlayback(
         url: URL,
         title: String,
         linkId: UUID? = nil,
@@ -1401,6 +1401,9 @@ class AppViewModel: ObservableObject {
     /// This prevents a dismissed player from being reconstructed with its stale URL.
     func endPlaybackPresentation() {
         finishPlaybackHistory()
+        if nowPlayingURL?.host == "127.0.0.1" || nowPlayingURL?.host == "localhost" {
+            DirectTorrentPlaybackEngine.shared.stopCurrent()
+        }
         nowPlayingURL = nil
         nowPlayingHeaders = nil
         nowPlayingResumeAt = 0

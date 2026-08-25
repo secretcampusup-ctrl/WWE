@@ -20,6 +20,7 @@
 		AA000059 /* MatroskaSubtitleExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000059 /* MatroskaSubtitleExtractor.swift */; };
 		AA000060 /* SubtitleSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000060 /* SubtitleSearchView.swift */; };
 		AA000061 /* SubtitlePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000061 /* SubtitlePreferences.swift */; };
+		AA000062 /* OnlineStreamingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000062 /* OnlineStreamingService.swift */; };
 		AA000004 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000004 /* AppViewModel.swift */; };
 		AA000005 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000005 /* Models.swift */; };
 		AA000006 /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000006 /* AddServerView.swift */; };
@@ -75,6 +76,8 @@
 		BB000059 /* MatroskaSubtitleExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatroskaSubtitleExtractor.swift; sourceTree = "<group>"; };
 		BB000060 /* SubtitleSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleSearchView.swift; sourceTree = "<group>"; };
 		BB000061 /* SubtitlePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitlePreferences.swift; sourceTree = "<group>"; };
+		BB000062 /* OnlineStreamingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineStreamingService.swift; sourceTree = "<group>"; };
+		BB000063 /* TorrentBridgeShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TorrentBridgeShim.h; sourceTree = "<group>"; };
 		BB000004 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		BB000051 /* DiagnosticLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogger.swift; sourceTree = "<group>"; };
 		BB000052 /* DiagnosticLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogView.swift; sourceTree = "<group>"; };
@@ -156,6 +159,8 @@
 				BB000059 /* MatroskaSubtitleExtractor.swift */,
 				BB000060 /* SubtitleSearchView.swift */,
 				BB000061 /* SubtitlePreferences.swift */,
+				BB000062 /* OnlineStreamingService.swift */,
+				BB000063 /* TorrentBridgeShim.h */,
 				BB000004 /* AppViewModel.swift */,
 				BB000051 /* DiagnosticLogger.swift */,
 				BB000052 /* DiagnosticLogView.swift */,
@@ -296,6 +301,7 @@
 				AA000059 /* MatroskaSubtitleExtractor.swift in Sources */,
 				AA000060 /* SubtitleSearchView.swift in Sources */,
 				AA000061 /* SubtitlePreferences.swift in Sources */,
+				AA000062 /* OnlineStreamingService.swift in Sources */,
 				AA000004 /* AppViewModel.swift in Sources */,
 				AA000051 /* DiagnosticLogger.swift in Sources */,
 				AA000052 /* DiagnosticLogView.swift in Sources */,
@@ -405,6 +411,7 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = VideoPlayer/TorrentBridgeShim.h;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -430,6 +437,7 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = VideoPlayer/TorrentBridgeShim.h;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

@@ -69,6 +69,20 @@ struct PikPakFileItem: Identifiable, Hashable {
     }
 }
 
+struct PikPakOfflineTask: Sendable {
+    let id: String
+    let fileID: String?
+    let fileName: String?
+    let phase: String
+    let message: String?
+
+    var isComplete: Bool { phase.uppercased() == "PHASE_TYPE_COMPLETE" }
+    var isFailed: Bool {
+        let value = phase.uppercased()
+        return value.contains("ERROR") || value.contains("FAILED") || value.contains("DELETED")
+    }
+}
+
 enum PikPakError: LocalizedError {
     case invalidCredentials
     case notLoggedIn
@@ -757,6 +771,23 @@ final class PikPakClient {
         if let id = json["id"] as? String { return id }
         if let err = json["error"] as? String { throw PikPakError.api(err) }
         throw PikPakError.api("Could not create offline task")
+    }
+
+    /// Mirrors rclone's task polling flow. The ID returned by an offline add is
+    /// a task ID, not necessarily the final Drive file ID.
+    func offlineTask(id: String) async throws -> PikPakOfflineTask {
+        let account = try await ensureValidToken()
+        let json = try await getJSON(
+            url: "\(driveBase)/drive/v1/tasks/\(id)",
+            token: account.accessToken
+        )
+        return PikPakOfflineTask(
+            id: (json["id"] as? String) ?? id,
+            fileID: json["file_id"] as? String,
+            fileName: json["file_name"] as? String,
+            phase: (json["phase"] as? String) ?? "",
+            message: json["message"] as? String
+        )
     }
 
     // MARK: - Mapping / stream extraction

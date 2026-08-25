@@ -276,6 +276,7 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
             let details = TMDBTitleDetails(
                 id: item.id,
                 mediaType: mediaType,
+                imdbID: nil,
                 title: item.displayTitle,
                 overview: item.overview ?? "",
                 posterPath: item.posterPath,
@@ -349,6 +350,9 @@ struct HomeLibraryView: View {
     @State private var showFavorites = false
     @State private var showRefreshOverlay = false
     @State private var heroIndex = 0
+    @State private var preparedHeroArtworkIDs: Set<String> = []
+    @State private var preparedHeroTitleIDs: Set<String> = []
+    @State private var pendingHeroID: String?
     @State private var heroRotationSlot = Int(Date().timeIntervalSince1970 / 7_200)
     @State private var showHeroPlayer = false
     @State private var heroPlayingEntry: UnifiedMediaEntry?
@@ -489,10 +493,8 @@ struct HomeLibraryView: View {
             .onReceive(vm.$savedLinks) { _ in scheduleDerivedDataRebuild() }
             .onChange(of: heroRotationSlot) { _ in scheduleDerivedDataRebuild() }
             .onReceive(heroSlideTimer) { _ in
-                guard isActive, featuredItems.count > 1 else { return }
-                withAnimation(.easeInOut(duration: 0.48)) {
-                    heroIndex = (heroIndex + 1) % featuredItems.count
-                }
+                guard isActive, featuredItems.count > 1, pendingHeroID == nil else { return }
+                requestHeroIndex((heroIndex + 1) % featuredItems.count)
             }
             .onReceive(heroRotationTimer) { date in
                 guard isActive else { return }
@@ -500,6 +502,10 @@ struct HomeLibraryView: View {
             }
             .onChange(of: featuredItems.map(\.id)) { items in
                 if items.isEmpty || heroIndex >= items.count { heroIndex = 0 }
+                if let pendingHeroID,
+                   !featuredItems.contains(where: { heroAssetIdentity(for: $0) == pendingHeroID }) {
+                    self.pendingHeroID = nil
+                }
             }
             .fullScreenCover(item: $selectedEntry) { entry in
                 UnifiedMediaDetailsHost(
@@ -589,22 +595,31 @@ struct HomeLibraryView: View {
         } else {
             let pageWidth = UIScreen.main.bounds.width
             ZStack(alignment: .top) {
-                heroSlide(featuredItems[currentHeroIndex], viewportWidth: pageWidth)
-                    .id(featuredItems[currentHeroIndex].id)
-                    .frame(width: pageWidth, height: 610)
-                    .clipped()
-                    // Moving the complete 610pt hierarchy forced layout and
-                    // material recomposition during every carousel frame. A
-                    // subtle GPU-backed crossfade/scale keeps the cinematic
-                    // motion without hitching on lower-memory iPhones.
-                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                // Keep the current and prepared neighboring information layers
+                // alive instead of recreating the incoming one at the moment of
+                // a carousel step. This lets its title logo decode before the
+                // first appearance and, critically, gives foreground and pinned
+                // artwork the exact same opacity animation. The old implementation
+                // could show the new poster behind the previous title for frames.
+                ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
+                    if shouldPrepareHeroArtwork(at: index) {
+                        let isVisible = index == currentHeroIndex && isHeroAssetPrepared(entry)
+                        heroSlide(entry, viewportWidth: pageWidth)
+                            .frame(width: pageWidth, height: 610)
+                            .clipped()
+                            .opacity(isVisible ? 1 : 0)
+                            .allowsHitTesting(isVisible)
+                            .accessibilityHidden(!isVisible)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.48), value: currentHeroIndex)
 
                 VStack {
                     Spacer()
                     HStack(spacing: 7) {
                         ForEach(heroIndicatorIndices, id: \.self) { index in
                             Button {
-                                withAnimation(.easeInOut(duration: 0.48)) { heroIndex = index }
+                                requestHeroIndex(index)
                             } label: {
                                 Capsule()
                                     .fill(index == currentHeroIndex ? Color.white : Color.white.opacity(0.32))
@@ -627,12 +642,10 @@ struct HomeLibraryView: View {
                         guard abs(value.translation.width) > abs(value.translation.height),
                               abs(value.translation.width) > 42,
                               featuredItems.count > 1 else { return }
-                        withAnimation(.easeInOut(duration: 0.48)) {
-                            if value.translation.width < 0 {
-                                heroIndex = (heroIndex + 1) % featuredItems.count
-                            } else {
-                                heroIndex = (heroIndex - 1 + featuredItems.count) % featuredItems.count
-                            }
+                        if value.translation.width < 0 {
+                            requestHeroIndex((heroIndex + 1) % featuredItems.count)
+                        } else {
+                            requestHeroIndex((heroIndex - 1 + featuredItems.count) % featuredItems.count)
                         }
                     }
             )
@@ -647,7 +660,9 @@ struct HomeLibraryView: View {
                 PersistentHeroArtwork(
                     entry: entry,
                     shouldPrepare: shouldPrepareHeroArtwork(at: index),
-                    isCurrent: index == currentHeroIndex
+                    isCurrent: index == currentHeroIndex,
+                    onPrepared: { markHeroArtworkPrepared(entry) },
+                    onReleased: { markHeroArtworkReleased(entry) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
@@ -688,7 +703,12 @@ struct HomeLibraryView: View {
         return VStack {
             Spacer(minLength: 0)
             VStack(alignment: .leading, spacing: 12) {
-                HomeHeroTitleTreatment(title: entry.title, logoURL: entry.details?.logoURL)
+                HomeHeroTitleTreatment(
+                    title: entry.title,
+                    logoURL: entry.details?.logoURL,
+                    onPrepared: { markHeroTitlePrepared(entry) },
+                    onReleased: { markHeroTitleReleased(entry) }
+                )
                     .frame(width: contentWidth, alignment: .leading)
 
                 heroMetadata(entry)
@@ -1170,13 +1190,82 @@ struct HomeLibraryView: View {
         return min(max(0, heroIndex), count - 1)
     }
 
+    private func heroAssetIdentity(for entry: UnifiedMediaEntry) -> String {
+        let poster = entry.details?.heroPosterURL?.absoluteString ?? "no-poster"
+        let logo = entry.details?.logoURL?.absoluteString ?? "text-title"
+        return "\(entry.id)|poster:\(poster)|logo:\(logo)"
+    }
+
+    private func isHeroAssetPrepared(_ entry: UnifiedMediaEntry) -> Bool {
+        let identity = heroAssetIdentity(for: entry)
+        return preparedHeroArtworkIDs.contains(identity) && preparedHeroTitleIDs.contains(identity)
+    }
+
+    private func requestHeroIndex(_ requestedIndex: Int) {
+        guard featuredItems.indices.contains(requestedIndex) else { return }
+        guard requestedIndex != currentHeroIndex else {
+            pendingHeroID = nil
+            return
+        }
+        let entry = featuredItems[requestedIndex]
+        let identity = heroAssetIdentity(for: entry)
+        guard isHeroAssetPrepared(entry) else {
+            // Preserve the complete current Hero while the requested original
+            // poster and title treatment are fetched/decoded.
+            // `shouldPrepareHeroArtwork` includes this pending identity, so a
+            // distant indicator tap is also handled.
+            pendingHeroID = identity
+            return
+        }
+        pendingHeroID = nil
+        withAnimation(.easeInOut(duration: 0.48)) {
+            heroIndex = requestedIndex
+        }
+    }
+
+    private func markHeroArtworkPrepared(_ entry: UnifiedMediaEntry) {
+        let identity = heroAssetIdentity(for: entry)
+        preparedHeroArtworkIDs.insert(identity)
+        finishPendingHeroTransitionIfReady(identity: identity)
+    }
+
+    private func markHeroArtworkReleased(_ entry: UnifiedMediaEntry) {
+        preparedHeroArtworkIDs.remove(heroAssetIdentity(for: entry))
+    }
+
+    private func markHeroTitlePrepared(_ entry: UnifiedMediaEntry) {
+        let identity = heroAssetIdentity(for: entry)
+        preparedHeroTitleIDs.insert(identity)
+        finishPendingHeroTransitionIfReady(identity: identity)
+    }
+
+    private func markHeroTitleReleased(_ entry: UnifiedMediaEntry) {
+        preparedHeroTitleIDs.remove(heroAssetIdentity(for: entry))
+    }
+
+    private func finishPendingHeroTransitionIfReady(identity: String) {
+        guard pendingHeroID == identity,
+              preparedHeroArtworkIDs.contains(identity),
+              preparedHeroTitleIDs.contains(identity),
+              let requestedIndex = featuredItems.firstIndex(where: {
+                  heroAssetIdentity(for: $0) == identity
+              }) else { return }
+        pendingHeroID = nil
+        withAnimation(.easeInOut(duration: 0.48)) {
+            heroIndex = requestedIndex
+        }
+    }
+
     private func shouldPrepareHeroArtwork(at index: Int) -> Bool {
         let count = featuredItems.count
         guard count > 0 else { return false }
         let current = currentHeroIndex
         let previous = (current - 1 + count) % count
         let next = (current + 1) % count
-        return index == current || index == previous || index == next
+        let isPending = pendingHeroID.map {
+            heroAssetIdentity(for: featuredItems[index]) == $0
+        } ?? false
+        return index == current || index == previous || index == next || isPending
     }
 
     private var heroIndicatorIndices: [Int] {
@@ -1597,6 +1686,8 @@ private struct PersistentHeroArtwork: View {
     let entry: UnifiedMediaEntry
     let shouldPrepare: Bool
     let isCurrent: Bool
+    let onPrepared: () -> Void
+    let onReleased: () -> Void
     @State private var image: UIImage?
     @State private var didCheckStableCache = false
 
@@ -1604,7 +1695,8 @@ private struct PersistentHeroArtwork: View {
     // paths/server UUIDs and may change even though the poster did not, which made
     // an already-downloaded Hero image look new after a library refresh.
     private var cacheKey: String {
-        "unified-hero-nolang-original-v3|\(remoteURL?.absoluteString ?? entry.id)"
+        remoteURL.map { VideoThumbnailLoader.heroPosterCacheKey(for: $0) }
+            ?? "unified-hero-nolang-original-v3|\(entry.id)"
     }
     private var legacyCacheKey: String {
         "unified-hero-nolang-original-v2|\(entry.id)|\(remoteURL?.absoluteString ?? "local")"
@@ -1633,8 +1725,8 @@ private struct PersistentHeroArtwork: View {
                             result.image,
                             forStableKey: cacheKey
                         )
+                        onPrepared()
                     }
-                    .fade(duration: 0.18)
                     .resizable()
                     .scaledToFill()
             }
@@ -1647,6 +1739,7 @@ private struct PersistentHeroArtwork: View {
                 guard !Task.isCancelled else { return }
                 image = nil
                 didCheckStableCache = false
+                onReleased()
                 return
             }
             // A carousel step changes which off-screen item is the new "next"
@@ -1662,20 +1755,25 @@ private struct PersistentHeroArtwork: View {
             image = nil
             if let primary = await VideoThumbnailLoader.cachedHeroImageAsync(forStableKey: cacheKey) {
                 image = primary
+                onPrepared()
             } else if let legacy = await VideoThumbnailLoader.cachedImageAsync(forStableKey: legacyCacheKey) {
                 // One-time migration: reuse the already downloaded v2 image and
                 // move it into the dedicated persistent Hero cache.
                 image = legacy
                 VideoThumbnailLoader.cacheHeroImageInBackground(legacy, forStableKey: cacheKey)
+                onPrepared()
             }
             didCheckStableCache = true
         }
+        .onDisappear { onReleased() }
     }
 }
 
 private struct HomeHeroTitleTreatment: View {
     let title: String
     let logoURL: URL?
+    let onPrepared: () -> Void
+    let onReleased: () -> Void
     @State private var logoLoaded = false
 
     var body: some View {
@@ -1690,9 +1788,12 @@ private struct HomeHeroTitleTreatment: View {
 
             if let logoURL {
                 KFImage(logoURL)
-                    .onSuccess { _ in logoLoaded = true }
+                    .onSuccess { _ in
+                        logoLoaded = true
+                        onPrepared()
+                    }
+                    .onFailure { _ in onPrepared() }
                     .cacheOriginalImage()
-                    .fade(duration: 0.18)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: 270, maxHeight: 92, alignment: .leading)
@@ -1700,6 +1801,10 @@ private struct HomeHeroTitleTreatment: View {
         }
         .frame(maxWidth: .infinity, minHeight: 72, maxHeight: 92, alignment: .leading)
         .onChange(of: logoURL) { _ in logoLoaded = false }
+        .task(id: logoURL?.absoluteString ?? "text-title") {
+            if logoURL == nil { onPrepared() }
+        }
+        .onDisappear { onReleased() }
     }
 }
 

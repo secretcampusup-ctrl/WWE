@@ -27,6 +27,7 @@ enum TMDBSettings {
 struct TMDBTitleDetails: Identifiable, Codable {
     let id: Int
     let mediaType: String
+    let imdbID: String?
     let title: String
     let overview: String
     let posterPath: String?
@@ -195,6 +196,20 @@ actor TMDBService {
         return nil
     }
 
+    /// Resolves the stable IMDb identifier used by Orion/torrent providers.
+    /// This is intentionally separate from title search so older persistent
+    /// metadata snapshots (created before `external_ids` was cached) still work.
+    func externalIMDbID(mediaType: String, tmdbID: Int) async -> String? {
+        guard TMDBSettings.isConfigured,
+              mediaType == "movie" || mediaType == "tv" else { return nil }
+        struct ExternalIDsPayload: Decodable { let imdbId: String? }
+        let payload: ExternalIDsPayload? = try? await request(
+            "/3/\(mediaType)/\(tmdbID)/external_ids",
+            query: [:]
+        )
+        return payload?.imdbId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Cache-only lookup used during app launch. It never performs a network request.
     func cachedDetailsOriginalFirst(for rawTitle: String, preferredMediaType: String? = nil) -> TMDBTitleDetails? {
         let original = Self.originalSearchTitle(from: rawTitle)
@@ -227,7 +242,7 @@ actor TMDBService {
         do {
             let endpoint = "/3/\(match.mediaType)/\(match.id)"
             let payload: DetailPayload = try await request(endpoint, query: [
-                "append_to_response": "credits,videos,release_dates,images",
+                "append_to_response": "credits,videos,release_dates,images,external_ids",
                 "include_image_language": "en,null"
             ])
             let trailers = payload.videos?.results ?? []
@@ -246,6 +261,7 @@ actor TMDBService {
                 .max { $0.qualityScore < $1.qualityScore }?.filePath
             let details = TMDBTitleDetails(
                 id: match.id, mediaType: match.mediaType,
+                imdbID: payload.externalIds?.imdbId,
                 title: payload.title ?? payload.name ?? match.title ?? match.name ?? normalizedQuery,
                 overview: payload.overview ?? "", posterPath: payload.posterPath,
                 backdropPath: payload.backdropPath, releaseDate: payload.releaseDate ?? payload.firstAirDate,
@@ -729,7 +745,9 @@ private struct DetailPayload: Decodable {
     let genres: [TMDBGenre]?; let seasons: [TMDBSeason]?
     let credits: Credits?; let videos: Videos?; let productionCountries: [ProductionCountry]?
     let releaseDates: ReleaseDatesResponse?; let images: TMDBImagesPayload?
+    let externalIds: TMDBExternalIDsPayload?
 }
+private struct TMDBExternalIDsPayload: Decodable { let imdbId: String? }
 private struct Credits: Decodable { let cast: [TMDBCastMember]; let crew: [TMDBCrewMember] }
 private struct ProductionCountry: Decodable { let name: String }
 private struct ReleaseDatesResponse: Decodable { let results: [ReleaseDatesCountry] }
