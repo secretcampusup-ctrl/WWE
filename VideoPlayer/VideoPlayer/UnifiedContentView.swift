@@ -1519,6 +1519,7 @@ struct UnifiedMediaDetailsHost: View {
     @State private var activeEntry: UnifiedMediaEntry
     @State private var showPlayer = false
     @State private var showOnlineSources = false
+    @State private var presentOnlinePlayerAfterSourcesDismiss = false
 
     init(
         vm: AppViewModel,
@@ -1598,16 +1599,29 @@ struct UnifiedMediaDetailsHost: View {
                 onSelectEpisode: switchPlayerEpisode
             )
         }
-        .fullScreenCover(isPresented: $showOnlineSources) {
+        .fullScreenCover(
+            isPresented: $showOnlineSources,
+            onDismiss: {
+                guard presentOnlinePlayerAfterSourcesDismiss else { return }
+                presentOnlinePlayerAfterSourcesDismiss = false
+                guard vm.ensurePreparedOnlinePlaybackIsActive() else {
+                    DiagnosticLogger.log("[OnlinePlayback] presentation aborted because playback state is empty")
+                    vm.errorMessage = "The stream was prepared, but the player did not receive its URL."
+                    return
+                }
+                // onDismiss runs after the source cover has fully completed its
+                // transition, so the player cover can no longer be torn down by
+                // the outgoing cover's lifecycle.
+                showPlayer = true
+            }
+        ) {
             ExperimentalOnlineSourcesView(
                 vm: vm,
                 entry: activeEntry,
                 episode: selectedEpisode,
                 onPlaybackReady: {
+                    presentOnlinePlayerAfterSourcesDismiss = true
                     showOnlineSources = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                        showPlayer = true
-                    }
                 }
             )
         }

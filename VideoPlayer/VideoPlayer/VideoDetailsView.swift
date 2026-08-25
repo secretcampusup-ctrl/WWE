@@ -2362,6 +2362,16 @@ struct ResolvedPlayerScreen: View {
     @ObservedObject var vm: AppViewModel
     var episodeOptions: [PlayerEpisodeOption] = []
     var onSelectEpisode: ((String) -> Void)? = nil
+    /// Capture the resolved launch payload at presentation time. SwiftUI may
+    /// rebuild/dismiss adjacent full-screen covers in the same update cycle;
+    /// the player must not fall back to an endless loading screen if that
+    /// outgoing cover clears the shared transient state.
+    private let launchURL: URL?
+    private let launchFile: WebDAVFile?
+    private let launchSubtitleContext: SubtitleMediaContext?
+    private let launchResumeAt: Double
+    private let launchLinkID: UUID?
+    private let launchHeaders: [String: String]?
 
     init(
         vm: AppViewModel,
@@ -2371,18 +2381,32 @@ struct ResolvedPlayerScreen: View {
         self.vm = vm
         self.episodeOptions = episodeOptions
         self.onSelectEpisode = onSelectEpisode
+        self.launchURL = vm.nowPlayingURL
+        self.launchFile = vm.nowPlaying
+        self.launchSubtitleContext = vm.nowPlayingSubtitleContext
+        self.launchResumeAt = vm.nowPlayingResumeAt
+        self.launchLinkID = vm.nowPlayingLinkId
+        self.launchHeaders = vm.nowPlayingHeaders
     }
 
     var body: some View {
+        let hasLivePlayback = vm.nowPlayingURL != nil && vm.nowPlaying != nil
+        let playbackURL = vm.nowPlayingURL ?? launchURL
+        let playbackFile = vm.nowPlaying ?? launchFile
+        let subtitleContext = hasLivePlayback ? vm.nowPlayingSubtitleContext : launchSubtitleContext
+        let resumeAt = hasLivePlayback ? vm.nowPlayingResumeAt : launchResumeAt
+        let linkID = hasLivePlayback ? vm.nowPlayingLinkId : launchLinkID
+        let headers = hasLivePlayback ? vm.nowPlayingHeaders : launchHeaders
+
         Group {
-        if let url = vm.nowPlayingURL, let file = vm.nowPlaying {
+        if let url = playbackURL, let file = playbackFile {
             RoutedVideoPlayerView(
                 url: url,
                 title: file.name,
-                subtitleMediaContext: vm.nowPlayingSubtitleContext,
-                resumeAt: vm.nowPlayingResumeAt,
-                linkId: vm.nowPlayingLinkId,
-                httpHeaders: vm.nowPlayingHeaders,
+                subtitleMediaContext: subtitleContext,
+                resumeAt: resumeAt,
+                linkId: linkID,
+                httpHeaders: headers,
                 episodeOptions: episodeOptions,
                 onSelectEpisode: onSelectEpisode
             ) { seconds, duration, width, height in
@@ -2391,7 +2415,7 @@ struct ResolvedPlayerScreen: View {
                     duration: duration,
                     width: width,
                     height: height,
-                    linkId: vm.nowPlayingLinkId,
+                    linkId: linkID,
                     streamURL: url
                 )
             }

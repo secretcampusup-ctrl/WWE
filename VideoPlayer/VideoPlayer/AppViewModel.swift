@@ -896,6 +896,9 @@ class AppViewModel: ObservableObject {
             contentType: "video"
         )
         nowPlayingURL = playbackURL
+        DiagnosticLogger.log(
+            "[PlaybackState] launch ready extension=\((title as NSString).pathExtension.lowercased()) hasHeaders=\(headers?.isEmpty == false)"
+        )
 
     }
 
@@ -1423,6 +1426,7 @@ class AppViewModel: ObservableObject {
     /// Releases the presented playback state without touching metadata/API work.
     /// This prevents a dismissed player from being reconstructed with its stale URL.
     func endPlaybackPresentation() {
+        DiagnosticLogger.log("[PlaybackState] end presentation hadURL=\(nowPlayingURL != nil) hadFile=\(nowPlaying != nil)")
         finishPlaybackHistory()
         if nowPlayingURL?.host == "127.0.0.1" || nowPlayingURL?.host == "localhost" {
             DirectTorrentPlaybackEngine.shared.stopCurrent()
@@ -1433,6 +1437,7 @@ class AppViewModel: ObservableObject {
         nowPlayingLinkId = nil
         nowPlayingSubtitleContext = nil
         nowPlaying = nil
+        preparedOnlinePlayback = nil
     }
 
     /// TorBox CDN links are generated on demand and expire, so they must never
@@ -1803,15 +1808,27 @@ extension AppViewModel {
     func playPreparedOnlineSource() -> Bool {
         guard let resolved = preparedOnlinePlayback else { return false }
         DiagnosticLogger.log("[OnlinePlayback] opening player provider=\(resolved.provider)")
-        startPlayback(
-            url: resolved.url,
-            title: resolved.title,
-            headers: resolved.headers
-        )
-        preparedOnlinePlayback = nil
+        if nowPlayingURL != resolved.url || nowPlaying == nil {
+            startPlayback(
+                url: resolved.url,
+                title: resolved.title,
+                headers: resolved.headers
+            )
+        }
+        // Keep the resolved payload until the player actually closes. The
+        // source sheet and player are adjacent full-screen covers; retaining
+        // this lets onDismiss restore playback state if SwiftUI clears it while
+        // finishing the outgoing cover transition.
         onlinePlaybackPreparationTask = nil
         onlinePlaybackTransfer = nil
         return true
+    }
+
+    func ensurePreparedOnlinePlaybackIsActive() -> Bool {
+        if nowPlayingURL != nil, nowPlaying != nil { return true }
+        guard preparedOnlinePlayback != nil else { return false }
+        DiagnosticLogger.log("[OnlinePlayback] restoring prepared player state after cover transition")
+        return playPreparedOnlineSource()
     }
 
     func clearFinishedOnlineTransfer() {
