@@ -2729,6 +2729,8 @@ private struct PirateBayDetailsView: View {
     @State private var sendingOffcloud = false
     @State private var sendingTorBox = false
     @State private var sendingPikPak = false
+    @State private var resolvingSourceID: String?
+    @State private var showTorrentPlayer = false
     @State private var message: String?
     @State private var selectedImage = 0
     @State private var showViewer = false
@@ -2737,6 +2739,7 @@ private struct PirateBayDetailsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text(item.name).font(.title2.bold()).fixedSize(horizontal: false, vertical: true)
                 VStack(spacing: 10) {
+                    torrentPlayButton
                     HStack(spacing: 10) {
                         actionButton("Offcloud", icon: "cloud.fill", busy: sendingOffcloud) { sendToOffcloud() }
                         actionButton("TorBox", icon: "shippingbox.fill", busy: sendingTorBox) { sendToTorBox() }
@@ -2774,11 +2777,58 @@ private struct PirateBayDetailsView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                AppAnimatedBackButton(size: 36) { dismiss() }
+                AppAnimatedBackButton(size: 36) { closeDetails() }
             }
         }
         .overlay(alignment: .top) { if let message { Text(message).font(.subheadline.bold()).padding(.horizontal, 16).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
-        .task { await model.load(id: item.id) }.fullScreenCover(isPresented: $showViewer) { PirateBayImageViewer(urls: model.imageURLs, selection: $selectedImage) }
+        .task { await model.load(id: item.id) }
+        .fullScreenCover(isPresented: $showViewer) {
+            PirateBayImageViewer(urls: model.imageURLs, selection: $selectedImage)
+        }
+        .fullScreenCover(isPresented: $showTorrentPlayer) {
+            ResolvedPlayerScreen(vm: vm)
+        }
+        .onChange(of: vm.onlinePlaybackTransfer) { handlePlaybackTransfer($0) }
+    }
+    private var torrentPlayButton: some View {
+        let transfer = currentPlaybackTransfer
+        let isPreparing = transfer?.phase == .preparing || transfer?.phase == .downloading
+        return Button(action: playWithSelectedProvider) {
+            HStack(spacing: 12) {
+                Group {
+                    if isPreparing {
+                        ProgressView().tint(.black)
+                    } else {
+                        Image(systemName: "play.fill")
+                    }
+                }
+                .frame(width: 22, height: 22)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isPreparing ? "Preparing torrent…" : "Play Torrent")
+                        .font(.headline)
+                    Text(transfer.map { "\($0.provider) · \($0.message)" }
+                         ?? "Using \(OnlinePlaybackProviderPreference.selected.title)")
+                        .font(.caption)
+                        .opacity(0.64)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if !isPreparing {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold())
+                        .opacity(0.55)
+                }
+            }
+            .foregroundStyle(.black)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isPreparing)
+        .animation(.easeInOut(duration: 0.18), value: isPreparing)
     }
     private func actionButton(_ title: String, icon: String, busy: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) { Group { if busy { ProgressView() } else { Label(title, systemImage: icon) } }.font(.subheadline.bold()).frame(maxWidth: .infinity).padding(.vertical, 13) }.buttonStyle(.plain).foregroundStyle(.white).background(tint.opacity(0.82), in: Capsule()).disabled(busy)
@@ -2813,6 +2863,47 @@ private struct PirateBayDetailsView: View {
             }
             sendingPikPak = false
         }
+    }
+    private var onlineSource: OnlineTorrentSource {
+        OnlineTorrentSource(
+            id: "discover-detail|\(item.id)",
+            name: item.name,
+            magnet: item.magnet,
+            quality: OnlineStreamQuality.detect(hint: nil, fileName: item.name) ?? .p1080,
+            seeders: item.seedCount,
+            sizeBytes: item.byteCount,
+            origin: .pirateBay
+        )
+    }
+    private var currentPlaybackTransfer: OnlinePlaybackTransfer? {
+        guard let resolvingSourceID,
+              vm.onlinePlaybackTransfer?.id == resolvingSourceID else { return nil }
+        return vm.onlinePlaybackTransfer
+    }
+    private func playWithSelectedProvider() {
+        let source = onlineSource
+        resolvingSourceID = source.id
+        vm.prepareOnlineSource(source)
+    }
+    private func handlePlaybackTransfer(_ transfer: OnlinePlaybackTransfer?) {
+        guard let resolvingSourceID,
+              let transfer,
+              transfer.id == resolvingSourceID else { return }
+        switch transfer.phase {
+        case .preparing, .downloading:
+            break
+        case .ready:
+            if vm.playPreparedOnlineSource() {
+                self.resolvingSourceID = nil
+                showTorrentPlayer = true
+            }
+        case .failed:
+            self.resolvingSourceID = nil
+            toast(transfer.message)
+        }
+    }
+    private func closeDetails() {
+        dismiss()
     }
     private func toast(_ value: String) { message = value; Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if message == value { message = nil } } }
 }

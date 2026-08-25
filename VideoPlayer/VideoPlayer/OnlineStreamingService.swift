@@ -416,6 +416,14 @@ struct ResolvedOnlinePlayback: Sendable {
     }
 }
 
+struct DirectTorrentPlayback: Sendable {
+    let url: URL
+    /// The native engine's actual selected file, including its container
+    /// extension. The localhost stream URL ends in a numeric file index, so
+    /// the player cannot otherwise distinguish MP4 (AVPlayer) from MKV (VLC).
+    let fileName: String
+}
+
 struct OnlinePlaybackProgress: Sendable {
     enum Phase: Sendable {
         case preparing
@@ -521,8 +529,13 @@ actor OnlinePlaybackResolver {
                 "Direct Torrent cannot safely choose the requested episode from this season pack. Choose an episode-specific source or a cloud provider."
             )
         }
-        let url = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
-        return ResolvedOnlinePlayback(url: url, title: source.name, provider: "Direct Torrent", headers: nil)
+        let playback = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
+        return ResolvedOnlinePlayback(
+            url: playback.url,
+            title: playback.fileName,
+            provider: "Direct Torrent",
+            headers: nil
+        )
     }
 
     private func provider(for preference: OnlinePlaybackProviderPreference) -> Provider? {
@@ -1097,7 +1110,7 @@ final class DirectTorrentPlaybackEngine {
 
     private init() {}
 
-    func start(magnet: String) async throws -> URL {
+    func start(magnet: String) async throws -> DirectTorrentPlayback {
         stopCurrent()
         let session = try ensureSession()
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -1141,7 +1154,13 @@ final class DirectTorrentPlaybackEngine {
             throw OnlinePlaybackResolutionError.timedOut("Direct Torrent")
         }
 
-        let streamID = lt_start_stream(session, torrentID, -1, 192 * 1_024 * 1_024)
+        let selectedFile = try preferredVideoFile(session: session, torrentID: torrentID)
+        let streamID = lt_start_stream(
+            session,
+            torrentID,
+            selectedFile.index,
+            192 * 1_024 * 1_024
+        )
         guard streamID >= 0 else {
             stopCurrent()
             throw OnlinePlaybackResolutionError.torrentEngine(lastError("Could not start torrent stream."))
@@ -1186,7 +1205,7 @@ final class DirectTorrentPlaybackEngine {
                 : "No active torrent peers were found. Choose another result with working seeders."
             throw OnlinePlaybackResolutionError.torrentEngine(message)
         }
-        return url
+        return DirectTorrentPlayback(url: url, fileName: selectedFile.name)
     }
 
     func stopCurrent() {
@@ -1213,6 +1232,34 @@ final class DirectTorrentPlaybackEngine {
         }
         session = created
         return created
+    }
+
+    private func preferredVideoFile(
+        session: lt_session_t,
+        torrentID: lt_torrent_id
+    ) throws -> (index: Int32, name: String) {
+        let fileCount = lt_get_file_count(session, torrentID)
+        guard fileCount > 0 else {
+            stopCurrent()
+            throw OnlinePlaybackResolutionError.noPlayableFile("Direct Torrent")
+        }
+
+        var files = Array(repeating: lt_file_info(), count: Int(fileCount))
+        let loadedCount = files.withUnsafeMutableBufferPointer { buffer in
+            lt_get_files(session, torrentID, buffer.baseAddress, fileCount)
+        }
+        guard loadedCount > 0,
+              let selected = files.prefix(Int(loadedCount))
+                .filter({ $0.is_streamable != 0 })
+                .max(by: { $0.size < $1.size }) else {
+            stopCurrent()
+            throw OnlinePlaybackResolutionError.noPlayableFile("Direct Torrent")
+        }
+
+        let name = cString(selected.name)
+            ?? cString(selected.path)
+            ?? "Torrent video"
+        return (selected.index, name)
     }
 
     private func lastError(_ fallback: String) -> String {

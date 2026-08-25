@@ -33,6 +33,14 @@ typedef struct {
 } lt_torrent_status;
 
 typedef struct {
+    int32_t index;
+    char name[512];
+    char path[1024];
+    int64_t size;
+    int32_t is_streamable;
+} lt_file_info;
+
+typedef struct {
     lt_stream_id id;
     lt_torrent_id torrent_id;
     int32_t file_index;
@@ -52,6 +60,8 @@ void lt_destroy_session(lt_session_t session);
 lt_torrent_id lt_add_magnet(lt_session_t session, const char *magnet_uri, const char *save_path, int stream_only);
 void lt_remove_torrent(lt_session_t session, lt_torrent_id id, int delete_files);
 int lt_get_status(lt_session_t session, lt_torrent_id id, lt_torrent_status *out);
+int lt_get_file_count(lt_session_t session, lt_torrent_id id);
+int lt_get_files(lt_session_t session, lt_torrent_id id, lt_file_info *out, int max_count);
 lt_stream_id lt_start_stream(lt_session_t session, lt_torrent_id torrent_id, int file_index, int64_t max_cache_bytes);
 void lt_stop_stream(lt_session_t session, lt_stream_id id);
 int lt_get_stream_status(lt_session_t session, lt_stream_id id, lt_stream_status *out);
