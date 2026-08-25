@@ -399,6 +399,48 @@ struct ResolvedOnlinePlayback: Sendable {
     let title: String
     let provider: String
     let headers: [String: String]?
+    let requiredDownload: Bool
+
+    init(
+        url: URL,
+        title: String,
+        provider: String,
+        headers: [String: String]?,
+        requiredDownload: Bool = false
+    ) {
+        self.url = url
+        self.title = title
+        self.provider = provider
+        self.headers = headers
+        self.requiredDownload = requiredDownload
+    }
+}
+
+struct OnlinePlaybackProgress: Sendable {
+    enum Phase: Sendable {
+        case preparing
+        case downloading
+    }
+
+    let provider: String
+    let phase: Phase
+}
+
+typealias OnlinePlaybackProgressHandler = @Sendable (OnlinePlaybackProgress) -> Void
+
+struct OnlinePlaybackTransfer: Identifiable, Equatable {
+    enum Phase: Equatable {
+        case preparing
+        case downloading
+        case ready
+        case failed
+    }
+
+    let id: String
+    let title: String
+    let provider: String
+    let phase: Phase
+    let message: String
 }
 
 enum OnlinePlaybackResolutionError: LocalizedError {
@@ -427,7 +469,10 @@ actor OnlinePlaybackResolver {
         case offcloud = "Offcloud"
     }
 
-    func resolve(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
+    func resolve(
+        _ source: OnlineTorrentSource,
+        onProgress: @escaping OnlinePlaybackProgressHandler = { _ in }
+    ) async throws -> ResolvedOnlinePlayback {
         let preference = OnlinePlaybackProviderPreference.selected
         if preference == .directTorrent {
             return try await resolveDirectTorrent(source)
@@ -454,10 +499,11 @@ actor OnlinePlaybackResolver {
         var failures: [String] = []
         for provider in providers {
             do {
+                onProgress(.init(provider: provider.rawValue, phase: .preparing))
                 switch provider {
                 case .pikpak: return try await resolvePikPak(source)
                 case .torBox: return try await resolveTorBox(source)
-                case .realDebrid: return try await resolveRealDebrid(source)
+                case .realDebrid: return try await resolveRealDebrid(source, onProgress: onProgress)
                 case .offcloud: return try await resolveOffcloud(source)
                 }
             } catch {
@@ -647,16 +693,21 @@ actor OnlinePlaybackResolver {
         return files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) })
     }
 
-    private func resolveRealDebrid(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
+    private func resolveRealDebrid(
+        _ source: OnlineTorrentSource,
+        onProgress: @escaping OnlinePlaybackProgressHandler
+    ) async throws -> ResolvedOnlinePlayback {
         let client = RealDebridClient(apiKey: RealDebridKeyStore.key)
         let resolved = try await client.resolve(
             magnet: source.magnet,
             requestedSeason: source.requestedSeason,
-            requestedEpisode: source.requestedEpisode
+            requestedEpisode: source.requestedEpisode,
+            onProgress: onProgress
         )
         return ResolvedOnlinePlayback(
             url: resolved.url, title: resolved.fileName ?? source.name,
-            provider: Provider.realDebrid.rawValue, headers: nil
+            provider: Provider.realDebrid.rawValue, headers: nil,
+            requiredDownload: resolved.requiredDownload
         )
     }
 
@@ -727,13 +778,35 @@ private struct RealDebridClient: Sendable {
     private let apiKey: String
     private let baseURL = URL(string: "https://api.real-debrid.com/rest/1.0/")!
 
-    struct Resolved: Sendable { let url: URL; let fileName: String? }
+    struct Resolved: Sendable {
+        let url: URL
+        let fileName: String?
+        let requiredDownload: Bool
+    }
 
     init(apiKey: String) {
         self.apiKey = apiKey
     }
 
-    func resolve(magnet: String, requestedSeason: Int?, requestedEpisode: Int?) async throws -> Resolved {
+    func resolve(
+        magnet: String,
+        requestedSeason: Int?,
+        requestedEpisode: Int?,
+        onProgress: @escaping OnlinePlaybackProgressHandler
+    ) async throws -> Resolved {
+        onProgress(.init(provider: "Real-Debrid", phase: .preparing))
+
+        // Reuse an already-downloaded item from the account before adding the
+        // same magnet again. Besides being faster, this avoids waiting on a new
+        // duplicate while the Real-Debrid website already shows the file ready.
+        if let existing = try? await existingDownloadedResolution(
+            magnet: magnet,
+            requestedSeason: requestedSeason,
+            requestedEpisode: requestedEpisode
+        ) {
+            return existing
+        }
+
         let added: AddedTorrent = try await send(path: "torrents/addMagnet", method: "POST", form: ["magnet": magnet])
 
         var availableFiles: [TorrentFile] = []
@@ -762,45 +835,129 @@ private struct RealDebridClient: Sendable {
             form: ["files": String(selectedFile.id)]
         )
 
-        // A cached file is ready almost immediately. An uncached but healthy
-        // torrent may still finish during this bounded preparation window.
-        for _ in 0..<45 {
+        // Cached files become ready almost immediately. Uncached torrents keep
+        // preparing in the app-wide transfer task so leaving this screen never
+        // cancels their Real-Debrid download.
+        var requiredDownload = false
+        for _ in 0..<450 {
             let info: TorrentInfo = try await send(path: "torrents/info/\(added.id)", method: "GET")
             try validate(status: info.status)
-            let links = info.links ?? []
-            if info.status.lowercased() == "downloaded", !links.isEmpty {
-                let selected = (info.files ?? []).enumerated().filter { $0.element.selected == 1 }
-                let selectedVideos = selected.filter { isVideoFile($0.element.path) }
-                let playableFiles = selectedVideos.isEmpty ? selected : selectedVideos
-                let largest = playableFiles.max { $0.element.bytes < $1.element.bytes }
-                let linkIndex = largest.flatMap { match in
-                    selected.firstIndex(where: { $0.offset == match.offset })
-                } ?? 0
-                let restricted = links[min(linkIndex, links.count - 1)]
-                let result: UnrestrictedLink = try await send(
-                    path: "unrestrict/link", method: "POST", form: ["link": restricted]
-                )
-                if let requestedSeason, let requestedEpisode, let fileName = result.filename {
-                    let expected = "s\(requestedSeason)e\(requestedEpisode)"
-                    let fullIdentity = episodeIdentity(in: fileName)
-                    let episodeOnly = episodeOnlyNumber(in: fileName)
-                    let hasRecognizableIdentity = fullIdentity != nil || episodeOnly != nil
-                    let matches = fullIdentity == expected
-                        || (fullIdentity == nil && episodeOnly == requestedEpisode)
-                    if hasRecognizableIdentity && !matches {
-                        throw OnlineSourceSearchError.provider(
-                            "Real-Debrid returned a different episode than the one selected."
-                        )
-                    }
-                }
-                guard let url = URL(string: result.download) else {
-                    throw OnlineSourceSearchError.invalidResponse
-                }
-                return Resolved(url: url, fileName: result.filename)
+            let normalizedStatus = info.status.lowercased()
+            if normalizedStatus == "queued" || normalizedStatus == "downloading" {
+                requiredDownload = true
+                onProgress(.init(provider: "Real-Debrid", phase: .downloading))
             }
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+            if normalizedStatus == "downloaded" {
+                guard let resolved = try await downloadedResolution(
+                    from: info,
+                    requestedSeason: requestedSeason,
+                    requestedEpisode: requestedEpisode,
+                    requiredDownload: requiredDownload
+                ) else {
+                    throw OnlineSourceSearchError.provider(
+                        "Real-Debrid finished the torrent but did not return the selected video link."
+                    )
+                }
+                return resolved
+            }
+            try await Task.sleep(nanoseconds: 2_000_000_000)
         }
         throw OnlinePlaybackResolutionError.timedOut("Real-Debrid")
+    }
+
+    private func existingDownloadedResolution(
+        magnet: String,
+        requestedSeason: Int?,
+        requestedEpisode: Int?
+    ) async throws -> Resolved? {
+        guard let requestedHash = infoHash(from: magnet) else { return nil }
+        let torrents: [TorrentSummary] = try await send(path: "torrents", method: "GET")
+        let matching = torrents.filter {
+            $0.status.lowercased() == "downloaded"
+                && $0.hash.caseInsensitiveCompare(requestedHash) == .orderedSame
+        }
+
+        for torrent in matching {
+            let info: TorrentInfo = try await send(path: "torrents/info/\(torrent.id)", method: "GET")
+            if let resolved = try await downloadedResolution(
+                from: info,
+                requestedSeason: requestedSeason,
+                requestedEpisode: requestedEpisode,
+                requiredDownload: false
+            ) {
+                return resolved
+            }
+        }
+        return nil
+    }
+
+    private func downloadedResolution(
+        from info: TorrentInfo,
+        requestedSeason: Int?,
+        requestedEpisode: Int?,
+        requiredDownload: Bool
+    ) async throws -> Resolved? {
+        let links = info.links ?? []
+        let selectedFiles = (info.files ?? []).filter { $0.selected == 1 }
+        let selectedVideos = selectedFiles.filter { isVideoFile($0.path) }
+        let candidates = selectedVideos.isEmpty ? selectedFiles : selectedVideos
+        guard !links.isEmpty,
+              let file = bestFile(
+                in: candidates,
+                requestedSeason: requestedSeason,
+                requestedEpisode: requestedEpisode
+              ),
+              let linkIndex = selectedFiles.firstIndex(where: { $0.id == file.id }),
+              links.indices.contains(linkIndex) else {
+            return nil
+        }
+
+        let result: UnrestrictedLink = try await send(
+            path: "unrestrict/link",
+            method: "POST",
+            form: ["link": links[linkIndex]]
+        )
+        try validateEpisode(
+            fileName: result.filename,
+            requestedSeason: requestedSeason,
+            requestedEpisode: requestedEpisode
+        )
+        guard let url = URL(string: result.download) else {
+            throw OnlineSourceSearchError.invalidResponse
+        }
+        return Resolved(
+            url: url,
+            fileName: result.filename ?? file.path,
+            requiredDownload: requiredDownload
+        )
+    }
+
+    private func validateEpisode(
+        fileName: String?,
+        requestedSeason: Int?,
+        requestedEpisode: Int?
+    ) throws {
+        guard let requestedSeason,
+              let requestedEpisode,
+              let fileName else { return }
+        let expected = "s\(requestedSeason)e\(requestedEpisode)"
+        let fullIdentity = episodeIdentity(in: fileName)
+        let episodeOnly = episodeOnlyNumber(in: fileName)
+        let hasRecognizableIdentity = fullIdentity != nil || episodeOnly != nil
+        let matches = fullIdentity == expected
+            || (fullIdentity == nil && episodeOnly == requestedEpisode)
+        if hasRecognizableIdentity && !matches {
+            throw OnlineSourceSearchError.provider(
+                "Real-Debrid returned a different episode than the one selected."
+            )
+        }
+    }
+
+    private func infoHash(from magnet: String) -> String? {
+        guard let value = URLComponents(string: magnet)?.queryItems?
+            .first(where: { $0.name.caseInsensitiveCompare("xt") == .orderedSame })?.value,
+              let hash = value.split(separator: ":").last else { return nil }
+        return String(hash).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func validate(status: String) throws {
@@ -915,6 +1072,11 @@ private struct RealDebridClient: Sendable {
     }
 
     private struct AddedTorrent: Decodable { let id: String }
+    private struct TorrentSummary: Decodable {
+        let id: String
+        let hash: String
+        let status: String
+    }
     private struct TorrentFile: Decodable { let id: Int; let path: String; let bytes: Int64; let selected: Int }
     private struct TorrentInfo: Decodable {
         let status: String

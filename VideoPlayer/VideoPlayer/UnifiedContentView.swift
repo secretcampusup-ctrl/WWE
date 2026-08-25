@@ -1800,7 +1800,6 @@ private struct ExperimentalOnlineSourcesView: View {
     @State private var isSearching = true
     @State private var resolvingID: String?
     @State private var message: String?
-    @State private var resolveTask: Task<Void, Never>?
 
     private var configuredProviders: [String] {
         var values: [String] = []
@@ -1843,6 +1842,11 @@ private struct ExperimentalOnlineSourcesView: View {
                     }
 
                     providerStrip
+
+                    if let transfer = currentTransfer {
+                        transferStatusCard(transfer)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
 
                     if isSearching {
                         VStack(spacing: 13) {
@@ -1891,7 +1895,9 @@ private struct ExperimentalOnlineSourcesView: View {
                 }
             }
             .task { await loadSources() }
-            .onDisappear { resolveTask?.cancel() }
+            .onChange(of: vm.onlinePlaybackTransfer) { transfer in
+                handleTransferChange(transfer)
+            }
         }
         .preferredColorScheme(.dark)
     }
@@ -1966,7 +1972,14 @@ private struct ExperimentalOnlineSourcesView: View {
                 }
                 Spacer(minLength: 4)
                 if isResolving {
-                    ProgressView().tint(.white)
+                    VStack(spacing: 4) {
+                        Image(systemName: currentTransfer?.phase == .downloading
+                              ? "arrow.down.circle.fill" : "hourglass")
+                            .font(.headline)
+                        Text(currentTransfer?.phase == .downloading ? "Downloading" : "Preparing")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .foregroundStyle(currentTransfer?.phase == .downloading ? AppPalette.accent : .white)
                 } else {
                     Image(systemName: "play.fill")
                         .font(.headline)
@@ -2025,23 +2038,72 @@ private struct ExperimentalOnlineSourcesView: View {
 
     private func resolve(_ source: OnlineTorrentSource) {
         resolvingID = source.id
-        message = activeProviders.isEmpty
-            ? "Connecting to peers and reading torrent metadata…"
-            : "Adding the fastest \(source.quality.label) source to your playback service…"
-        resolveTask?.cancel()
-        resolveTask = Task { @MainActor in
-            do {
-                let provider = try await vm.resolveAndPlayOnlineSource(source)
-                guard !Task.isCancelled else { return }
-                message = "Playing through \(provider)."
-                resolvingID = nil
+        message = nil
+        vm.prepareOnlineSource(source)
+    }
+
+    private var currentTransfer: OnlinePlaybackTransfer? {
+        guard let resolvingID,
+              vm.onlinePlaybackTransfer?.id == resolvingID else { return nil }
+        return vm.onlinePlaybackTransfer
+    }
+
+    private func handleTransferChange(_ transfer: OnlinePlaybackTransfer?) {
+        guard let resolvingID,
+              let transfer,
+              transfer.id == resolvingID else { return }
+        switch transfer.phase {
+        case .preparing, .downloading:
+            message = nil
+        case .ready:
+            if vm.playPreparedOnlineSource() {
+                self.resolvingID = nil
                 onPlaybackReady()
-            } catch {
-                guard !(error is CancellationError) else { return }
-                message = error.localizedDescription
-                resolvingID = nil
+            }
+        case .failed:
+            message = transfer.message
+            self.resolvingID = nil
+        }
+    }
+
+    private func transferStatusCard(_ transfer: OnlinePlaybackTransfer) -> some View {
+        let isDownloading = transfer.phase == .downloading
+        return HStack(spacing: 14) {
+            Image(systemName: isDownloading ? "arrow.down.circle.fill" : "hourglass")
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(isDownloading ? AppPalette.accent : .white)
+                .frame(width: 48, height: 48)
+                .background(
+                    (isDownloading ? AppPalette.accent : Color.white).opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                )
+            VStack(alignment: .leading, spacing: 4) {
+                Text(isDownloading ? "Downloading" : "Preparing stream")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Text(isDownloading
+                     ? "Real-Debrid is downloading this file. You can leave this page and keep browsing."
+                     : "Checking whether this file is already available…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .padding(15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [AppPalette.purple.opacity(isDownloading ? 0.2 : 0.08), Color.white.opacity(0.045)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(AppPalette.accent.opacity(isDownloading ? 0.4 : 0.13), lineWidth: 1)
+        }
+        .animation(.easeInOut(duration: 0.22), value: transfer.phase)
     }
 
     private func statusCard(title: String, subtitle: String, icon: String, tint: Color) -> some View {

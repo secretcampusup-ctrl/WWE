@@ -7,6 +7,7 @@ struct MainTabView: View {
     @StateObject private var vm = AppViewModel()
     @StateObject private var catalog = UnifiedContentModel()
     @State private var selectedTab = 0
+    @State private var showPreparedOnlinePlayer = false
     @Namespace private var dockSelection
 
     var body: some View {
@@ -24,6 +25,14 @@ struct MainTabView: View {
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
 
+            if let transfer = vm.onlinePlaybackTransfer {
+                onlineTransferBanner(transfer)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 55)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(4)
+            }
+
             HStack(spacing: 10) {
                 dockSurface
                     .frame(maxWidth: .infinity)
@@ -36,6 +45,103 @@ struct MainTabView: View {
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(AppPalette.accent)
         .preferredColorScheme(.dark)
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: vm.onlinePlaybackTransfer)
+        .fullScreenCover(isPresented: $showPreparedOnlinePlayer) {
+            ResolvedPlayerScreen(vm: vm)
+        }
+    }
+
+    private func onlineTransferBanner(_ transfer: OnlinePlaybackTransfer) -> some View {
+        let isReady = transfer.phase == .ready
+        let isFailed = transfer.phase == .failed
+        return Button {
+            if isReady, vm.playPreparedOnlineSource() {
+                showPreparedOnlinePlayer = true
+            } else if isFailed {
+                vm.clearFinishedOnlineTransfer()
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: transferIcon(transfer.phase))
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(transferTint(transfer.phase))
+                    .frame(width: 40, height: 40)
+                    .background(transferTint(transfer.phase).opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(transferTitle(transfer.phase))
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.white)
+                    Text(isReady ? transfer.title : transfer.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                if isReady {
+                    Text("Play")
+                        .font(.caption.bold())
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(AppPalette.gradient, in: Capsule())
+                } else if isFailed {
+                    Image(systemName: "xmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                } else {
+                    Text(transfer.provider)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(10)
+            .background {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.black.opacity(0.28))
+                }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(transferTint(transfer.phase).opacity(0.28), lineWidth: 0.8)
+            }
+            .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func transferIcon(_ phase: OnlinePlaybackTransfer.Phase) -> String {
+        switch phase {
+        case .preparing: return "hourglass"
+        case .downloading: return "arrow.down.circle.fill"
+        case .ready: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func transferTitle(_ phase: OnlinePlaybackTransfer.Phase) -> String {
+        switch phase {
+        case .preparing: return "Preparing stream"
+        case .downloading: return "Downloading"
+        case .ready: return "Ready to Play"
+        case .failed: return "Download failed"
+        }
+    }
+
+    private func transferTint(_ phase: OnlinePlaybackTransfer.Phase) -> Color {
+        switch phase {
+        case .preparing: return .white
+        case .downloading: return AppPalette.accent
+        case .ready: return .green
+        case .failed: return .orange
+        }
     }
 
     private var dockSurface: some View {

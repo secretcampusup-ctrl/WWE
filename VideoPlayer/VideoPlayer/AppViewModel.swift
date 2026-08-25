@@ -77,6 +77,12 @@ class AppViewModel: ObservableObject {
     @Published var nowPlayingLinkId: UUID?
     @Published var nowPlayingResumeAt: Double = 0
     @Published var nowPlayingSubtitleContext: SubtitleMediaContext?
+    /// App-wide online preparation state. It intentionally lives on the view
+    /// model rather than the source sheet so an uncached debrid transfer keeps
+    /// running while the user browses other sections.
+    @Published private(set) var onlinePlaybackTransfer: OnlinePlaybackTransfer?
+    private var onlinePlaybackPreparationTask: Task<Void, Never>?
+    private var preparedOnlinePlayback: ResolvedOnlinePlayback?
     /// Library of auto-saved links (newest first).
     @Published var savedLinks: [SavedVideoLink] = []
     /// Small local-only resume history. It never stores stream URLs and never
@@ -1695,5 +1701,124 @@ class AppViewModel: ObservableObject {
         } catch {
             return error.localizedDescription
         }
+    }
+}
+
+extension AppViewModel {
+    /// Starts resolving without toggling the app's blocking `isLoading` state.
+    /// The task is owned by AppViewModel, so dismissing the source sheet does
+    /// not cancel an uncached Real-Debrid transfer.
+    func prepareOnlineSource(_ source: OnlineTorrentSource) {
+        onlinePlaybackPreparationTask?.cancel()
+        preparedOnlinePlayback = nil
+        DiagnosticLogger.log("[OnlinePlayback] begin quality=\(source.quality.label) provider=\(OnlinePlaybackProviderPreference.selected.title)")
+
+        let transferID = source.id
+        onlinePlaybackTransfer = OnlinePlaybackTransfer(
+            id: transferID,
+            title: source.name,
+            provider: OnlinePlaybackProviderPreference.selected.title,
+            phase: .preparing,
+            message: "Preparing stream…"
+        )
+
+        onlinePlaybackPreparationTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let resolved = try await OnlinePlaybackResolver.shared.resolve(source) { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        guard let self,
+                              let current = self.onlinePlaybackTransfer,
+                              current.id == transferID,
+                              current.phase != .ready,
+                              current.phase != .failed else { return }
+
+                        // Progress callbacks cross from the resolver actor back
+                        // to MainActor. A queued "preparing" callback can arrive
+                        // after a faster cached result. Never let an older phase
+                        // overwrite downloading (or the terminal states above).
+                        if current.phase == .downloading,
+                           progress.phase == .preparing {
+                            return
+                        }
+                        if current.phase == .downloading,
+                           progress.phase == .downloading {
+                            return
+                        }
+                        if current.phase == .preparing,
+                           progress.phase == .preparing,
+                           current.provider == progress.provider {
+                            return
+                        }
+                        switch progress.phase {
+                        case .preparing:
+                            DiagnosticLogger.log("[OnlinePlayback] preparing provider=\(progress.provider)")
+                            self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
+                                id: transferID,
+                                title: source.name,
+                                provider: progress.provider,
+                                phase: .preparing,
+                                message: "Preparing stream…"
+                            )
+                        case .downloading:
+                            DiagnosticLogger.log("[OnlinePlayback] downloading provider=\(progress.provider)")
+                            self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
+                                id: transferID,
+                                title: source.name,
+                                provider: progress.provider,
+                                phase: .downloading,
+                                message: "Downloading… You can keep browsing."
+                            )
+                        }
+                    }
+                }
+                try Task.checkCancellation()
+                guard self.onlinePlaybackTransfer?.id == transferID else { return }
+                self.preparedOnlinePlayback = resolved
+                DiagnosticLogger.log("[OnlinePlayback] ready provider=\(resolved.provider) requiredDownload=\(resolved.requiredDownload)")
+                self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
+                    id: transferID,
+                    title: resolved.title,
+                    provider: resolved.provider,
+                    phase: .ready,
+                    message: resolved.requiredDownload ? "Download complete · Ready to play" : "Ready to play"
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.onlinePlaybackTransfer?.id == transferID else { return }
+                DiagnosticLogger.log("[OnlinePlayback] failed error=\(error.localizedDescription)")
+                self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
+                    id: transferID,
+                    title: source.name,
+                    provider: OnlinePlaybackProviderPreference.selected.title,
+                    phase: .failed,
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    @discardableResult
+    func playPreparedOnlineSource() -> Bool {
+        guard let resolved = preparedOnlinePlayback else { return false }
+        DiagnosticLogger.log("[OnlinePlayback] opening player provider=\(resolved.provider)")
+        startPlayback(
+            url: resolved.url,
+            title: resolved.title,
+            headers: resolved.headers
+        )
+        preparedOnlinePlayback = nil
+        onlinePlaybackPreparationTask = nil
+        onlinePlaybackTransfer = nil
+        return true
+    }
+
+    func clearFinishedOnlineTransfer() {
+        guard let phase = onlinePlaybackTransfer?.phase,
+              phase == .ready || phase == .failed else { return }
+        preparedOnlinePlayback = nil
+        onlinePlaybackPreparationTask = nil
+        onlinePlaybackTransfer = nil
     }
 }
