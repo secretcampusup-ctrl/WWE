@@ -82,6 +82,39 @@ enum OnlinePlatformSettings {
     }
 }
 
+enum OnlinePlaybackProviderPreference: String, CaseIterable, Identifiable {
+    case automatic
+    case realDebrid
+    case torBox
+    case pikpak
+    case offcloud
+    case directTorrent
+
+    private static let defaultsKey = "online_playback_provider_preference_v1"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .realDebrid: return "Real-Debrid"
+        case .torBox: return "TorBox"
+        case .pikpak: return "PikPak"
+        case .offcloud: return "Offcloud"
+        case .directTorrent: return "Direct Torrent"
+        }
+    }
+
+    static var selected: Self {
+        get {
+            guard let rawValue = UserDefaults.standard.string(forKey: defaultsKey),
+                  let value = Self(rawValue: rawValue) else { return .automatic }
+            return value
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
+    }
+}
+
 enum OrionCredentialStore {
     static var userKey: String { SecureCredentialStore.string(for: AppCredentialKeys.orionUserAPIKey) ?? "" }
     static var appKey: String { SecureCredentialStore.string(for: AppCredentialKeys.orionAppAPIKey) ?? "" }

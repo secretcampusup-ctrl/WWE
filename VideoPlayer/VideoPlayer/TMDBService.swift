@@ -196,6 +196,44 @@ actor TMDBService {
         return nil
     }
 
+    /// Loads a catalogue title by its stable TMDB identity. Home already owns
+    /// this ID, so TV seasons must not depend on a second fuzzy title search.
+    func details(mediaType: String, tmdbID: Int, fallbackTitle: String) async -> TMDBTitleDetails? {
+        guard TMDBSettings.isConfigured,
+              mediaType == "movie" || mediaType == "tv" else { return nil }
+        let identityKey = "tmdb|\(mediaType)|\(tmdbID)"
+        if let cached = detailsCache[identityKey] { return cached }
+        if let cached = detailsCache.values.first(where: {
+            $0.id == tmdbID && $0.mediaType == mediaType && (mediaType != "tv" || !$0.seasons.isEmpty)
+        }) {
+            detailsCache[identityKey] = cached
+            return cached
+        }
+
+        do {
+            let payload: DetailPayload = try await request("/3/\(mediaType)/\(tmdbID)", query: [
+                "append_to_response": "credits,videos,release_dates,images,external_ids",
+                "include_image_language": "en,null"
+            ])
+            let details = makeTitleDetails(
+                payload: payload,
+                id: tmdbID,
+                mediaType: mediaType,
+                fallbackTitle: fallbackTitle
+            )
+            detailsCache[identityKey] = details
+            let fallbackKey = fallbackTitle.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !fallbackKey.isEmpty {
+                detailsCache[fallbackKey + "|" + mediaType] = details
+                detailsCache[fallbackKey + "|any"] = details
+            }
+            persistCache()
+            return details
+        } catch {
+            return nil
+        }
+    }
+
     /// Resolves the stable IMDb identifier used by Orion/torrent providers.
     /// This is intentionally separate from title search so older persistent
     /// metadata snapshots (created before `external_ids` was cached) still work.
@@ -245,44 +283,11 @@ actor TMDBService {
                 "append_to_response": "credits,videos,release_dates,images,external_ids",
                 "include_image_language": "en,null"
             ])
-            let trailers = payload.videos?.results ?? []
-            let trailer = trailers.first { $0.site == "YouTube" && $0.type == "Trailer" && $0.official == true }
-                ?? trailers.first { $0.site == "YouTube" && $0.type == "Trailer" }
-            let certification = payload.releaseDates?.results
-                .first(where: { $0.iso31661 == "US" })?.releaseDates
-                .first(where: { !$0.certification.isEmpty })?.certification
-                ?? payload.releaseDates?.results.flatMap(\.releaseDates)
-                    .first(where: { !$0.certification.isEmpty })?.certification
-            let noLanguagePosterPath = payload.images?.posters?
-                .filter { $0.iso6391 == nil }
-                .max { $0.qualityScore < $1.qualityScore }?.filePath
-            let englishPosterPath = payload.images?.posters?
-                .filter { $0.iso6391 == "en" }
-                .max { $0.qualityScore < $1.qualityScore }?.filePath
-            let details = TMDBTitleDetails(
-                id: match.id, mediaType: match.mediaType,
-                imdbID: payload.externalIds?.imdbId,
-                title: payload.title ?? payload.name ?? match.title ?? match.name ?? normalizedQuery,
-                overview: payload.overview ?? "", posterPath: payload.posterPath,
-                backdropPath: payload.backdropPath, releaseDate: payload.releaseDate ?? payload.firstAirDate,
-                voteAverage: payload.voteAverage ?? 0, genres: payload.genres ?? [],
-                cast: Array((payload.credits?.cast ?? []).prefix(20)),
-                seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 }, trailerKey: trailer?.key,
-                runtimeMinutes: payload.runtime,
-                productionCountries: payload.productionCountries?.map(\.name),
-                certification: certification,
-                director: payload.credits?.crew.first(where: { $0.job == "Director" }),
-                logoPath: payload.images?.logos.first(where: { $0.iso6391 == "en" })?.filePath
-                    ?? payload.images?.logos.first?.filePath,
-                // TMDB's No Language section is represented by iso_639_1 = null.
-                // Preserve API order and use its first backdrop exactly.
-                noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath,
-                noLanguagePosterPath: noLanguagePosterPath,
-                // Prefer any high-quality portrait poster from No Language;
-                // API ordering is not treated as meaningful. English is next.
-                detailsPosterPath: noLanguagePosterPath
-                    ?? englishPosterPath
-                    ?? payload.posterPath
+            let details = makeTitleDetails(
+                payload: payload,
+                id: match.id,
+                mediaType: match.mediaType,
+                fallbackTitle: match.title ?? match.name ?? normalizedQuery
             )
             // One successful response is shared by the Content scan and Details
             // screen even when one requested `movie`/`tv` and the other `any`.
@@ -293,6 +298,52 @@ actor TMDBService {
             persistCache()
             return details
         } catch { return nil }
+    }
+
+    private func makeTitleDetails(
+        payload: DetailPayload,
+        id: Int,
+        mediaType: String,
+        fallbackTitle: String
+    ) -> TMDBTitleDetails {
+        let trailers = payload.videos?.results ?? []
+        let trailer = trailers.first { $0.site == "YouTube" && $0.type == "Trailer" && $0.official == true }
+            ?? trailers.first { $0.site == "YouTube" && $0.type == "Trailer" }
+        let certification = payload.releaseDates?.results
+            .first(where: { $0.iso31661 == "US" })?.releaseDates
+            .first(where: { !$0.certification.isEmpty })?.certification
+            ?? payload.releaseDates?.results.flatMap(\.releaseDates)
+                .first(where: { !$0.certification.isEmpty })?.certification
+        let noLanguagePosterPath = payload.images?.posters?
+            .filter { $0.iso6391 == nil }
+            .max { $0.qualityScore < $1.qualityScore }?.filePath
+        let englishPosterPath = payload.images?.posters?
+            .filter { $0.iso6391 == "en" }
+            .max { $0.qualityScore < $1.qualityScore }?.filePath
+        return TMDBTitleDetails(
+            id: id,
+            mediaType: mediaType,
+            imdbID: payload.externalIds?.imdbId,
+            title: payload.title ?? payload.name ?? fallbackTitle,
+            overview: payload.overview ?? "",
+            posterPath: payload.posterPath,
+            backdropPath: payload.backdropPath,
+            releaseDate: payload.releaseDate ?? payload.firstAirDate,
+            voteAverage: payload.voteAverage ?? 0,
+            genres: payload.genres ?? [],
+            cast: Array((payload.credits?.cast ?? []).prefix(20)),
+            seasons: (payload.seasons ?? []).filter { $0.seasonNumber > 0 },
+            trailerKey: trailer?.key,
+            runtimeMinutes: payload.runtime,
+            productionCountries: payload.productionCountries?.map(\.name),
+            certification: certification,
+            director: payload.credits?.crew.first(where: { $0.job == "Director" }),
+            logoPath: payload.images?.logos.first(where: { $0.iso6391 == "en" })?.filePath
+                ?? payload.images?.logos.first?.filePath,
+            noLanguageBackdropPath: payload.images?.backdrops?.first(where: { $0.iso6391 == nil })?.filePath,
+            noLanguagePosterPath: noLanguagePosterPath,
+            detailsPosterPath: noLanguagePosterPath ?? englishPosterPath ?? payload.posterPath
+        )
     }
 
     private func cachedDetails(for query: String, preferredMediaType: String?) -> TMDBTitleDetails? {

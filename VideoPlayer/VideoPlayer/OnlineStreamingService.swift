@@ -304,14 +304,33 @@ actor OnlinePlaybackResolver {
     static let shared = OnlinePlaybackResolver()
 
     private enum Provider: String, CaseIterable {
-        case pikpak = "PikPak"
-        case torBox = "TorBox"
         case realDebrid = "Real-Debrid"
+        case torBox = "TorBox"
+        case pikpak = "PikPak"
         case offcloud = "Offcloud"
     }
 
     func resolve(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
-        let providers = configuredProviders
+        let preference = OnlinePlaybackProviderPreference.selected
+        if preference == .directTorrent {
+            let url = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
+            return ResolvedOnlinePlayback(url: url, title: source.name, provider: "Direct Torrent", headers: nil)
+        }
+
+        let providers: [Provider]
+        if preference == .automatic {
+            providers = configuredProviders
+        } else if let selected = provider(for: preference) {
+            guard configuredProviders.contains(selected) else {
+                throw OnlineSourceSearchError.provider(
+                    "\(selected.rawValue) is selected, but its account is not configured."
+                )
+            }
+            providers = [selected]
+        } else {
+            providers = []
+        }
+
         guard !providers.isEmpty else {
             let url = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
             return ResolvedOnlinePlayback(url: url, title: source.name, provider: "Direct Torrent", headers: nil)
@@ -332,6 +351,16 @@ actor OnlinePlaybackResolver {
             }
         }
         throw OnlinePlaybackResolutionError.allProvidersFailed(failures.joined(separator: "\n"))
+    }
+
+    private func provider(for preference: OnlinePlaybackProviderPreference) -> Provider? {
+        switch preference {
+        case .realDebrid: return .realDebrid
+        case .torBox: return .torBox
+        case .pikpak: return .pikpak
+        case .offcloud: return .offcloud
+        case .automatic, .directTorrent: return nil
+        }
     }
 
     private var configuredProviders: [Provider] {
@@ -500,17 +529,26 @@ private struct RealDebridClient: Sendable {
     }
 
     func resolve(magnet: String) async throws -> Resolved {
+        let cachedVariant = try await cachedVariant(for: magnet)
         let added: AddedTorrent = try await send(path: "torrents/addMagnet", method: "POST", form: ["magnet": magnet])
-        _ = try await sendEmpty(path: "torrents/selectFiles/\(added.id)", method: "POST", form: ["files": "all"])
+        try await sendEmpty(
+            path: "torrents/selectFiles/\(added.id)",
+            method: "POST",
+            form: ["files": cachedVariant.fileIDs.map { String($0) }.joined(separator: ",")]
+        )
 
-        for _ in 0..<60 {
+        // Cached torrents normally become ready within a few seconds. Do not leave
+        // the player behind an indefinite spinner if Real-Debrid cannot prepare it.
+        for _ in 0..<20 {
             let info: TorrentInfo = try await send(path: "torrents/info/\(added.id)", method: "GET")
             if ["magnet_error", "error", "virus", "dead"].contains(info.status.lowercased()) {
                 throw OnlinePlaybackResolutionError.noPlayableFile("Real-Debrid")
             }
             if info.status.lowercased() == "downloaded", !info.links.isEmpty {
                 let selected = info.files.enumerated().filter { $0.element.selected == 1 }
-                let largest = selected.max { $0.element.bytes < $1.element.bytes }
+                let selectedVideos = selected.filter { isVideoFile($0.element.path) }
+                let playableFiles = selectedVideos.isEmpty ? selected : selectedVideos
+                let largest = playableFiles.max { $0.element.bytes < $1.element.bytes }
                 let linkIndex = largest.flatMap { match in
                     selected.firstIndex(where: { $0.offset == match.offset })
                 } ?? 0
@@ -523,9 +561,68 @@ private struct RealDebridClient: Sendable {
                 }
                 return Resolved(url: url, fileName: result.filename)
             }
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try await Task.sleep(nanoseconds: 750_000_000)
         }
         throw OnlinePlaybackResolutionError.timedOut("Real-Debrid")
+    }
+
+    private func cachedVariant(for magnet: String) async throws -> CachedVariant {
+        guard let hash = infoHash(from: magnet) else {
+            throw OnlineSourceSearchError.provider("The torrent link does not contain a valid info hash.")
+        }
+
+        let data = try await sendData(
+            path: "torrents/instantAvailability/\(hash)",
+            method: "GET"
+        )
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hashEntry = root.first(where: { $0.key.caseInsensitiveCompare(hash) == .orderedSame })?.value
+                as? [String: Any],
+              let variants = hashEntry["rd"] as? [[String: Any]] else {
+            throw OnlineSourceSearchError.provider(
+                "This source is not cached on Real-Debrid. Choose another result."
+            )
+        }
+
+        let parsed = variants.compactMap { variant -> CachedVariant? in
+            let files = variant.compactMap { key, value -> CachedFile? in
+                guard let id = Int(key), let details = value as? [String: Any] else { return nil }
+                let filename = details["filename"] as? String ?? ""
+                let filesize = (details["filesize"] as? NSNumber)?.int64Value ?? 0
+                return CachedFile(id: id, filename: filename, filesize: filesize)
+            }
+            guard let largestVideo = files.filter({ isVideoFile($0.filename) })
+                .max(by: { $0.filesize < $1.filesize }) else { return nil }
+
+            // Real-Debrid requires all IDs from one cached variant to preserve
+            // instant availability, even when the torrent includes sidecar files.
+            return CachedVariant(
+                fileIDs: files.map(\.id).sorted(),
+                largestVideoBytes: largestVideo.filesize
+            )
+        }
+
+        guard let best = parsed.max(by: { $0.largestVideoBytes < $1.largestVideoBytes }),
+              !best.fileIDs.isEmpty else {
+            throw OnlineSourceSearchError.provider(
+                "Real-Debrid has no cached playable video for this result. Choose another result."
+            )
+        }
+        return best
+    }
+
+    private func infoHash(from magnet: String) -> String? {
+        URLComponents(string: magnet)?.queryItems?
+            .first(where: { $0.name.caseInsensitiveCompare("xt") == .orderedSame })?.value?
+            .replacingOccurrences(of: "urn:btih:", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isVideoFile(_ name: String) -> Bool {
+        let videoExtensions: Set<String> = [
+            "mp4", "mkv", "mov", "m4v", "avi", "webm", "ts", "m2ts", "mpg", "mpeg", "wmv", "flv"
+        ]
+        return videoExtensions.contains((name as NSString).pathExtension.lowercased())
     }
 
     private func send<T: Decodable>(
@@ -533,6 +630,16 @@ private struct RealDebridClient: Sendable {
         method: String,
         form: [String: String]? = nil
     ) async throws -> T {
+        let data = try await sendData(path: path, method: method, form: form)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    @discardableResult
+    private func sendData(
+        path: String,
+        method: String,
+        form: [String: String]? = nil
+    ) async throws -> Data {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = method
         request.timeoutInterval = 35
@@ -547,26 +654,19 @@ private struct RealDebridClient: Sendable {
         let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw OnlineSourceSearchError.provider(message ?? "Real-Debrid request failed.")
+            throw OnlineSourceSearchError.provider(
+                message ?? "Real-Debrid request failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0))."
+            )
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        return data
     }
 
     private func sendEmpty(path: String, method: String, form: [String: String]) async throws {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
-        request.httpMethod = method
-        request.timeoutInterval = 35
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        var values = URLComponents()
-        values.queryItems = form.map { URLQueryItem(name: $0.key, value: $0.value) }
-        request.httpBody = values.percentEncodedQuery?.data(using: .utf8)
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let (_, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
-        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
-            throw OnlineSourceSearchError.provider("Real-Debrid could not select the video file.")
-        }
+        _ = try await sendData(path: path, method: method, form: form)
     }
 
+    private struct CachedFile { let id: Int; let filename: String; let filesize: Int64 }
+    private struct CachedVariant { let fileIDs: [Int]; let largestVideoBytes: Int64 }
     private struct AddedTorrent: Decodable { let id: String }
     private struct TorrentFile: Decodable { let id: Int; let path: String; let bytes: Int64; let selected: Int }
     private struct TorrentInfo: Decodable { let status: String; let files: [TorrentFile]; let links: [String] }

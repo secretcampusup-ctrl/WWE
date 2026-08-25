@@ -1529,8 +1529,19 @@ struct UnifiedMediaDetailsHost: View {
         self.vm = vm
         self.section = section
         self.categoryEntries = categoryEntries
-        _activeEntry = State(initialValue: entry)
-        _selection = StateObject(wrappedValue: UnifiedEpisodeSelection(id: entry.episodes.first?.id))
+        var preparedEntry = entry
+        if case let .catalog(mediaType, tmdbID) = entry.source,
+           mediaType == "tv",
+           let details = entry.details,
+           !details.seasons.isEmpty {
+            preparedEntry.episodes = Self.catalogEpisodes(
+                entryID: entry.id,
+                details: details,
+                tmdbID: tmdbID
+            )
+        }
+        _activeEntry = State(initialValue: preparedEntry)
+        _selection = StateObject(wrappedValue: UnifiedEpisodeSelection(id: preparedEntry.episodes.first?.id))
     }
 
     private var selectedEpisode: UnifiedEpisode? {
@@ -1558,12 +1569,26 @@ struct UnifiedMediaDetailsHost: View {
         // the final poster. VideoDetailsView now adopts enrichment in place.
         .id(activeEntry.id)
         .task(id: activeEntry.id) {
-            guard case let .catalog(mediaType, _) = activeEntry.source else { return }
-            if let details = await TMDBService.shared.detailsOriginalFirst(
-                for: activeEntry.title,
-                preferredMediaType: mediaType
+            guard case let .catalog(mediaType, tmdbID) = activeEntry.source else { return }
+            if let details = await TMDBService.shared.details(
+                mediaType: mediaType,
+                tmdbID: tmdbID,
+                fallbackTitle: activeEntry.title
             ) {
                 activeEntry.details = details
+                if mediaType == "tv" {
+                    let episodes = Self.catalogEpisodes(
+                        entryID: activeEntry.id,
+                        details: details,
+                        tmdbID: tmdbID
+                    )
+                    activeEntry.episodes = episodes
+                    if selection.id.map({ selectedID in
+                        episodes.contains(where: { $0.id == selectedID })
+                    }) != true {
+                        selection.id = episodes.first?.id
+                    }
+                }
             }
         }
         .fullScreenCover(isPresented: $showPlayer) {
@@ -1592,6 +1617,38 @@ struct UnifiedMediaDetailsHost: View {
         activeEntry.episodes.map {
             VideoEpisodeItem(id: $0.id, title: $0.title, season: $0.season, episode: $0.episode)
         }
+    }
+
+    private static func catalogEpisodes(
+        entryID: String,
+        details: TMDBTitleDetails,
+        tmdbID: Int
+    ) -> [UnifiedEpisode] {
+        details.seasons
+            .filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
+            .sorted { $0.seasonNumber < $1.seasonNumber }
+            .flatMap { season -> [UnifiedEpisode] in
+                (1...season.episodeCount).compactMap { episodeNumber in
+                    let episodeID = "\(entryID)|s\(season.seasonNumber)|e\(episodeNumber)"
+                    guard let url = URL(
+                        string: "catalog://tmdb/tv/\(tmdbID)/season/\(season.seasonNumber)/episode/\(episodeNumber)"
+                    ) else { return nil }
+                    return UnifiedEpisode(
+                        id: episodeID,
+                        title: String(
+                            format: "%@ S%02dE%02d Episode %d",
+                            details.title,
+                            season.seasonNumber,
+                            episodeNumber,
+                            episodeNumber
+                        ),
+                        season: season.seasonNumber,
+                        episode: episodeNumber,
+                        source: .catalog(mediaType: "tv", tmdbID: tmdbID),
+                        url: url
+                    )
+                }
+            }
     }
 
     private var playerEpisodeOptions: [PlayerEpisodeOption] {
@@ -1745,13 +1802,22 @@ private struct ExperimentalOnlineSourcesView: View {
     @State private var message: String?
     @State private var resolveTask: Task<Void, Never>?
 
-    private var activeProviders: [String] {
+    private var configuredProviders: [String] {
         var values: [String] = []
-        if PikPakClient.shared.loadAccount() != nil { values.append("PikPak") }
-        if !TorBoxKeyStore.load().isEmpty { values.append("TorBox") }
         if !RealDebridKeyStore.key.isEmpty { values.append("Real-Debrid") }
+        if !TorBoxKeyStore.load().isEmpty { values.append("TorBox") }
+        if PikPakClient.shared.loadAccount() != nil { values.append("PikPak") }
         if !OffcloudKeyStore.load().isEmpty { values.append("Offcloud") }
         return values
+    }
+
+    private var activeProviders: [String] {
+        let preference = OnlinePlaybackProviderPreference.selected
+        switch preference {
+        case .automatic: return configuredProviders
+        case .directTorrent: return []
+        default: return [preference.title]
+        }
     }
 
     private var fastestID: String? {
@@ -2097,6 +2163,8 @@ struct UnifiedSettingsView: View {
 private struct StreamingPlatformSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("online_platform_experimental_enabled_v1") private var platformEnabled = true
+    @AppStorage("online_playback_provider_preference_v1") private var playbackProvider =
+        OnlinePlaybackProviderPreference.automatic.rawValue
     @State private var orionUserKey = ""
     @State private var orionAppKey = ""
     @State private var realDebridKey = ""
@@ -2108,6 +2176,17 @@ private struct StreamingPlatformSettingsView: View {
                 Section("Online Platform") {
                     Toggle("Enable Experimental Home", isOn: $platformEnabled)
                     Text("TMDB powers the catalogue. Your existing Content library and Resume Playback remain independent.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Playback Provider") {
+                    Picker("Use", selection: $playbackProvider) {
+                        ForEach(OnlinePlaybackProviderPreference.allCases) { provider in
+                            Text(provider.title).tag(provider.rawValue)
+                        }
+                    }
+                    Text("Playback uses only the provider selected here. Automatic tries configured services in order, starting with Real-Debrid.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
