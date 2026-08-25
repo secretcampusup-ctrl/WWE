@@ -472,11 +472,13 @@ class AppViewModel: ObservableObject {
     @discardableResult
     func saveDirectLink(_ raw: String, resolvedStream: URL? = nil, source: SavedVideoLink.LinkSource? = nil, title: String? = nil, pikpakFileId: String? = nil, poster: String? = nil, fileSizeBytes: Int64? = nil, posterCacheKey: String? = nil) -> SavedVideoLink? {
         let kind = LinkResolver.classify(raw)
-        // Magnets without PikPak resolution are stored but not directly playable
+        // Keep the original magnet. Playback resolves it through whichever
+        // debrid/cloud provider is configured, or through the direct engine.
         if kind == .magnet || kind == .pikpakMagnet {
             let title = title ?? "Magnet download"
             if let idx = savedLinks.firstIndex(where: { $0.urlString == raw.trimmingCharacters(in: .whitespacesAndNewlines) }) {
                 savedLinks[idx].lastPlayed = Date()
+                if let source { savedLinks[idx].source = source }
                 persistSavedLinksImmediately()
                 return savedLinks[idx]
             }
@@ -486,7 +488,7 @@ class AppViewModel: ObservableObject {
                 title: title,
                 dateAdded: Date(),
                 lastPlayed: Date(),
-                source: .pikpak,
+                source: source ?? .direct,
                 pikpakFileId: pikpakFileId,
                 remotePosterURL: poster
             )
@@ -653,6 +655,21 @@ class AppViewModel: ObservableObject {
     }
 
     func playSavedLinkAsync(_ link: SavedVideoLink) async {
+        let savedKind = LinkResolver.classify(link.urlString)
+        if savedKind == .magnet || savedKind == .pikpakMagnet {
+            do {
+                let provider = try await resolveAndPlayMagnet(
+                    link.urlString,
+                    title: link.title,
+                    linkId: link.id
+                )
+                pikpakStatus = "Playing through \(provider)"
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            return
+        }
+
         // A TorBox favorite stores only stable torrent/file IDs. Resolve a fresh
         // signed CDN URL for every play instead of sending `torbox://` to AVPlayer.
         if link.source == .torbox
@@ -1468,17 +1485,17 @@ class AppViewModel: ObservableObject {
             }
 
         case .magnet, .pikpakMagnet:
-            guard pikpakAccount != nil || PikPakClient.shared.loadAccount() != nil else {
-                _ = saveDirectLink(trimmed, source: .pikpak, title: "Magnet (needs PikPak)")
-                return "Magnet links need a PikPak account. Use a direct stream or WebDAV instead."
-            }
-            isLoading = true
-            defer { isLoading = false }
+            let magnetTitle = URLComponents(string: trimmed)?.queryItems?
+                .first(where: { $0.name.lowercased() == "dn" })?.value?
+                .removingPercentEncoding ?? "Magnet video"
+            let saved = saveDirectLink(trimmed, source: .direct, title: magnetTitle)
             do {
-                _ = try await PikPakClient.shared.addOfflineTask(urlOrMagnet: trimmed)
-                _ = saveDirectLink(trimmed, source: .pikpak, title: "Magnet -> PikPak")
-                pikpakStatus = "Magnet added to PikPak offline downloads"
-                try await refreshPikPakFiles()
+                let provider = try await resolveAndPlayMagnet(
+                    trimmed,
+                    title: magnetTitle,
+                    linkId: saved?.id
+                )
+                pikpakStatus = "Playing through \(provider)"
                 return nil
             } catch {
                 return error.localizedDescription

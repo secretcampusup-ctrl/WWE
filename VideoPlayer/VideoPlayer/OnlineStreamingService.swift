@@ -28,7 +28,11 @@ enum OnlineStreamQuality: Int, CaseIterable, Comparable, Sendable {
 }
 
 struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
-    enum Origin: String, Sendable { case orion = "Orion"; case pirateBay = "The Pirate Bay" }
+    enum Origin: String, Sendable {
+        case orion = "Orion"
+        case pirateBay = "The Pirate Bay"
+        case manual = "Manual Magnet"
+    }
 
     let id: String
     let name: String
@@ -639,6 +643,36 @@ final class DirectTorrentPlaybackEngine {
             stopCurrent()
             throw OnlinePlaybackResolutionError.torrentEngine(lastError("The torrent engine returned no stream URL."))
         }
+
+        // Do not present a player pointed at an idle local HTTP server. The
+        // native preload starts fetching the head/tail immediately; wait only
+        // until it has a real peer, transfer, or its first contiguous piece.
+        // This turns dead/stale tracker results into a clear error instead of
+        // leaving AVPlayer/VLC on an endless spinner.
+        var sawActivePeer = status.active_peers > 0
+        var sawTransfer = status.download_rate > 0 || status.buffer_pieces > 0
+        for _ in 0..<40 {
+            if sawTransfer { break }
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                stopCurrent()
+                throw error
+            }
+            guard lt_get_stream_status(session, streamID, &status) != 0 else {
+                stopCurrent()
+                throw OnlinePlaybackResolutionError.torrentEngine(lastError("The torrent stream stopped before playback."))
+            }
+            sawActivePeer = sawActivePeer || status.active_peers > 0
+            sawTransfer = status.download_rate > 0 || status.buffer_pieces > 0
+        }
+        guard sawTransfer else {
+            stopCurrent()
+            let message = sawActivePeer
+                ? "Torrent peers connected but sent no video data. Choose another result."
+                : "No active torrent peers were found. Choose another result with working seeders."
+            throw OnlinePlaybackResolutionError.torrentEngine(message)
+        }
         return url
     }
 
@@ -687,15 +721,49 @@ final class DirectTorrentPlaybackEngine {
 
 @MainActor
 extension AppViewModel {
-    func resolveAndPlayOnlineSource(_ source: OnlineTorrentSource) async throws -> String {
+    func resolveAndPlayOnlineSource(
+        _ source: OnlineTorrentSource,
+        linkId: UUID? = nil
+    ) async throws -> String {
         isLoading = true
         defer { isLoading = false }
         let resolved = try await OnlinePlaybackResolver.shared.resolve(source)
         startPlayback(
             url: resolved.url,
             title: resolved.title,
+            linkId: linkId,
             headers: resolved.headers
         )
         return resolved.provider
+    }
+
+    func resolveAndPlayMagnet(
+        _ magnet: String,
+        title: String? = nil,
+        linkId: UUID? = nil
+    ) async throws -> String {
+        let trimmed = magnet.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard LinkResolver.classify(trimmed) == .magnet
+                || LinkResolver.classify(trimmed) == .pikpakMagnet else {
+            throw OnlineSourceSearchError.provider("The magnet link is invalid.")
+        }
+
+        let magnetName = URLComponents(string: trimmed)?.queryItems?
+            .first(where: { $0.name.lowercased() == "dn" })?.value?
+            .removingPercentEncoding
+        let displayName = [title, magnetName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? "Torrent video"
+        let quality = OnlineStreamQuality.detect(hint: nil, fileName: displayName) ?? .p1080
+        let source = OnlineTorrentSource(
+            id: "manual|\(trimmed)",
+            name: displayName,
+            magnet: trimmed,
+            quality: quality,
+            seeders: 0,
+            sizeBytes: 0,
+            origin: .manual
+        )
+        return try await resolveAndPlayOnlineSource(source, linkId: linkId)
     }
 }

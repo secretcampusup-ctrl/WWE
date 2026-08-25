@@ -2591,7 +2591,7 @@ private struct DirectLinksSettingsView: View {
 
         switch kind {
         case .magnet, .pikpakMagnet:
-            saved = vm.saveDirectLink(raw, source: .pikpak, title: "Magnet link")
+            saved = vm.saveDirectLink(raw, source: .direct, title: "Magnet link")
         case .pikpakShare:
             saved = vm.saveDirectLink(raw, source: .pikpak, title: "PikPak Share")
         case .pikpakDirect:

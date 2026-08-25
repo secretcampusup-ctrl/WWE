@@ -583,7 +583,7 @@ struct ContentView: View {
         let raw = onlineURL
         let kind = LinkResolver.classify(raw)
         if kind == .magnet || kind == .pikpakMagnet {
-            if vm.saveDirectLink(raw, source: .pikpak, title: "Magnet link") != nil {
+            if vm.saveDirectLink(raw, source: .direct, title: "Magnet link") != nil {
                 onlineURL = ""
                 showSavedToast("Magnet saved")
             } else {

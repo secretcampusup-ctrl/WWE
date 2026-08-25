@@ -408,7 +408,12 @@ struct HomeLibraryView: View {
                 }
 
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    // Keep the Hero and its UIKit scroll probe alive for the
+                    // lifetime of the Home screen. A root LazyVStack recycled
+                    // both after a long downward scroll; their onDisappear
+                    // callbacks then cleared the prepared artwork/title state,
+                    // so every Hero layer returned with opacity zero.
+                    VStack(alignment: .leading, spacing: 0) {
                         HomeHeroScrollOffsetObserver(motion: heroMotion)
                             .frame(height: 0)
                         heroSection
@@ -1230,7 +1235,13 @@ struct HomeLibraryView: View {
     }
 
     private func markHeroArtworkReleased(_ entry: UnifiedMediaEntry) {
-        preparedHeroArtworkIDs.remove(heroAssetIdentity(for: entry))
+        let identity = heroAssetIdentity(for: entry)
+        // A SwiftUI lifecycle callback from an off-screen/replaced view can be
+        // delivered after the new current layer has already prepared. Never let
+        // that stale callback hide the item that is on screen now.
+        if featuredItems.indices.contains(currentHeroIndex),
+           heroAssetIdentity(for: featuredItems[currentHeroIndex]) == identity { return }
+        preparedHeroArtworkIDs.remove(identity)
     }
 
     private func markHeroTitlePrepared(_ entry: UnifiedMediaEntry) {
@@ -1240,7 +1251,10 @@ struct HomeLibraryView: View {
     }
 
     private func markHeroTitleReleased(_ entry: UnifiedMediaEntry) {
-        preparedHeroTitleIDs.remove(heroAssetIdentity(for: entry))
+        let identity = heroAssetIdentity(for: entry)
+        if featuredItems.indices.contains(currentHeroIndex),
+           heroAssetIdentity(for: featuredItems[currentHeroIndex]) == identity { return }
+        preparedHeroTitleIDs.remove(identity)
     }
 
     private func finishPendingHeroTransitionIfReady(identity: String) {
