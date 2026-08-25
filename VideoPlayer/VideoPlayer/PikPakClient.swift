@@ -831,6 +831,15 @@ final class PikPakClient {
                 }
             }
         }
+        // PikPak's official client ultimately plays the signed original
+        // download URL. Prefer that explicit field over `web_content_link`:
+        // the latter can point at a Web/preview route whose throughput is much
+        // lower even though both URLs represent the same cloud file.
+        if let download = dict["download_url"] as? String,
+           let url = URL(string: download),
+           !download.isEmpty {
+            return url
+        }
         if let web = dict["web_content_link"] as? String,
            let url = URL(string: web),
            !web.isEmpty {
@@ -860,9 +869,6 @@ final class PikPakClient {
             return url
         }
         if let data = dict["data"] as? [String: Any], let url = extractStreamURL(from: data) {
-            return url
-        }
-        if let dl = dict["download_url"] as? String, let url = URL(string: dl), !dl.isEmpty {
             return url
         }
         if let media = dict["media"] as? [String: Any],

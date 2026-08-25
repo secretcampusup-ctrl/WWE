@@ -724,9 +724,18 @@ class AppViewModel: ObservableObject {
             }
         }
 
-        // Tokenized PikPak direct download links - preserve fid/sign/userid/etc.
-        if LinkResolver.isPikPakDirectDownload(link.urlString)
-            || (link.source == .pikpak && LinkResolver.isPikPakDirectDownload(link.resolvedStreamURL ?? "")) {
+        // A stable DAV-origin entry must refresh its signed redirect below on
+        // every play. Only genuinely pasted/native direct links may reuse the
+        // tokenized URL here; otherwise an old CDN signature can bypass DAV
+        // refresh and become both slow and eventually unplayable.
+        let hasConfiguredWebDAVOrigin: Bool = {
+            guard let host = link.originalURL?.host?.lowercased() else { return false }
+            return servers.contains { $0.baseURL?.host?.lowercased() == host }
+        }()
+        if !hasConfiguredWebDAVOrigin
+            && (LinkResolver.isPikPakDirectDownload(link.urlString)
+                || (link.source == .pikpak
+                    && LinkResolver.isPikPakDirectDownload(link.resolvedStreamURL ?? ""))) {
             if let stream = LinkResolver.resolvePikPakDirectStream(link.resolvedStreamURL ?? link.urlString)
                 ?? LinkResolver.resolvePikPakDirectStream(link.urlString) {
                 startPlayback(
@@ -794,6 +803,33 @@ class AppViewModel: ObservableObject {
                     }
                 } catch {
                     DiagnosticLogger.log("[PlaybackRoute] saved-entry webdav-fallback reason=\(error.localizedDescription)")
+                }
+            }
+
+            // A PikPak DAV media URL is only a gateway. Resolve its cross-host
+            // redirect first and hand the signed CDN URL to the player, exactly
+            // like a direct link pasted in Settings. Keeping playback on
+            // dav.mypikpak.com makes every range request traverse WebDAV and is
+            // dramatically slower for large MP4/MKV files.
+            if isPikPakDAVServer(server) {
+                let client = WebDAVClient(server: server)
+                if let directURL = await client.resolvedStreamURL(for: webDAVFile),
+                   isResolvedPikPakCDNURL(directURL, comparedWith: providerURL) {
+                    if let index = savedLinks.firstIndex(where: { $0.id == link.id }) {
+                        // Keep urlString as the stable DAV reference. The signed
+                        // URL is refreshed again on every play before it expires.
+                        savedLinks[index].source = .webdav
+                        savedLinks[index].resolvedStreamURL = directURL.absoluteString
+                        persistSavedLinksImmediately()
+                    }
+                    DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-dav-cdn saved-entry=true")
+                    startPlayback(
+                        url: directURL,
+                        title: link.title,
+                        linkId: link.id,
+                        headers: PikPakClient.shared.directPlaybackHeaders()
+                    )
+                    return
                 }
             }
             startPlayback(
@@ -1229,13 +1265,10 @@ class AppViewModel: ObservableObject {
         await browse(server: server, path: path)
     }
 
-    /// Prepare the authenticated WebDAV URL without probing the media first.
-    ///
-    /// PikPak DAV returns a signed CDN redirect from the actual media request.
-    /// Consuming that redirect with a separate `Range: bytes=0-0` probe before
-    /// playback can make AVPlayer receive a rejected URL and makes VLC replace
-    /// media while its first request is still being cancelled. Let the selected
-    /// player own the only request and follow the redirect itself instead.
+    /// Prepare a fresh playback URL. PikPak DAV entries are converted to their
+    /// signed CDN redirect first; ordinary DAV servers stay on their authenticated
+    /// URL. The redirect resolver stops before reading the media body, so it does
+    /// not compete with the player for bandwidth.
     @discardableResult
     func preparePlayback(file: WebDAVFile, server: WebDAVServer) async -> Bool {
         let client = WebDAVClient(server: server)
@@ -1279,18 +1312,28 @@ class AppViewModel: ObservableObject {
             }
         }
 
+        var playbackURL = url
+        var playbackHeaders = client.streamHeaders()
+        if isPikPakDAVServer(server),
+           let directURL = await client.resolvedStreamURL(for: file),
+           isResolvedPikPakCDNURL(directURL, comparedWith: url) {
+            playbackURL = directURL
+            playbackHeaders = PikPakClient.shared.directPlaybackHeaders()
+            DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-dav-cdn file=\(file.name)")
+        }
+
         let saved = saveDirectLink(
             url.absoluteString,
-            resolvedStream: url,
+            resolvedStream: playbackURL,
             source: .webdav,
             title: file.name,
             fileSizeBytes: file.size
         )
         startPlayback(
-            url: url,
+            url: playbackURL,
             title: file.name,
             linkId: saved?.id,
-            headers: client.streamHeaders()
+            headers: playbackHeaders
         )
         return nowPlayingURL != nil
     }
@@ -1298,6 +1341,13 @@ class AppViewModel: ObservableObject {
     private func isPikPakDAVServer(_ server: WebDAVServer) -> Bool {
         let host = (server.baseURL?.host ?? server.host).lowercased()
         return host == "dav.mypikpak.com" || host.hasSuffix(".mypikpak.com")
+    }
+
+    private func isResolvedPikPakCDNURL(_ candidate: URL, comparedWith webDAVURL: URL) -> Bool {
+        if LinkResolver.isPikPakDirectDownload(candidate.absoluteString) { return true }
+        guard let candidateHost = candidate.host?.lowercased(),
+              let davHost = webDAVURL.host?.lowercased() else { return false }
+        return candidateHost != davHost
     }
 
     private func nativePikPakPlayback(
