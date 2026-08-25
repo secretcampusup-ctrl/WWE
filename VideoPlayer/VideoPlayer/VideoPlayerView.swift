@@ -1688,10 +1688,10 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
 
     private func updateNetworkTelemetry() {
         guard let media = mediaPlayer.media else { return }
-        // Use VLCKit's typed public statistics API. Calling an unknown Objective-C
-        // selector and treating its return as an NSDictionary is unsafe: current
-        // VLCKit returns a value struct, which can crash when bridged as an object.
-        let totalBytes = Double(max(0, media.statistics.readBytes))
+        // MobileVLCKit 3.4.1b13 exposes the input byte counter directly. Newer
+        // VLCKit headers wrap it in `statistics`, but that API is not present in
+        // the binary version used by this project.
+        let totalBytes = Double(max(0, media.numberOfReadBytesOnInput))
         let now = ProcessInfo.processInfo.systemUptime
         if let previousBytes = lastStatisticsBytes,
            let previousTime = lastStatisticsSampleTime,
