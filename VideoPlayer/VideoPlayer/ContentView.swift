@@ -86,7 +86,14 @@ struct ContentView: View {
                 }
             }
             .fullScreenCover(item: $detailLink) { link in
-                if let url = link.url {
+                if let catalogEntry = restoredCatalogEntry(from: link) {
+                    UnifiedMediaDetailsHost(
+                        vm: vm,
+                        entry: catalogEntry,
+                        section: catalogEntry.id.contains("|tv|") ? .shows : .movies,
+                        categoryEntries: [catalogEntry]
+                    )
+                } else if let url = link.url {
                     VideoDetailsView(
                         vm: vm,
                         item: VideoDetailsItem(
@@ -961,7 +968,14 @@ struct FavoritesAllView: View {
             }
         }
         .fullScreenCover(item: $detailLink) { link in
-            if let url = link.url {
+            if let catalogEntry = restoredCatalogEntry(from: link) {
+                UnifiedMediaDetailsHost(
+                    vm: vm,
+                    entry: catalogEntry,
+                    section: catalogEntry.details?.isSeries == true ? .shows : (catalogEntry.id.contains("|tv|") ? .shows : .movies),
+                    categoryEntries: [catalogEntry]
+                )
+            } else if let url = link.url {
                 VideoDetailsView(
                     vm: vm,
                     item: VideoDetailsItem(
@@ -1140,7 +1154,14 @@ struct PlaylistAllView: View {
             }
         }
         .fullScreenCover(item: $detailLink) { link in
-            if let url = link.url {
+            if let catalogEntry = restoredCatalogEntry(from: link) {
+                UnifiedMediaDetailsHost(
+                    vm: vm,
+                    entry: catalogEntry,
+                    section: catalogEntry.id.contains("|tv|") ? .shows : .movies,
+                    categoryEntries: [catalogEntry]
+                )
+            } else if let url = link.url {
                 VideoDetailsView(
                     vm: vm,
                     item: VideoDetailsItem(

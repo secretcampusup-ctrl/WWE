@@ -64,5 +64,47 @@ enum AppCredentialKeys {
     static let tmdb = "tmdb-read-access-token"
     static let thePornDB = "theporndb-api-key"
     static let pikpakAccount = "pikpak-account"
+    static let orionUserAPIKey = "orion-user-api-key"
+    static let orionAppAPIKey = "orion-app-api-key"
+    static let realDebridAPIKey = "realdebrid-api-key"
     static func webDAVPassword(serverID: UUID) -> String { "webdav-password-\(serverID.uuidString)" }
+}
+
+enum OnlinePlatformSettings {
+    private static let enabledKey = "online_platform_experimental_enabled_v1"
+
+    static var isEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: enabledKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: enabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+}
+
+enum OrionCredentialStore {
+    static var userKey: String { SecureCredentialStore.string(for: AppCredentialKeys.orionUserAPIKey) ?? "" }
+    static var appKey: String { SecureCredentialStore.string(for: AppCredentialKeys.orionAppAPIKey) ?? "" }
+    static var isReady: Bool { !userKey.isEmpty && !appKey.isEmpty }
+
+    @discardableResult static func save(userKey: String, appKey: String) -> Bool {
+        let savedUser = SecureCredentialStore.set(userKey, for: AppCredentialKeys.orionUserAPIKey)
+        let savedApp = SecureCredentialStore.set(appKey, for: AppCredentialKeys.orionAppAPIKey)
+        return savedUser && savedApp
+    }
+
+    static func clear() {
+        _ = SecureCredentialStore.remove(AppCredentialKeys.orionUserAPIKey)
+        _ = SecureCredentialStore.remove(AppCredentialKeys.orionAppAPIKey)
+    }
+}
+
+enum RealDebridKeyStore {
+    static var key: String { SecureCredentialStore.string(for: AppCredentialKeys.realDebridAPIKey) ?? "" }
+    @discardableResult static func save(_ key: String) -> Bool {
+        SecureCredentialStore.set(key, for: AppCredentialKeys.realDebridAPIKey)
+    }
+    @discardableResult static func clear() -> Bool {
+        SecureCredentialStore.remove(AppCredentialKeys.realDebridAPIKey)
+    }
 }

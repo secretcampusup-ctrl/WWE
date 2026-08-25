@@ -200,10 +200,147 @@ private struct HomeLibraryDerivedData {
     var ageRatings: [HomeCategoryCardModel] = []
 }
 
+@MainActor
+private final class ExperimentalOnlineCatalogModel: ObservableObject {
+    @Published private(set) var featured: [UnifiedMediaEntry] = []
+    @Published private(set) var trending: [UnifiedMediaEntry] = []
+    @Published private(set) var newMovies: [UnifiedMediaEntry] = []
+    @Published private(set) var popularMovies: [UnifiedMediaEntry] = []
+    @Published private(set) var airingTV: [UnifiedMediaEntry] = []
+    @Published private(set) var newEpisodes: [UnifiedMediaEntry] = []
+    @Published private(set) var topRated: [UnifiedMediaEntry] = []
+    @Published private(set) var genres: [HomeCategoryCardModel] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var error: String?
+
+    private var didRestoreCache = false
+
+    func load(force: Bool = false) async {
+        if !didRestoreCache {
+            didRestoreCache = true
+            let cached = await TMDBOnlineCatalogService.shared.cachedSnapshot()
+            if !cached.isEmpty {
+                apply(cached)
+                await enrichFeatured(from: cached.trending)
+            }
+        }
+        let currentSnapshot = await TMDBOnlineCatalogService.shared.cachedSnapshot()
+        let shouldRefresh = force || featured.isEmpty || currentSnapshot.isStale
+        guard shouldRefresh else { return }
+        guard !isLoading else { return }
+        isLoading = true
+        error = nil
+        do {
+            let snapshot = try await TMDBOnlineCatalogService.shared.refresh(force: force)
+            apply(snapshot)
+            await enrichFeatured(from: snapshot.trending)
+        } catch {
+            if featured.isEmpty { self.error = "Could not refresh the online catalogue" }
+        }
+        isLoading = false
+    }
+
+    private func apply(_ snapshot: TMDBOnlineCatalogSnapshot) {
+        trending = entries(snapshot.trending, snapshot: snapshot)
+        featured = Array(trending.prefix(10))
+        newMovies = entries(snapshot.newMovies, snapshot: snapshot)
+        popularMovies = entries(snapshot.popularMovies, snapshot: snapshot)
+        airingTV = entries(snapshot.airingTV, snapshot: snapshot)
+        newEpisodes = entries(snapshot.newEpisodes, snapshot: snapshot)
+        topRated = entries(snapshot.topRated, snapshot: snapshot)
+
+        let genrePool = trending + newMovies + popularMovies + airingTV + newEpisodes + topRated
+        let uniqueGenreNames = Set(genrePool.flatMap { $0.details?.genres.map(\.name) ?? [] })
+        genres = uniqueGenreNames.sorted().compactMap { name in
+            let matches = genrePool.filter { $0.details?.genres.contains(where: { $0.name == name }) == true }
+            guard !matches.isEmpty else { return nil }
+            return HomeCategoryCardModel(
+                id: "online-genre|\(name.lowercased())",
+                title: name,
+                items: deduplicated(matches),
+                tint: tint(for: name)
+            )
+        }
+    }
+
+    private func entries(
+        _ items: [TMDBCatalogItem],
+        snapshot: TMDBOnlineCatalogSnapshot
+    ) -> [UnifiedMediaEntry] {
+        deduplicated(items.map { item in
+            let mediaType = item.resolvedMediaType
+            let genreMap = mediaType == "tv" ? snapshot.tvGenres : snapshot.movieGenres
+            let genres = (item.genreIds ?? []).compactMap { id in
+                genreMap[id].map { TMDBGenre(id: id, name: $0) }
+            }
+            let details = TMDBTitleDetails(
+                id: item.id,
+                mediaType: mediaType,
+                title: item.displayTitle,
+                overview: item.overview ?? "",
+                posterPath: item.posterPath,
+                backdropPath: item.backdropPath,
+                releaseDate: item.displayDate,
+                voteAverage: item.voteAverage ?? 0,
+                genres: genres,
+                cast: [],
+                seasons: [],
+                trailerKey: nil,
+                runtimeMinutes: nil,
+                productionCountries: nil,
+                certification: nil,
+                director: nil,
+                logoPath: nil,
+                noLanguageBackdropPath: nil,
+                noLanguagePosterPath: nil,
+                detailsPosterPath: item.posterPath
+            )
+            return UnifiedMediaEntry(
+                id: "catalog|tmdb|\(mediaType)|\(item.id)",
+                rawTitle: item.displayTitle,
+                title: item.displayTitle,
+                sourceLabel: "Orion Catalog",
+                source: .catalog(mediaType: mediaType, tmdbID: item.id),
+                streamURL: URL(string: "catalog://tmdb/\(mediaType)/\(item.id)")!,
+                details: details,
+                metadataLookupCompleted: true,
+                adultLookupCompleted: true
+            )
+        })
+    }
+
+    private func enrichFeatured(from items: [TMDBCatalogItem]) async {
+        var enriched = featured
+        for item in items.prefix(10) {
+            guard let index = enriched.firstIndex(where: { $0.id == "catalog|tmdb|\(item.resolvedMediaType)|\(item.id)" }) else { continue }
+            if let details = await TMDBService.shared.detailsOriginalFirst(
+                for: item.displayTitle,
+                preferredMediaType: item.resolvedMediaType
+            ) {
+                enriched[index].details = details
+                featured = enriched
+            }
+        }
+    }
+
+    private func deduplicated(_ entries: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
+        var seen = Set<String>()
+        return entries.filter { seen.insert($0.id).inserted }
+    }
+
+    private func tint(for name: String) -> Color {
+        let palette: [Color] = [.blue, .purple, .orange, .pink, .cyan, .indigo, .green, .red]
+        let value = name.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }
+        return palette[Int(value.magnitude % UInt(palette.count))]
+    }
+}
+
 struct HomeLibraryView: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var catalog: UnifiedContentModel
     let isActive: Bool
+    @AppStorage("online_platform_experimental_enabled_v1") private var onlinePlatformEnabled = true
+    @StateObject private var onlineCatalog = ExperimentalOnlineCatalogModel()
 
     @State private var selectedEntry: UnifiedMediaEntry?
     @State private var selectedSavedLink: SavedVideoLink?
@@ -277,18 +414,28 @@ struct HomeLibraryView: View {
 
                         LazyVStack(alignment: .leading, spacing: 28) {
                             resumeSection
-                            posterSection("Recently Added", items: derivedData.recentlyAdded)
-                            posterSection("Movies", items: catalog.movies)
-                            posterSection("TV Shows", items: catalog.shows)
-                            posterSection("Anime", items: derivedData.anime)
-                            posterSection("Others", items: derivedData.others)
-                            posterSection("Unwatched", items: derivedData.unwatched)
-                            posterSection("Watched", items: derivedData.watched)
                             favoritesSection
-                            categorySection("By Genre", categories: derivedData.genres)
-                            categorySection("By Rating", categories: derivedData.ratings)
-                            categorySection("By Release Date", categories: derivedData.releases)
-                            categorySection("By Age Rating", categories: derivedData.ageRatings)
+                            if onlinePlatformEnabled {
+                                posterSection("Trending Now", items: onlineCatalog.trending)
+                                posterSection("New Movies", items: onlineCatalog.newMovies)
+                                posterSection("Popular Movies", items: onlineCatalog.popularMovies)
+                                posterSection("TV Shows Airing Now", items: onlineCatalog.airingTV)
+                                posterSection("New Episodes", items: onlineCatalog.newEpisodes)
+                                posterSection("Top Rated", items: onlineCatalog.topRated)
+                                categorySection("Genres", categories: onlineCatalog.genres)
+                            } else {
+                                posterSection("Recently Added", items: derivedData.recentlyAdded)
+                                posterSection("Movies", items: catalog.movies)
+                                posterSection("TV Shows", items: catalog.shows)
+                                posterSection("Anime", items: derivedData.anime)
+                                posterSection("Others", items: derivedData.others)
+                                posterSection("Unwatched", items: derivedData.unwatched)
+                                posterSection("Watched", items: derivedData.watched)
+                                categorySection("By Genre", categories: derivedData.genres)
+                                categorySection("By Rating", categories: derivedData.ratings)
+                                categorySection("By Release Date", categories: derivedData.releases)
+                                categorySection("By Age Rating", categories: derivedData.ageRatings)
+                            }
                         }
                         .padding(.top, 0)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -328,10 +475,11 @@ struct HomeLibraryView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .task(id: homeRefreshID) {
+            .task(id: "\(homeRefreshID)|online:\(onlinePlatformEnabled)") {
                 guard isActive else { return }
                 updateHeroRotationIfNeeded()
                 await catalog.load(vm: vm, force: false)
+                if onlinePlatformEnabled { await onlineCatalog.load(force: false) }
                 scheduleDerivedDataRebuild()
             }
             .onReceive(catalog.$movies) { _ in scheduleDerivedDataRebuild() }
@@ -362,7 +510,14 @@ struct HomeLibraryView: View {
                 )
             }
             .fullScreenCover(item: $selectedSavedLink) { link in
-                if let url = link.url {
+                if let catalogEntry = restoredCatalogEntry(from: link) {
+                    UnifiedMediaDetailsHost(
+                        vm: vm,
+                        entry: catalogEntry,
+                        section: catalogEntry.id.contains("|tv|") ? .shows : .movies,
+                        categoryEntries: [catalogEntry]
+                    )
+                } else if let url = link.url {
                     VideoDetailsView(
                         vm: vm,
                         item: VideoDetailsItem(
@@ -642,7 +797,13 @@ struct HomeLibraryView: View {
         guard !showRefreshOverlay else { return }
         showRefreshOverlay = true
         let startedAt = Date()
-        await catalog.load(vm: vm, force: true)
+        async let localRefresh: Void = catalog.load(vm: vm, force: true)
+        if onlinePlatformEnabled {
+            async let onlineRefresh: Void = onlineCatalog.load(force: true)
+            _ = await (localRefresh, onlineRefresh)
+        } else {
+            _ = await localRefresh
+        }
 
         // If the pull happened while another scan was ending, the model queues
         // this forced refresh. Keep the overlay up through that queued pass too.
@@ -888,11 +1049,16 @@ struct HomeLibraryView: View {
 
     private var allItems: [UnifiedMediaEntry] {
         var seen = Set<String>()
-        return (catalog.movies + catalog.shows + catalog.unknown).filter { seen.insert($0.id).inserted }
+        let onlineItems = onlinePlatformEnabled
+            ? onlineCatalog.trending + onlineCatalog.newMovies + onlineCatalog.popularMovies
+                + onlineCatalog.airingTV + onlineCatalog.newEpisodes + onlineCatalog.topRated
+            : []
+        return (catalog.movies + catalog.shows + catalog.unknown + onlineItems)
+            .filter { seen.insert($0.id).inserted }
     }
 
     private var featuredItems: [UnifiedMediaEntry] {
-        derivedData.featured
+        onlinePlatformEnabled ? onlineCatalog.featured : derivedData.featured
     }
 
     private func buildFeaturedItems(from libraryItems: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
@@ -1140,6 +1306,9 @@ struct HomeLibraryView: View {
     }
 
     private func section(for entry: UnifiedMediaEntry) -> UnifiedMediaSection {
+        if case let .catalog(mediaType, _) = entry.source {
+            return mediaType == "tv" ? .shows : .movies
+        }
         if derivedData.showIDs.contains(entry.id) { return .shows }
         if derivedData.unknownIDs.contains(entry.id) { return .unknown }
         if derivedData.showIDs.isEmpty, catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
@@ -1148,6 +1317,12 @@ struct HomeLibraryView: View {
     }
 
     private func categoryEntries(for entry: UnifiedMediaEntry) -> [UnifiedMediaEntry] {
+        if case let .catalog(mediaType, _) = entry.source {
+            return allItems.filter {
+                guard case let .catalog(candidateType, _) = $0.source else { return false }
+                return candidateType == mediaType
+            }
+        }
         switch section(for: entry) {
         case .movies: return catalog.movies
         case .shows: return catalog.shows
@@ -1183,6 +1358,7 @@ struct HomeLibraryView: View {
             guard let raw = transfer.createdOn else { return .distantPast }
             return Self.sourceISO8601Formatter.date(from: raw) ?? .distantPast
         case .torBox: return .distantPast
+        case .catalog: return .distantPast
         }
     }
 
@@ -1256,6 +1432,10 @@ struct HomeLibraryView: View {
                 guard await vm.playTorBoxFile(torrentId: torrent.id, file: file) else { return }
                 showHeroPlayer = true
             }
+        case .catalog:
+            // Online catalogue entries do not have a stream until Orion and an
+            // enabled playback service resolve one. Open Details immediately.
+            selectedEntry = entry
         }
     }
 
@@ -1676,12 +1856,21 @@ private struct HomeCollectionView: View {
     }
 
     private func section(for entry: UnifiedMediaEntry) -> UnifiedMediaSection {
+        if case let .catalog(mediaType, _) = entry.source {
+            return mediaType == "tv" ? .shows : .movies
+        }
         if catalog.shows.contains(where: { $0.id == entry.id }) { return .shows }
         if catalog.unknown.contains(where: { $0.id == entry.id }) { return .unknown }
         return .movies
     }
 
     private func categoryEntries(for entry: UnifiedMediaEntry) -> [UnifiedMediaEntry] {
+        if case let .catalog(mediaType, _) = entry.source {
+            return collection.items.filter {
+                guard case let .catalog(candidateType, _) = $0.source else { return false }
+                return candidateType == mediaType
+            }
+        }
         switch section(for: entry) {
         case .movies: return catalog.movies
         case .shows: return catalog.shows

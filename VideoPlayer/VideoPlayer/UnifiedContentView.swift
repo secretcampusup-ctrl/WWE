@@ -17,12 +17,14 @@ enum UnifiedSource: Codable {
     case webDAV(server: WebDAVServer, file: WebDAVFile)
     case offcloud(transfer: OffcloudTransfer, file: OffcloudFile)
     case torBox(torrent: TorBoxTorrent, file: TorBoxFile)
+    case catalog(mediaType: String, tmdbID: Int)
 
     var isVisibleByFileSize: Bool {
         switch self {
         case let .webDAV(_, file): return VideoLibraryVisibility.allows(sizeBytes: file.size)
         case let .offcloud(_, file): return VideoLibraryVisibility.allows(sizeBytes: file.size)
         case let .torBox(_, file): return VideoLibraryVisibility.allows(sizeBytes: file.size)
+        case .catalog: return true
         }
     }
 }
@@ -66,6 +68,27 @@ private struct UnifiedContentSnapshot: Codable, @unchecked Sendable {
     let unknown: [UnifiedMediaEntry]
     let sourceSignature: String?
     let metadataSignature: String?
+}
+
+func restoredCatalogEntry(from link: SavedVideoLink) -> UnifiedMediaEntry? {
+    guard let identity = link.favoriteIdentity,
+          identity.hasPrefix("catalog|tmdb|") else { return nil }
+    let parts = identity.split(separator: "|").map(String.init)
+    guard parts.count == 4,
+          (parts[2] == "movie" || parts[2] == "tv"),
+          let tmdbID = Int(parts[3]),
+          let url = URL(string: "catalog://tmdb/\(parts[2])/\(tmdbID)") else { return nil }
+    return UnifiedMediaEntry(
+        id: identity,
+        rawTitle: link.title,
+        title: link.displayTitle,
+        sourceLabel: "Orion Catalog",
+        source: .catalog(mediaType: parts[2], tmdbID: tmdbID),
+        streamURL: url,
+        details: nil,
+        metadataLookupCompleted: true,
+        adultLookupCompleted: true
+    )
 }
 
 /// JSON encoding and atomic disk writes can take multiple frames for a large
@@ -618,6 +641,7 @@ final class UnifiedContentModel: ObservableObject {
         case let .webDAV(_, file): sourcePath = file.path
         case let .offcloud(_, file): sourcePath = file.path ?? file.name
         case let .torBox(torrent, file): sourcePath = (torrent.name.map { $0 + "/" } ?? "") + (file.name ?? file.displayName)
+        case let .catalog(mediaType, tmdbID): sourcePath = "tmdb/\(mediaType)/\(tmdbID)"
         }
         let genericFolders: Set<String> = [
             "movie", "movies", "film", "films", "tv", "tv show", "tv shows", "series",
@@ -1237,6 +1261,8 @@ struct UnifiedContentView: View {
                 showPlayer = true
             }
             return
+        case .catalog:
+            return
         }
         showPlayer = true
     }
@@ -1492,6 +1518,7 @@ struct UnifiedMediaDetailsHost: View {
     @StateObject private var selection: UnifiedEpisodeSelection
     @State private var activeEntry: UnifiedMediaEntry
     @State private var showPlayer = false
+    @State private var showOnlineSources = false
 
     init(
         vm: AppViewModel,
@@ -1525,13 +1552,29 @@ struct UnifiedMediaDetailsHost: View {
             suggestions: suggestions,
             onSelectSuggestion: selectSuggestion
         )
-        .id(activeEntry.id)
+        .id(
+            "\(activeEntry.id)|\(activeEntry.details?.cast.count ?? 0)"
+                + "|\(activeEntry.details?.runtimeMinutes ?? -1)"
+                + "|\(activeEntry.details?.logoPath ?? "")"
+        )
+        .task(id: activeEntry.id) {
+            guard case let .catalog(mediaType, _) = activeEntry.source else { return }
+            if let details = await TMDBService.shared.detailsOriginalFirst(
+                for: activeEntry.title,
+                preferredMediaType: mediaType
+            ) {
+                activeEntry.details = details
+            }
+        }
         .fullScreenCover(isPresented: $showPlayer) {
             ResolvedPlayerScreen(
                 vm: vm,
                 episodeOptions: playerEpisodeOptions,
                 onSelectEpisode: switchPlayerEpisode
             )
+        }
+        .fullScreenCover(isPresented: $showOnlineSources) {
+            ExperimentalOnlineSourcesView(entry: activeEntry)
         }
     }
 
@@ -1630,6 +1673,9 @@ struct UnifiedMediaDetailsHost: View {
                 showPlayer = true
             }
             return
+        case .catalog:
+            showOnlineSources = true
+            return
         }
         showPlayer = true
     }
@@ -1677,6 +1723,100 @@ struct UnifiedMediaDetailsHost: View {
     }
 }
 
+private struct ExperimentalOnlineSourcesView: View {
+    let entry: UnifiedMediaEntry
+    @Environment(\.dismiss) private var dismiss
+
+    private var activeProviders: [String] {
+        var values: [String] = []
+        if !TorBoxKeyStore.load().isEmpty { values.append("TorBox") }
+        if !RealDebridKeyStore.key.isEmpty { values.append("Real-Debrid") }
+        if !OffcloudKeyStore.load().isEmpty { values.append("Offcloud") }
+        if PikPakClient.shared.loadAccount() != nil { values.append("PikPak") }
+        return values
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(entry.title)
+                            .font(.title2.bold())
+                            .foregroundStyle(.white)
+                        Text("Streaming Sources · Experimental")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    statusCard(
+                        title: OrionCredentialStore.isReady ? "Orion Ready" : "Orion App Key Required",
+                        subtitle: OrionCredentialStore.isReady
+                            ? "This title is ready for an automatic Orion lookup."
+                            : "Add a regenerated User API Key and your Custom App API Key in Settings.",
+                        icon: OrionCredentialStore.isReady ? "checkmark.seal.fill" : "key.fill",
+                        tint: OrionCredentialStore.isReady ? .green : .orange
+                    )
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("ACTIVE PLAYBACK SERVICES")
+                            .font(.caption.bold())
+                            .tracking(0.8)
+                            .foregroundStyle(.secondary)
+                        if activeProviders.isEmpty {
+                            Text("No playback service is connected. The app will never contact an unconfigured provider.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(activeProviders, id: \.self) { provider in
+                                Label(provider, systemImage: "checkmark.circle.fill")
+                                    .font(.headline)
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+
+                    Text("Orion searches only after a title is opened. Home browsing never consumes Orion requests.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                }
+                .padding(18)
+                .padding(.bottom, 70)
+            }
+            .background(AppTheme.bg.ignoresSafeArea())
+            .navigationTitle("Sources")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func statusCard(title: String, subtitle: String, icon: String, tint: Color) -> some View {
+        HStack(spacing: 13) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(tint)
+                .frame(width: 46, height: 46)
+                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline).foregroundStyle(.white)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+    }
+}
+
 struct UnifiedSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: AppViewModel
@@ -1684,7 +1824,7 @@ struct UnifiedSettingsView: View {
     @State private var destination: SettingsDestination?
 
     private enum SettingsDestination: String, Identifiable {
-        case servers, downloads, subtitles, directLinks
+        case streaming, servers, downloads, subtitles, directLinks
         var id: String { rawValue }
     }
 
@@ -1705,6 +1845,7 @@ struct UnifiedSettingsView: View {
                     }
 
                     VStack(spacing: 12) {
+                        settingsRow("Streaming", "Online platform, Orion and Real-Debrid", "play.tv.fill", .streaming)
                         settingsRow("Servers", "WebDAV, PikPak, Offcloud and TorBox accounts", "server.rack", .servers)
                         settingsRow("Downloads", "Current downloads and downloaded videos", "arrow.down.circle.fill", .downloads)
                         settingsRow("Subtitles", "Language, appearance and automatic search", "captions.bubble.fill", .subtitles)
@@ -1765,10 +1906,103 @@ struct UnifiedSettingsView: View {
 
     @ViewBuilder private func destinationView(_ item: SettingsDestination) -> some View {
         switch item {
+        case .streaming: StreamingPlatformSettingsView()
         case .servers: ServerAccountsSettingsView(vm: vm)
         case .downloads: DownloadManagerView()
         case .subtitles: SubtitleSettingsView()
         case .directLinks: DirectLinksSettingsView(vm: vm)
+        }
+    }
+}
+
+private struct StreamingPlatformSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("online_platform_experimental_enabled_v1") private var platformEnabled = true
+    @State private var orionUserKey = ""
+    @State private var orionAppKey = ""
+    @State private var realDebridKey = ""
+    @State private var status = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Online Platform") {
+                    Toggle("Enable Experimental Home", isOn: $platformEnabled)
+                    Text("TMDB powers the catalogue. Your existing Content library and Resume Playback remain independent.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Orion") {
+                    SecureField("User API Key", text: $orionUserKey)
+                        .textContentType(.password)
+                    SecureField("Custom App API Key", text: $orionAppKey)
+                        .textContentType(.password)
+                    Text("Both values are stored in the iPhone Keychain. Never reuse another application's App Key.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Save Orion Credentials") { saveOrion() }
+                        .disabled(orionUserKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  && orionAppKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if !OrionCredentialStore.userKey.isEmpty || !OrionCredentialStore.appKey.isEmpty {
+                        Button("Remove Orion Credentials", role: .destructive) {
+                            OrionCredentialStore.clear()
+                            orionUserKey = ""
+                            orionAppKey = ""
+                            status = "Orion credentials removed"
+                        }
+                    }
+                }
+
+                Section("Real-Debrid") {
+                    SecureField("API Token", text: $realDebridKey)
+                        .textContentType(.password)
+                    Text("Real-Debrid is contacted only when this token is configured.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Save Real-Debrid Token") {
+                        let key = realDebridKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                        status = RealDebridKeyStore.save(key) ? "Real-Debrid token saved" : "Could not save token"
+                    }
+                    .disabled(realDebridKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if !RealDebridKeyStore.key.isEmpty {
+                        Button("Remove Real-Debrid Token", role: .destructive) {
+                            _ = RealDebridKeyStore.clear()
+                            realDebridKey = ""
+                            status = "Real-Debrid token removed"
+                        }
+                    }
+                }
+
+                if !status.isEmpty {
+                    Section("Status") { Text(status).font(.footnote).foregroundStyle(.secondary) }
+                }
+            }
+            .navigationTitle("Streaming")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
+            }
+            .onAppear {
+                orionUserKey = OrionCredentialStore.userKey
+                orionAppKey = OrionCredentialStore.appKey
+                realDebridKey = RealDebridKeyStore.key
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func saveOrion() {
+        let user = orionUserKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let app = orionAppKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if OrionCredentialStore.save(userKey: user, appKey: app) {
+            status = OrionCredentialStore.isReady
+                ? "Orion is ready"
+                : "User key saved · Custom App Key is still required"
+        } else {
+            status = "Could not save Orion credentials"
         }
     }
 }

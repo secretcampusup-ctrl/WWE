@@ -522,6 +522,189 @@ actor TMDBService {
     }
 }
 
+// MARK: - Online platform catalogue
+
+struct TMDBCatalogItem: Identifiable, Codable, Hashable {
+    let id: Int
+    let mediaType: String?
+    let title: String?
+    let name: String?
+    let overview: String?
+    let posterPath: String?
+    let backdropPath: String?
+    let releaseDate: String?
+    let firstAirDate: String?
+    let voteAverage: Double?
+    let popularity: Double?
+    let genreIds: [Int]?
+
+    var resolvedMediaType: String { mediaType == "tv" ? "tv" : "movie" }
+    var displayTitle: String { title ?? name ?? "Untitled" }
+    var displayDate: String? { releaseDate ?? firstAirDate }
+}
+
+struct TMDBOnlineCatalogSnapshot: Codable {
+    let refreshedAt: Date
+    let trending: [TMDBCatalogItem]
+    let newMovies: [TMDBCatalogItem]
+    let popularMovies: [TMDBCatalogItem]
+    let airingTV: [TMDBCatalogItem]
+    let newEpisodes: [TMDBCatalogItem]
+    let topRated: [TMDBCatalogItem]
+    let movieGenres: [Int: String]
+    let tvGenres: [Int: String]
+
+    static let empty = TMDBOnlineCatalogSnapshot(
+        refreshedAt: .distantPast,
+        trending: [],
+        newMovies: [],
+        popularMovies: [],
+        airingTV: [],
+        newEpisodes: [],
+        topRated: [],
+        movieGenres: [:],
+        tvGenres: [:]
+    )
+
+    var isEmpty: Bool {
+        trending.isEmpty && newMovies.isEmpty && popularMovies.isEmpty
+            && airingTV.isEmpty && newEpisodes.isEmpty && topRated.isEmpty
+    }
+
+    var isStale: Bool { Date().timeIntervalSince(refreshedAt) > 6 * 60 * 60 }
+}
+
+/// Independent, disk-backed catalogue for the experimental streaming platform.
+/// Restoring this snapshot never waits for the network, so Home remains filled
+/// while a six-hour refresh quietly replaces it in the background.
+actor TMDBOnlineCatalogService {
+    static let shared = TMDBOnlineCatalogService()
+
+    private var snapshot: TMDBOnlineCatalogSnapshot
+    private let cacheURL: URL
+    private let decoder: JSONDecoder = {
+        let value = JSONDecoder()
+        value.keyDecodingStrategy = .convertFromSnakeCase
+        return value
+    }()
+
+    init() {
+        let fileManager = FileManager.default
+        let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PersistentMetadata/OnlineCatalog", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        cacheURL = directory.appendingPathComponent("tmdb-online-v1.json")
+        if let data = try? Data(contentsOf: cacheURL),
+           let saved = try? JSONDecoder().decode(TMDBOnlineCatalogSnapshot.self, from: data) {
+            snapshot = saved
+        } else {
+            snapshot = .empty
+        }
+    }
+
+    func cachedSnapshot() -> TMDBOnlineCatalogSnapshot { snapshot }
+
+    func refresh(force: Bool = false) async throws -> TMDBOnlineCatalogSnapshot {
+        guard TMDBSettings.isConfigured else { return snapshot }
+        if !force, !snapshot.isEmpty, !snapshot.isStale { return snapshot }
+
+        async let trendingResponse = list("/3/trending/all/day", fallbackMediaType: nil)
+        async let newMoviesResponse = list("/3/movie/now_playing", fallbackMediaType: "movie", extra: ["region": "US"])
+        async let popularMoviesResponse = list("/3/movie/popular", fallbackMediaType: "movie", extra: ["region": "US"])
+        async let airingTVResponse = list("/3/tv/on_the_air", fallbackMediaType: "tv")
+        async let newEpisodesResponse = list("/3/tv/airing_today", fallbackMediaType: "tv")
+        async let topMoviesResponse = list("/3/movie/top_rated", fallbackMediaType: "movie", extra: ["region": "US"])
+        async let topTVResponse = list("/3/tv/top_rated", fallbackMediaType: "tv")
+        async let movieGenresResponse = genres("movie")
+        async let tvGenresResponse = genres("tv")
+
+        let trendingValues = try await trendingResponse
+        let trending = trendingValues.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
+        let topMovies = try await topMoviesResponse
+        let topTV = try await topTVResponse
+        let topRated = Self.deduplicated(topMovies + topTV)
+            .sorted { ($0.voteAverage ?? 0) > ($1.voteAverage ?? 0) }
+
+        let refreshed = TMDBOnlineCatalogSnapshot(
+            refreshedAt: Date(),
+            trending: trending,
+            newMovies: try await newMoviesResponse,
+            popularMovies: try await popularMoviesResponse,
+            airingTV: try await airingTVResponse,
+            newEpisodes: try await newEpisodesResponse,
+            topRated: topRated,
+            movieGenres: try await movieGenresResponse,
+            tvGenres: try await tvGenresResponse
+        )
+        snapshot = refreshed
+        if let data = try? JSONEncoder().encode(refreshed) {
+            try? data.write(to: cacheURL, options: .atomic)
+        }
+        return refreshed
+    }
+
+    private func list(
+        _ path: String,
+        fallbackMediaType: String?,
+        extra: [String: String] = [:]
+    ) async throws -> [TMDBCatalogItem] {
+        var query = ["language": "en-US", "page": "1"]
+        extra.forEach { query[$0.key] = $0.value }
+        let payload: TMDBCatalogListPayload = try await request(path, query: query)
+        return payload.results.map { item in
+            guard item.mediaType == nil, let fallbackMediaType else { return item }
+            return TMDBCatalogItem(
+                id: item.id,
+                mediaType: fallbackMediaType,
+                title: item.title,
+                name: item.name,
+                overview: item.overview,
+                posterPath: item.posterPath,
+                backdropPath: item.backdropPath,
+                releaseDate: item.releaseDate,
+                firstAirDate: item.firstAirDate,
+                voteAverage: item.voteAverage,
+                popularity: item.popularity,
+                genreIds: item.genreIds
+            )
+        }
+    }
+
+    private func genres(_ mediaType: String) async throws -> [Int: String] {
+        let payload: TMDBCatalogGenrePayload = try await request(
+            "/3/genre/\(mediaType)/list",
+            query: ["language": "en-US"]
+        )
+        return Dictionary(uniqueKeysWithValues: payload.genres.map { ($0.id, $0.name) })
+    }
+
+    private func request<T: Decodable>(_ path: String, query: [String: String]) async throws -> T {
+        var parts = URLComponents(string: "https://api.themoviedb.org\(path)")!
+        var requestQuery = query
+        if TMDBSettings.usesV3APIKey { requestQuery["api_key"] = TMDBSettings.readAccessToken }
+        parts.queryItems = requestQuery.map { URLQueryItem(name: $0.key, value: $0.value) }
+        var request = URLRequest(url: parts.url!)
+        if !TMDBSettings.usesV3APIKey {
+            request.setValue("Bearer \(TMDBSettings.readAccessToken)", forHTTPHeaderField: "Authorization")
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 25
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+        return try decoder.decode(T.self, from: data)
+    }
+
+    private static func deduplicated(_ items: [TMDBCatalogItem]) -> [TMDBCatalogItem] {
+        var seen = Set<String>()
+        return items.filter { seen.insert("\($0.resolvedMediaType)|\($0.id)").inserted }
+    }
+}
+
+private struct TMDBCatalogListPayload: Decodable { let results: [TMDBCatalogItem] }
+private struct TMDBCatalogGenrePayload: Decodable { let genres: [TMDBGenre] }
+
 private struct TMDBPersistentCache: Codable {
     let details: [String: TMDBTitleDetails]
     let episodes: [String: TMDBEpisodeDetails]
