@@ -491,6 +491,10 @@ private struct RealDebridClient: Sendable {
 
     struct Resolved: Sendable { let url: URL; let fileName: String? }
 
+    init(apiKey: String) {
+        self.apiKey = apiKey
+    }
+
     func resolve(magnet: String) async throws -> Resolved {
         let added: AddedTorrent = try await send(path: "torrents/addMagnet", method: "POST", form: ["magnet": magnet])
         _ = try await sendEmpty(path: "torrents/selectFiles/\(added.id)", method: "POST", form: ["files": "all"])
