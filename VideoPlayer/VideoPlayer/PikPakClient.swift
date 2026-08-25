@@ -831,15 +831,15 @@ final class PikPakClient {
         if let originalFileURL,
            let expectedFileID = pikPakFileID(in: originalFileURL) {
             let matchingMedia: [(metadata: [String: Any], url: URL)] = medias.compactMap { media in
-                guard let url = mediaLinkURL(media),
-                      pikPakFileID(in: url) == expectedFileID else { return nil }
+                guard let url = self.mediaLinkURL(media),
+                      self.pikPakFileID(in: url) == expectedFileID else { return nil }
                 return (media, url)
             }
             let selected = matchingMedia.first(where: {
-                (isOriginalMedia($0.metadata) || isOriginalPikPakURL($0.url))
+                (self.isOriginalMedia($0.metadata) || self.isOriginalPikPakURL($0.url))
                     && ($0.metadata["is_visible"] as? Bool) != false
             }) ?? matchingMedia.first(where: {
-                isOriginalMedia($0.metadata) || isOriginalPikPakURL($0.url)
+                self.isOriginalMedia($0.metadata) || self.isOriginalPikPakURL($0.url)
             }) ?? matchingMedia.first
             if let selected {
                 DiagnosticLogger.log("[PikPakStream] route=original-media-fid-match host=\(selected.url.host ?? "unknown")")
@@ -850,15 +850,15 @@ final class PikPakClient {
         // Prefer a visible original rendition next. `is_origin` is the actual
         // API field; older payloads may instead use is_original or a name/category.
         if let url = medias.lazy
-            .filter({ isOriginalMedia($0) && ($0["is_visible"] as? Bool) != false })
-            .compactMap({ mediaLinkURL($0) })
+            .filter({ self.isOriginalMedia($0) && ($0["is_visible"] as? Bool) != false })
+            .compactMap({ self.mediaLinkURL($0) })
             .first {
             DiagnosticLogger.log("[PikPakStream] route=visible-original-media host=\(url.host ?? "unknown")")
             return url
         }
         if let url = medias.lazy
-            .filter({ isOriginalMedia($0) })
-            .compactMap({ mediaLinkURL($0) })
+            .filter({ self.isOriginalMedia($0) })
+            .compactMap({ self.mediaLinkURL($0) })
             .first {
             DiagnosticLogger.log("[PikPakStream] route=original-media-fallback host=\(url.host ?? "unknown")")
             return url
@@ -879,7 +879,7 @@ final class PikPakClient {
            !web.isEmpty {
             return url
         }
-        if let url = medias.reversed().compactMap({ mediaLinkURL($0) }).first {
+        if let url = medias.reversed().compactMap({ self.mediaLinkURL($0) }).first {
             return url
         }
         // 3) links map (mime → { url })
