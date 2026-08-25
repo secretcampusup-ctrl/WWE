@@ -652,6 +652,18 @@ struct ContentView: View {
 
 // MARK: - Medium movie poster card
 
+private struct LibraryPosterPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.955 : 1)
+            .brightness(configuration.isPressed ? 0.07 : 0)
+            .animation(
+                .spring(response: 0.2, dampingFraction: 0.68),
+                value: configuration.isPressed
+            )
+    }
+}
+
 struct MoviePosterCard: View {
     let link: SavedVideoLink
     let width: CGFloat
@@ -666,9 +678,10 @@ struct MoviePosterCard: View {
     @State private var isChoosingThumbnail = false
     @State private var isSearchingForCover = false
     @State private var isSearchingThePornDB = false
+    @State private var isActivating = false
 
     var body: some View {
-        Button(action: onPlay) {
+        Button(action: activate) {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .topTrailing) {
                     PosterThumbnailView(
@@ -745,11 +758,19 @@ struct MoviePosterCard: View {
                 }
                 .frame(width: width, alignment: .leading)
             }
+            .scaleEffect(isActivating ? 0.97 : 1)
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(AppTheme.accent.opacity(isActivating ? 0.72 : 0), lineWidth: 1.5)
+                    .shadow(color: AppTheme.accent.opacity(isActivating ? 0.32 : 0), radius: 8)
+                    .allowsHitTesting(false)
+            }
+            .animation(.spring(response: 0.27, dampingFraction: 0.6), value: isActivating)
         }
         .frame(width: width, alignment: .leading)
         .contentShape(Rectangle())
         .clipped()
-        .buttonStyle(.plain)
+        .buttonStyle(LibraryPosterPressStyle())
         .contextMenu {
             Button { onPlay() } label: {
                 Label(link.hasResumePoint ? "Resume" : "Play", systemImage: "play.fill")
@@ -810,6 +831,23 @@ struct MoviePosterCard: View {
                     onSetThumbnail?(image)
                     selectedThumbnail = nil
                 }
+            }
+        }
+    }
+
+    private func activate() {
+        guard !isActivating else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.58)) {
+            isActivating = true
+        }
+
+        // Navigation begins on this same tap; artwork/metadata tasks never gate it.
+        onPlay()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            withAnimation(.easeOut(duration: 0.16)) {
+                isActivating = false
             }
         }
     }

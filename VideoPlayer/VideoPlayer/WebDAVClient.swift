@@ -109,6 +109,24 @@ final class WebDAVClient: NSObject {
         return URL(string: "\(scheme)://\(cleanHost(server.host))\(portPart)\(encodedPath)")
     }
 
+    /// Cloud-relative path used to match this DAV entry with the same file in
+    /// PikPak's native API. Preserve the real folder/file names while removing
+    /// only the configured WebDAV root.
+    func relativePathComponents(for file: WebDAVFile) -> [String] {
+        var path = normalizePath(file.path)
+        let prefix = serverPathPrefix()
+        if prefix != "/" {
+            if path == prefix {
+                path = "/"
+            } else if path.hasPrefix(prefix + "/") {
+                path = String(path.dropFirst(prefix.count))
+            }
+        }
+        return path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { String($0).removingPercentEncoding ?? String($0) }
+    }
+
     /// HTTP headers AVPlayer must send for authenticated WebDAV GET / Range requests.
     /// Resolves WebDAV redirects before playback so PikPak's signed CDN URL
     /// reaches AVPlayer/VLC directly. This also prevents Authorization headers

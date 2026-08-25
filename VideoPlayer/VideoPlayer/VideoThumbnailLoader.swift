@@ -400,12 +400,22 @@ enum VideoThumbnailLoader {
         cache.totalCostLimit = 8 * 1024 * 1024
         return cache
     }()
+    private static let heroMemoryCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 6
+        cache.totalCostLimit = 48 * 1_024 * 1_024
+        return cache
+    }()
     private static let diskTrimLock = NSLock()
     private static var lastDiskTrimDate = Date.distantPast
+    private static let heroDiskTrimLock = NSLock()
+    private static var lastHeroDiskTrimDate = Date.distantPast
+    private static let maximumHeroDiskCacheBytes: Int64 = 120 * 1_024 * 1_024
 
 
     static func clearMemoryCache() {
         memoryCache.removeAllObjects()
+        heroMemoryCache.removeAllObjects()
     }
     /// In-flight requests coordinator to prevent duplicate concurrent requests for the same URL
     private static let requestCoordinator = ThumbnailRequestCoordinator()
@@ -455,6 +465,20 @@ enum VideoThumbnailLoader {
 
     private static var cacheDirectory: URL { persistentCacheDirectory }
 
+    /// Hero artwork is deliberately separate from the general 300 MB poster
+    /// cache. Grid churn must not evict the image shown at app launch.
+    private static let persistentHeroCacheDirectory: URL = {
+        let fileManager = FileManager.default
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let directory = base.appendingPathComponent("PersistentArtwork/HeroArtworkV1", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(values)
+        return directory
+    }()
+
     /// Generate cache key with optional namespace (no sensitive data)
     private static func cacheKey(for remote: URL) -> String {
         let digest = SHA256.hash(data: Data(remote.absoluteString.utf8))
@@ -498,6 +522,12 @@ enum VideoThumbnailLoader {
         return cacheDirectory.appendingPathComponent("stable-\(name).webp")
     }
 
+    private static func heroCacheFileURL(for key: String) -> URL {
+        let digest = SHA256.hash(data: Data(key.utf8))
+        let name = digest.map { String(format: "%02x", $0) }.joined()
+        return persistentHeroCacheDirectory.appendingPathComponent("hero-\(name).webp")
+    }
+
     /// Get cached image using a stable key from memory or persistent disk cache.
     static func cachedImage(forStableKey key: String) -> UIImage? {
         if let image = memoryCache.object(forKey: key as NSString) { return image }
@@ -534,15 +564,17 @@ enum VideoThumbnailLoader {
     /// Hero fills almost the entire 3x iPhone viewport. Keep a dedicated
     /// 2048px copy so the regular 1200px details/grid cache is never enlarged.
     static func cacheHeroImage(_ image: UIImage, forStableKey key: String) {
-        setStableImageSuppressed(false, forKey: key)
-        storeStableImage(
-            image,
-            forKey: key,
-            maxSide: 2_048,
-            quality: 0.86,
+        let resized = resizeImage(image, maxSide: 2_048)
+        let pixelWidth = resized.cgImage?.width ?? Int(resized.size.width)
+        let pixelHeight = resized.cgImage?.height ?? Int(resized.size.height)
+        heroMemoryCache.setObject(resized, forKey: key as NSString, cost: pixelWidth * pixelHeight * 4)
+        guard let data = ThumbnailPipeline.webPData(
+            for: resized,
             maximumBytes: ThumbnailPipeline.heroMaximumBytes,
             preferredBytes: ThumbnailPipeline.heroMaximumBytes
-        )
+        ) else { return }
+        try? data.write(to: heroCacheFileURL(for: key), options: .atomic)
+        trimHeroDiskCacheIfNeeded()
     }
 
     /// Remove a selected/search cover and prevent automatic regeneration until a new cover is chosen.
@@ -616,6 +648,35 @@ enum VideoThumbnailLoader {
                 let pixelWidth = image.cgImage?.width ?? Int(image.size.width)
                 let pixelHeight = image.cgImage?.height ?? Int(image.size.height)
                 memoryCache.setObject(
+                    image,
+                    forKey: key as NSString,
+                    cost: pixelWidth * pixelHeight * 4
+                )
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    /// Reads a launch-critical Hero image from its persistent cache. The decode
+    /// happens off the UI thread and the result stays warm across tab switches.
+    static func cachedHeroImageAsync(forStableKey key: String) async -> UIImage? {
+        if let memoryImage = heroMemoryCache.object(forKey: key as NSString) { return memoryImage }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let fileURL = heroCacheFileURL(for: key)
+                guard let data = try? Data(contentsOf: fileURL),
+                      let encodedImage = UIImage(data: data) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let image = encodedImage.preparingForDisplay() ?? encodedImage
+                let pixelWidth = image.cgImage?.width ?? Int(image.size.width)
+                let pixelHeight = image.cgImage?.height ?? Int(image.size.height)
+                try? FileManager.default.setAttributes(
+                    [.modificationDate: Date()],
+                    ofItemAtPath: fileURL.path
+                )
+                heroMemoryCache.setObject(
                     image,
                     forKey: key as NSString,
                     cost: pixelWidth * pixelHeight * 4
@@ -1432,6 +1493,39 @@ enum VideoThumbnailLoader {
         let url = customDirectory.appendingPathComponent(fileName)
         guard let data = try? Data(contentsOf: url) else { return nil }
         return UIImage(data: data)
+    }
+
+    private static func trimHeroDiskCacheIfNeeded() {
+        let shouldTrim = heroDiskTrimLock.withLock { () -> Bool in
+            let now = Date()
+            guard now.timeIntervalSince(lastHeroDiskTrimDate) >= 30 else { return false }
+            lastHeroDiskTrimDate = now
+            return true
+        }
+        guard shouldTrim else { return }
+
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: persistentHeroCacheDirectory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        var cachedFiles: [(url: URL, size: Int64, date: Date)] = []
+        var totalBytes: Int64 = 0
+        for url in urls where url.pathExtension.lowercased() == "webp" {
+            guard let values = try? url.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else { continue }
+            let size = Int64(values.fileSize ?? 0)
+            totalBytes += size
+            cachedFiles.append((url, size, values.contentModificationDate ?? .distantPast))
+        }
+        guard totalBytes > maximumHeroDiskCacheBytes else { return }
+        for file in cachedFiles.sorted(by: { $0.date < $1.date }) {
+            try? FileManager.default.removeItem(at: file.url)
+            totalBytes -= file.size
+            if totalBytes <= maximumHeroDiskCacheBytes { break }
+        }
     }
 
     static func loadCustomPosterAsync(fileName: String) async -> UIImage? {

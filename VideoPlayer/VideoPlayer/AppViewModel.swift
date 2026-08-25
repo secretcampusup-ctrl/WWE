@@ -47,6 +47,20 @@ private actor SavedLinksPersistenceWriter {
     }
 }
 
+/// Playlist JSON can grow considerably with a large library. Encoding it and
+/// forcing UserDefaults to synchronize on the MainActor made the first tap feel
+/// ignored. Revisions keep this background writer ordered without blocking UI.
+private actor PlaylistsPersistenceWriter {
+    private var latestRevision = 0
+
+    func persist(_ playlists: [VideoPlaylist], key: String, revision: Int) {
+        guard revision > latestRevision else { return }
+        latestRevision = revision
+        guard let data = try? JSONEncoder().encode(playlists) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
 @MainActor
 class AppViewModel: ObservableObject {
     @Published var servers: [WebDAVServer] = []
@@ -92,6 +106,9 @@ class AppViewModel: ObservableObject {
     @Published var pikpakFiles: [PikPakFileItem] = []
     @Published var pikpakPath: [(id: String, name: String)] = []
     private var pikpakFilesCache: [String: [PikPakFileItem]] = [:]
+    private var pikpakNativeDirectoryCache: [String: [PikPakFileItem]] = [:]
+    private var pikpakWebDAVFileIDCache: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "pikpak_webdav_file_ids_v1") as? [String: String] ?? [:]
     @Published var pikpakStatus: String?
 
     private let serversKey = "saved_servers"
@@ -101,6 +118,8 @@ class AppViewModel: ObservableObject {
     private let playbackHistoryKey = "playback_history_v1"
     private let savedLinksPersistenceWriter = SavedLinksPersistenceWriter()
     private var savedLinksPersistenceRevision = 0
+    private let playlistsPersistenceWriter = PlaylistsPersistenceWriter()
+    private var playlistsPersistenceRevision = 0
     private var pendingHistoryItem: (id: String, title: String, source: String, posterCacheKey: String?)?
     private var pendingHistoryProgress: (position: Double, duration: Double)?
 
@@ -374,9 +393,13 @@ class AppViewModel: ObservableObject {
     }
 
     func persistPlaylistsImmediately() {
-        if let data = try? JSONEncoder().encode(playlists) {
-            UserDefaults.standard.set(data, forKey: playlistsKey)
-            UserDefaults.standard.synchronize()
+        playlistsPersistenceRevision += 1
+        let revision = playlistsPersistenceRevision
+        let snapshot = playlists
+        let key = playlistsKey
+        let writer = playlistsPersistenceWriter
+        Task(priority: .utility) {
+            await writer.persist(snapshot, key: key, revision: revision)
         }
     }
 
@@ -414,15 +437,23 @@ class AppViewModel: ObservableObject {
     }
 
     /// يضيف الفيديو لقائمة التشغيل أو يزيله منها، وينشئ مدخلاً بالمكتبة له تلقائياً إذا لم يكن محفوظاً
-    func togglePlaylistMembership(_ item: VideoDetailsItem, playlist: VideoPlaylist) {
-        guard let idx = playlists.firstIndex(where: { $0.id == playlist.id }) else { return }
+    @discardableResult
+    func togglePlaylistMembership(_ item: VideoDetailsItem, playlist: VideoPlaylist) -> Bool {
+        guard let idx = playlists.firstIndex(where: { $0.id == playlist.id }) else { return false }
         let link = resolvedLink(for: item)
+        let isIncluded: Bool
         if let pos = playlists[idx].linkIDs.firstIndex(of: link.id) {
             playlists[idx].linkIDs.remove(at: pos)
+            isIncluded = false
         } else {
             playlists[idx].linkIDs.insert(link.id, at: 0)
+            isIncluded = true
         }
+        // Publish the completed state before persistence begins so the checkmark
+        // changes on this same tap even inside a reused List row.
+        playlists = playlists
         persistPlaylistsImmediately()
+        return isIncluded
     }
 
     func removeLink(_ link: SavedVideoLink, from playlist: VideoPlaylist) {
@@ -485,6 +516,12 @@ class AppViewModel: ObservableObject {
             var existing = savedLinks.remove(at: idx)
             existing.lastPlayed = Date()
             if let resolvedStream { existing.resolvedStreamURL = resolvedStream.absoluteString }
+            if let pikpakFileId, !pikpakFileId.isEmpty {
+                existing.pikpakFileId = pikpakFileId
+                existing.source = .pikpak
+            } else if existing.source == .direct, resolvedSource != .direct {
+                existing.source = resolvedSource
+            }
             if existing.title.isEmpty { existing.title = display }
             if let poster { existing.remotePosterURL = poster }
             if let fileSizeBytes, fileSizeBytes > 0 { existing.fileSizeBytes = fileSizeBytes }
@@ -700,10 +737,44 @@ class AppViewModel: ObservableObject {
             errorMessage = "No playable URL for this item"
             return
         }
-        if let host = url.host?.lowercased(),
+
+        // Existing library/hero entries may still carry an expired PikPak CDN
+        // URL in `resolvedStreamURL`. Identify their DAV server from the stable
+        // original URL, then upgrade them to a native PikPak file reference.
+        let providerURL = link.originalURL ?? url
+        if let host = providerURL.host?.lowercased(),
            let server = servers.first(where: { $0.baseURL?.host?.lowercased() == host }) {
+            let webDAVFile = WebDAVFile(
+                name: link.title,
+                path: providerURL.path,
+                isDirectory: false,
+                size: link.fileSizeBytes,
+                contentType: nil
+            )
+            if isPikPakDAVServer(server), pikpakAccount != nil {
+                let client = WebDAVClient(server: server)
+                do {
+                    if let native = try await nativePikPakPlayback(for: webDAVFile, client: client) {
+                        if let index = savedLinks.firstIndex(where: { $0.id == link.id }) {
+                            savedLinks[index].source = .pikpak
+                            savedLinks[index].pikpakFileId = native.file.id
+                            savedLinks[index].resolvedStreamURL = native.stream.absoluteString
+                            persistSavedLinksImmediately()
+                        }
+                        startPlayback(
+                            url: native.stream,
+                            title: link.title,
+                            linkId: link.id,
+                            headers: PikPakClient.shared.directPlaybackHeaders()
+                        )
+                        return
+                    }
+                } catch {
+                    DiagnosticLogger.log("[PlaybackRoute] saved-entry webdav-fallback reason=\(error.localizedDescription)")
+                }
+            }
             startPlayback(
-                url: url,
+                url: providerURL,
                 title: link.title,
                 linkId: link.id,
                 headers: WebDAVClient(server: server).streamHeaders()
@@ -1152,6 +1223,36 @@ class AppViewModel: ObservableObject {
         nowPlayingURL = nil
         nowPlayingHeaders = nil
 
+        // When the same PikPak account is connected natively, translate the DAV
+        // path to its stable file ID and request a fresh original CDN URL. This
+        // makes Media playback use the same fast route as a pasted direct link.
+        if isPikPakDAVServer(server), pikpakAccount != nil {
+            do {
+                if let native = try await nativePikPakPlayback(for: file, client: client) {
+                    DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-native file=\(file.name)")
+                    let saved = saveDirectLink(
+                        url.absoluteString,
+                        resolvedStream: native.stream,
+                        source: .pikpak,
+                        title: file.name,
+                        pikpakFileId: native.file.id,
+                        poster: native.file.thumbnailLink,
+                        fileSizeBytes: file.size ?? native.file.size
+                    )
+                    startPlayback(
+                        url: native.stream,
+                        title: file.name,
+                        linkId: saved?.id,
+                        headers: PikPakClient.shared.directPlaybackHeaders()
+                    )
+                    return nowPlayingURL != nil
+                }
+                DiagnosticLogger.log("[PlaybackRoute] provider=webdav-fallback reason=no-native-match file=\(file.name)")
+            } catch {
+                DiagnosticLogger.log("[PlaybackRoute] provider=webdav-fallback reason=\(error.localizedDescription) file=\(file.name)")
+            }
+        }
+
         let saved = saveDirectLink(
             url.absoluteString,
             resolvedStream: url,
@@ -1166,6 +1267,127 @@ class AppViewModel: ObservableObject {
             headers: client.streamHeaders()
         )
         return nowPlayingURL != nil
+    }
+
+    private func isPikPakDAVServer(_ server: WebDAVServer) -> Bool {
+        let host = (server.baseURL?.host ?? server.host).lowercased()
+        return host == "dav.mypikpak.com" || host.hasSuffix(".mypikpak.com")
+    }
+
+    private func nativePikPakPlayback(
+        for webDAVFile: WebDAVFile,
+        client: WebDAVClient
+    ) async throws -> (file: PikPakFileItem, stream: URL)? {
+        guard let file = try await nativePikPakFile(for: webDAVFile, client: client) else {
+            return nil
+        }
+        do {
+            return (file, try await PikPakClient.shared.streamURL(forFileId: file.id))
+        } catch {
+            // A cached file ID may become stale after a move/re-upload. Remove it,
+            // rebuild the folder path once, and still complete this same tap.
+            invalidateNativePikPakFileCache(for: webDAVFile, client: client)
+            pikpakNativeDirectoryCache.removeAll()
+            guard let refreshed = try await nativePikPakFile(for: webDAVFile, client: client) else {
+                throw error
+            }
+            return (refreshed, try await PikPakClient.shared.streamURL(forFileId: refreshed.id))
+        }
+    }
+
+    private func nativePikPakFile(
+        for webDAVFile: WebDAVFile,
+        client: WebDAVClient
+    ) async throws -> PikPakFileItem? {
+        let cacheKey = nativePikPakCacheKey(for: webDAVFile, client: client)
+        if let cachedID = pikpakWebDAVFileIDCache[cacheKey] {
+            return PikPakFileItem(
+                id: cachedID,
+                name: webDAVFile.name,
+                kind: "drive#file",
+                size: webDAVFile.size ?? 0,
+                mimeType: webDAVFile.contentType,
+                parentId: nil,
+                thumbnailLink: nil,
+                webContentLink: nil,
+                phase: nil
+            )
+        }
+
+        let rawComponents = client.relativePathComponents(for: webDAVFile)
+        guard !rawComponents.isEmpty else { return nil }
+        var children = try await nativePikPakChildren(parentID: "")
+
+        // Some DAV servers prefix hrefs with `dav`/`webdav`. Begin at the first
+        // component that actually exists in the connected PikPak drive root.
+        guard let start = rawComponents.firstIndex(where: { component in
+            children.contains { namesMatch($0.name, component) }
+        }) else { return nil }
+
+        let components = Array(rawComponents[start...])
+        for (offset, component) in components.enumerated() {
+            let isLast = offset == components.count - 1
+            let matches = children.filter {
+                namesMatch($0.name, component) && (isLast ? !$0.isFolder : $0.isFolder)
+            }
+            guard !matches.isEmpty else { return nil }
+
+            if isLast {
+                cacheNativePikPakSiblings(children, webDAVComponents: rawComponents)
+                let resolved = matches.first(where: {
+                    guard let expectedSize = webDAVFile.size, expectedSize > 0 else { return false }
+                    return $0.size == expectedSize
+                }) ?? matches[0]
+                pikpakWebDAVFileIDCache[cacheKey] = resolved.id
+                persistNativePikPakFileIDCache()
+                return resolved
+            }
+
+            children = try await nativePikPakChildren(parentID: matches[0].id)
+        }
+        return nil
+    }
+
+    private func nativePikPakChildren(parentID: String) async throws -> [PikPakFileItem] {
+        if let cached = pikpakNativeDirectoryCache[parentID] { return cached }
+        let files = try await PikPakClient.shared.listFiles(parentId: parentID)
+        pikpakNativeDirectoryCache[parentID] = files
+        return files
+    }
+
+    private func namesMatch(_ lhs: String, _ rhs: String) -> Bool {
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive, .widthInsensitive]
+        return lhs.precomposedStringWithCanonicalMapping
+            .compare(rhs.precomposedStringWithCanonicalMapping, options: options) == .orderedSame
+    }
+
+    private func nativePikPakCacheKey(for file: WebDAVFile, client: WebDAVClient) -> String {
+        let account = pikpakAccount?.userId ?? pikpakAccount?.displayName ?? "pikpak"
+        let path = client.relativePathComponents(for: file).joined(separator: "/")
+        return "\(account)|\(path)|\(file.size ?? 0)"
+    }
+
+    private func cacheNativePikPakSiblings(
+        _ children: [PikPakFileItem],
+        webDAVComponents: [String]
+    ) {
+        guard !webDAVComponents.isEmpty else { return }
+        let account = pikpakAccount?.userId ?? pikpakAccount?.displayName ?? "pikpak"
+        let directory = webDAVComponents.dropLast()
+        for child in children where !child.isFolder {
+            let path = (Array(directory) + [child.name]).joined(separator: "/")
+            pikpakWebDAVFileIDCache["\(account)|\(path)|\(child.size)"] = child.id
+        }
+        persistNativePikPakFileIDCache()
+    }
+
+    private func invalidateNativePikPakFileCache(for file: WebDAVFile, client: WebDAVClient) {
+        pikpakWebDAVFileIDCache.removeValue(forKey: nativePikPakCacheKey(for: file, client: client))
+        persistNativePikPakFileIDCache()
+    }
+
+    private func persistNativePikPakFileIDCache() {
+        UserDefaults.standard.set(pikpakWebDAVFileIDCache, forKey: "pikpak_webdav_file_ids_v1")
     }
 
     /// Compatibility entry point for callers that do not present a player.
@@ -1322,6 +1544,7 @@ class AppViewModel: ObservableObject {
         do {
             let acc = try await PikPakClient.shared.login(email: email, password: password, captchaToken: captchaToken)
             pikpakAccount = acc
+            pikpakNativeDirectoryCache.removeAll()
             try await refreshPikPakFiles()
             return nil
         } catch {
@@ -1334,6 +1557,7 @@ class AppViewModel: ObservableObject {
         do {
             let acc = try await PikPakClient.shared.loginWithPersonalAccessToken(token, label: label)
             pikpakAccount = acc
+            pikpakNativeDirectoryCache.removeAll()
             try await refreshPikPakFiles()
             return nil
         } catch {
@@ -1346,6 +1570,9 @@ class AppViewModel: ObservableObject {
         pikpakFiles = []
         pikpakPath = []
         pikpakFilesCache.removeAll()
+        pikpakNativeDirectoryCache.removeAll()
+        pikpakWebDAVFileIDCache.removeAll()
+        UserDefaults.standard.removeObject(forKey: "pikpak_webdav_file_ids_v1")
     }
 
     func refreshPikPakFiles(parentId: String? = nil, force: Bool = false) async throws {

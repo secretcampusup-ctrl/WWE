@@ -210,17 +210,16 @@ struct VideoDetailsView: View {
                                     icon: "text.badge.plus",
                                     color: .purple
                                 ) {
-                                    showPlaylistPicker = true
+                                    openPlaylistPickerWithFeedback()
                                 }
 
                                 actionButton(
                                     title: vm.isFavorite(item) ? "Favorited" : "Favorite",
                                     icon: vm.isFavorite(item) ? "star.fill" : "star",
-                                    color: .yellow
+                                    color: .yellow,
+                                    isSelected: vm.isFavorite(item)
                                 ) {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        _ = vm.toggleFavorite(item)
-                                    }
+                                    toggleFavoriteWithFeedback()
                                 }
 
                                 actionButton(
@@ -607,7 +606,7 @@ struct VideoDetailsView: View {
                 Spacer()
                 Menu {
                     Button(action: startDownload) { Label("Download", systemImage: "arrow.down.circle") }
-                    Button { showPlaylistPicker = true } label: { Label("Add to Playlist", systemImage: "text.badge.plus") }
+                    Button { openPlaylistPickerWithFeedback() } label: { Label("Add to Playlist", systemImage: "text.badge.plus") }
                     if onDelete != nil {
                         Button(role: .destructive) { showDeleteConfirmation = true } label: { Label("Delete", systemImage: "trash") }
                     }
@@ -755,9 +754,14 @@ struct VideoDetailsView: View {
         HStack {
             movieActionButton(icon: "arrow.down.circle", action: startDownload)
             Spacer()
-            movieActionButton(icon: vm.isFavorite(item) ? "heart.fill" : "heart") { _ = vm.toggleFavorite(item) }
+            movieActionButton(
+                icon: vm.isFavorite(item) ? "heart.fill" : "heart",
+                tint: .pink,
+                isSelected: vm.isFavorite(item),
+                action: toggleFavoriteWithFeedback
+            )
             Spacer()
-            movieActionButton(icon: "text.badge.plus") { showPlaylistPicker = true }
+            movieActionButton(icon: "text.badge.plus") { openPlaylistPickerWithFeedback() }
             Spacer()
             movieActionButton(icon: "flag") {
                 if onDelete != nil { showDeleteConfirmation = true }
@@ -767,14 +771,29 @@ struct VideoDetailsView: View {
         .padding(.horizontal, 22)
     }
 
-    private func movieActionButton(icon: String, action: @escaping () -> Void) -> some View {
+    private func movieActionButton(
+        icon: String,
+        tint: Color = .white,
+        isSelected: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(width: 42, height: 36)
+            ZStack {
+                Circle()
+                    .fill(isSelected ? tint.opacity(0.18) : Color.white.opacity(0.001))
+                    .frame(width: 44, height: 44)
+                Image(systemName: icon)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(isSelected ? tint : .white.opacity(0.9))
+                    .scaleEffect(isSelected ? 1.12 : 1)
+                    .id(icon)
+                    .transition(.scale(scale: 0.55).combined(with: .opacity))
+            }
+            .frame(width: 52, height: 48)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DetailsQuickActionPressStyle())
+        .animation(.spring(response: 0.3, dampingFraction: 0.58), value: isSelected)
     }
 
     private func movieTopButton(icon: String, action: @escaping () -> Void) -> some View {
@@ -1492,6 +1511,7 @@ struct VideoDetailsView: View {
         icon: String,
         color: Color,
         isBusy: Bool = false,
+        isSelected: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -1504,6 +1524,7 @@ struct VideoDetailsView: View {
                     Image(systemName: icon)
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(color)
+                        .scaleEffect(isSelected ? 1.13 : 1)
                         .frame(height: 22)
                 }
                 Text(title)
@@ -1513,14 +1534,30 @@ struct VideoDetailsView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 13)
-            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(
+                isSelected ? color.opacity(0.14) : AppTheme.card,
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(Color.white.opacity(0.06), lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DetailsCardActionPressStyle())
         .disabled(isBusy)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isSelected)
+    }
+
+    private func toggleFavoriteWithFeedback() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.58)) {
+            _ = vm.toggleFavorite(item)
+        }
+    }
+
+    private func openPlaylistPickerWithFeedback() {
+        UISelectionFeedbackGenerator().selectionChanged()
+        showPlaylistPicker = true
     }
 
     private func playAndClose() {
@@ -1635,6 +1672,42 @@ struct VideoDetailsView: View {
 }
 
 // MARK: - إضافة الفيديو لقائمة تشغيل
+
+private struct DetailsQuickActionPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.86 : 1)
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .animation(
+                .spring(response: 0.22, dampingFraction: 0.62),
+                value: configuration.isPressed
+            )
+    }
+}
+
+private struct DetailsCardActionPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .brightness(configuration.isPressed ? 0.08 : 0)
+            .animation(
+                .spring(response: 0.22, dampingFraction: 0.68),
+                value: configuration.isPressed
+            )
+    }
+}
+
+private struct PlaylistRowPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .opacity(configuration.isPressed ? 0.78 : 1)
+            .animation(
+                .spring(response: 0.2, dampingFraction: 0.72),
+                value: configuration.isPressed
+            )
+    }
+}
 
 private final class DetailsScrollMotionModel: ObservableObject {
     @Published var offset: CGFloat = 0
@@ -2050,6 +2123,7 @@ struct PlaylistPickerView: View {
 
     @State private var isCreatingNew = false
     @State private var newPlaylistName = ""
+    @State private var optimisticMembership: [UUID: Bool] = [:]
     @FocusState private var nameFieldFocused: Bool
 
     var body: some View {
@@ -2072,6 +2146,7 @@ struct PlaylistPickerView: View {
                         .listRowBackground(AppTheme.card)
                     } else {
                         Button {
+                            UISelectionFeedbackGenerator().selectionChanged()
                             isCreatingNew = true
                             nameFieldFocused = true
                         } label: {
@@ -2086,10 +2161,9 @@ struct PlaylistPickerView: View {
                 if !vm.playlists.isEmpty {
                     Section("Your Playlists") {
                         ForEach(vm.playlists) { playlist in
+                            let included = displayedMembership(for: playlist)
                             Button {
-                                withAnimation(.easeInOut(duration: 0.15)) {
-                                    vm.togglePlaylistMembership(item, playlist: playlist)
-                                }
+                                toggleMembership(for: playlist)
                             } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: "text.badge.plus")
@@ -2108,12 +2182,28 @@ struct PlaylistPickerView: View {
 
                                     Spacer()
 
-                                    Image(systemName: vm.isInPlaylist(item, playlist: playlist) ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 20))
-                                        .foregroundColor(vm.isInPlaylist(item, playlist: playlist) ? AppTheme.accent : .white.opacity(0.25))
+                                    ZStack {
+                                        if included {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundColor(AppTheme.accent)
+                                                .transition(.scale(scale: 0.45).combined(with: .opacity))
+                                        } else {
+                                            Image(systemName: "circle")
+                                                .foregroundColor(.white.opacity(0.25))
+                                                .transition(.scale(scale: 0.75).combined(with: .opacity))
+                                        }
+                                    }
+                                    .font(.system(size: 20, weight: .semibold))
+                                    .frame(width: 24, height: 24)
+                                    .animation(
+                                        .spring(response: 0.28, dampingFraction: 0.56),
+                                        value: included
+                                    )
                                 }
+                                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PlaylistRowPressStyle())
                             .listRowBackground(AppTheme.card)
                         }
                     }
@@ -2135,11 +2225,35 @@ struct PlaylistPickerView: View {
     private func createAndAdd() {
         let name = newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let playlist = vm.createPlaylist(name: name)
-        vm.togglePlaylistMembership(item, playlist: playlist)
+        let result = vm.togglePlaylistMembership(item, playlist: playlist)
+        optimisticMembership[playlist.id] = result
         newPlaylistName = ""
         isCreatingNew = false
         nameFieldFocused = false
+    }
+
+    private func displayedMembership(for playlist: VideoPlaylist) -> Bool {
+        optimisticMembership[playlist.id] ?? vm.isInPlaylist(item, playlist: playlist)
+    }
+
+    private func toggleMembership(for playlist: VideoPlaylist) {
+        let target = !displayedMembership(for: playlist)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        // Update the checkmark in the same frame as the tap. Persistence and any
+        // large JSON encoding continue independently in the background.
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.56)) {
+            optimisticMembership[playlist.id] = target
+        }
+
+        let actual = vm.togglePlaylistMembership(item, playlist: playlist)
+        if actual != target {
+            withAnimation(.easeOut(duration: 0.15)) {
+                optimisticMembership[playlist.id] = actual
+            }
+        }
     }
 }
 

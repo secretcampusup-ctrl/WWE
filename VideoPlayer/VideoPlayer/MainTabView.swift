@@ -426,7 +426,11 @@ struct HomeLibraryView: View {
     @ViewBuilder
     private var heroSection: some View {
         if featuredItems.isEmpty {
-            Color.clear.frame(height: 96)
+            // Keep the final Hero geometry while the persisted catalogue is
+            // restored. The old 96pt placeholder exposed the list background as
+            // a black horizontal band, then pushed everything down once artwork
+            // arrived.
+            AppTheme.bg.frame(height: 610)
         } else {
             let pageWidth = UIScreen.main.bounds.width
             ZStack(alignment: .top) {
@@ -1032,6 +1036,7 @@ struct HomeLibraryView: View {
     @MainActor
     private func rebuildDerivedData() async {
         let items = allItems
+        let unknownIDs = Set(catalog.unknown.map(\.id))
         let playbackHistory = vm.playbackHistory
         let historiesByPosterKey = Dictionary(
             grouping: playbackHistory.values.compactMap { history in
@@ -1063,7 +1068,11 @@ struct HomeLibraryView: View {
         for (index, entry) in items.enumerated() {
             if let history = resolvedHistory(for: entry) {
                 watched.append((entry, history.watchedAt))
-                if history.hasResumePoint { resumed.append(HomeMediaItem(entry: entry, history: history)) }
+                // Others keeps its local playback position for reopening inside
+                // the section, but it must never appear in Home Resume Playback.
+                if history.hasResumePoint, !unknownIDs.contains(entry.id) {
+                    resumed.append(HomeMediaItem(entry: entry, history: history))
+                }
             } else {
                 unwatched.append(entry)
             }
@@ -1095,7 +1104,7 @@ struct HomeLibraryView: View {
 
         derivedData = HomeLibraryDerivedData(
             showIDs: Set(catalog.shows.map(\.id)),
-            unknownIDs: Set(catalog.unknown.map(\.id)),
+            unknownIDs: unknownIDs,
             featured: buildFeaturedItems(from: items),
             resume: Array(resumed.sorted {
                 ($0.history?.watchedAt ?? .distantPast) > ($1.history?.watchedAt ?? .distantPast)
@@ -1411,9 +1420,13 @@ private struct PersistentHeroArtwork: View {
     @State private var image: UIImage?
     @State private var didCheckStableCache = false
 
-    // v2 invalidates Hero files that older builds populated from the tiny grid
-    // poster. Including the source also refreshes a manually changed match.
+    // The TMDB artwork URL is the real image identity. Entry IDs include provider
+    // paths/server UUIDs and may change even though the poster did not, which made
+    // an already-downloaded Hero image look new after a library refresh.
     private var cacheKey: String {
+        "unified-hero-nolang-original-v3|\(remoteURL?.absoluteString ?? entry.id)"
+    }
+    private var legacyCacheKey: String {
         "unified-hero-nolang-original-v2|\(entry.id)|\(remoteURL?.absoluteString ?? "local")"
     }
     private var remoteURL: URL? {
@@ -1467,8 +1480,13 @@ private struct PersistentHeroArtwork: View {
             }
             didCheckStableCache = false
             image = nil
-            if let primary = await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey) {
+            if let primary = await VideoThumbnailLoader.cachedHeroImageAsync(forStableKey: cacheKey) {
                 image = primary
+            } else if let legacy = await VideoThumbnailLoader.cachedImageAsync(forStableKey: legacyCacheKey) {
+                // One-time migration: reuse the already downloaded v2 image and
+                // move it into the dedicated persistent Hero cache.
+                image = legacy
+                VideoThumbnailLoader.cacheHeroImageInBackground(legacy, forStableKey: cacheKey)
             }
             didCheckStableCache = true
         }

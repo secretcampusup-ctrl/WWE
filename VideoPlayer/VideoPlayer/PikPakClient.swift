@@ -558,17 +558,37 @@ final class PikPakClient {
     func listFiles(parentId: String = "") async throws -> [PikPakFileItem] {
         let account = try await ensureValidToken()
         let parent = parentId.isEmpty ? "*" : parentId
-        var components = URLComponents(string: "\(driveBase)/drive/v1/files")!
-        components.queryItems = [
-            URLQueryItem(name: "parent_id", value: parent),
-            URLQueryItem(name: "thumbnail_size", value: "SIZE_MEDIUM"),
-            URLQueryItem(name: "with_audit", value: "true"),
-            URLQueryItem(name: "limit", value: "200"),
-            URLQueryItem(name: "filters", value: "{\"trashed\":{\"eq\":false}}")
-        ]
-        let json = try await getJSON(url: components.url!.absoluteString, token: account.accessToken)
-        guard let files = json["files"] as? [[String: Any]] else { return [] }
-        return files.compactMap { mapFile($0) }
+        var pageToken = ""
+        var seenPageTokens = Set<String>()
+        var seenFileIDs = Set<String>()
+        var result: [PikPakFileItem] = []
+
+        repeat {
+            var components = URLComponents(string: "\(driveBase)/drive/v1/files")!
+            var queryItems = [
+                URLQueryItem(name: "parent_id", value: parent),
+                URLQueryItem(name: "thumbnail_size", value: "SIZE_MEDIUM"),
+                URLQueryItem(name: "with_audit", value: "true"),
+                URLQueryItem(name: "limit", value: "200"),
+                URLQueryItem(name: "filters", value: "{\"trashed\":{\"eq\":false}}")
+            ]
+            if !pageToken.isEmpty {
+                queryItems.append(URLQueryItem(name: "page_token", value: pageToken))
+            }
+            components.queryItems = queryItems
+
+            let json = try await getJSON(url: components.url!.absoluteString, token: account.accessToken)
+            let page = (json["files"] as? [[String: Any]] ?? []).compactMap { mapFile($0) }
+            for file in page where seenFileIDs.insert(file.id).inserted {
+                result.append(file)
+            }
+
+            let next = (json["next_page_token"] as? String) ?? ""
+            guard !next.isEmpty, seenPageTokens.insert(next).inserted else { break }
+            pageToken = next
+        } while result.count < 10_000
+
+        return result
     }
 
     func getFile(id: String) async throws -> (item: PikPakFileItem, streamURL: URL?) {
@@ -584,7 +604,7 @@ final class PikPakClient {
         return (item, stream)
     }
 
-    /// Best playable URL for a cloud file (playable media variant first, original download as fallback).
+    /// Fresh original-quality URL for a cloud file, with a playable variant fallback.
     func streamURL(forFileId id: String) async throws -> URL {
         let (_, url) = try await getFile(id: id)
         guard let url else { throw PikPakError.noStreamURL }
@@ -769,11 +789,10 @@ final class PikPakClient {
     }
 
     private func extractStreamURL(from dict: [String: Any]) -> URL? {
-        // `medias[].link.url` is the playback endpoint returned for this file.
-        // `web_content_link` can be an authenticated download endpoint and is
-        // not accepted by every iOS playback stack.
+        // Prefer the original-quality media. Picking the final variant blindly
+        // can return a smaller transcoded preview even when the source exists.
         if let medias = dict["medias"] as? [[String: Any]], !medias.isEmpty {
-            for media in medias.reversed() {
+            for media in medias where isOriginalMedia(media) {
                 if let link = media["link"] as? [String: Any],
                    let u = link["url"] as? String,
                    let url = URL(string: u), !u.isEmpty {
@@ -785,6 +804,15 @@ final class PikPakClient {
            let url = URL(string: web),
            !web.isEmpty {
             return url
+        }
+        if let medias = dict["medias"] as? [[String: Any]], !medias.isEmpty {
+            for media in medias.reversed() {
+                if let link = media["link"] as? [String: Any],
+                   let u = link["url"] as? String,
+                   let url = URL(string: u), !u.isEmpty {
+                    return url
+                }
+            }
         }
         // 3) links map (mime → { url })
         if let links = dict["links"] as? [String: Any] {
@@ -813,6 +841,27 @@ final class PikPakClient {
             return url
         }
         return nil
+    }
+
+    private func isOriginalMedia(_ media: [String: Any]) -> Bool {
+        if (media["is_original"] as? Bool) == true { return true }
+        for key in ["media_name", "name", "category", "type"] {
+            if let value = media[key] as? String,
+               value.lowercased().contains("original") {
+                return true
+            }
+        }
+        if let link = media["link"] as? [String: Any],
+           let rawURL = link["url"] as? String,
+           let components = URLComponents(string: rawURL),
+           components.queryItems?.contains(where: {
+               guard $0.name.caseInsensitiveCompare("category") == .orderedSame,
+                     let value = $0.value else { return false }
+               return value.caseInsensitiveCompare("original") == .orderedSame
+           }) == true {
+            return true
+        }
+        return false
     }
 
     // MARK: - HTTP
