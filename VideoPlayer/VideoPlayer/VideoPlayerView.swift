@@ -384,6 +384,12 @@ struct VideoPlayerView: View {
         .onAppear {
             didTearDownPlayback = false
             didResetNetworkAfterPlayback = false
+            if LinkResolver.isPikPakDirectDownload(url.absoluteString) {
+                let titleExtension = (title as NSString).pathExtension.lowercased()
+                DiagnosticLogger.log(
+                    "[PikPakPlayback] engine=\(usesMKVPlayer ? "VLC" : "AVPlayer") titleExtension=\(titleExtension.isEmpty ? "none" : titleExtension) host=\(url.host ?? "unknown")"
+                )
+            }
             screenBrightness = Double(UIScreen.main.brightness)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Defensive reset: guarantees a clean VR state for this video even

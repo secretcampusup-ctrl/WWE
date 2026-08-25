@@ -820,21 +820,55 @@ final class PikPakClient {
     }
 
     private func extractStreamURL(from dict: [String: Any]) -> URL? {
-        // Prefer the original-quality media. Picking the final variant blindly
-        // can return a smaller transcoded preview even when the source exists.
-        if let medias = dict["medias"] as? [[String: Any]], !medias.isEmpty {
-            for media in medias where isOriginalMedia(media) {
-                if let link = media["link"] as? [String: Any],
-                   let u = link["url"] as? String,
-                   let url = URL(string: u), !u.isEmpty {
-                    return url
-                }
+        let medias = dict["medias"] as? [[String: Any]] ?? []
+        let originalFileURL = applicationOctetStreamURL(in: dict)
+
+        // Match rclone/PikPak's fast path: begin with the stable original-file
+        // link, read its fid, then select the media URL carrying that same fid.
+        // Media URLs allow less restrictive concurrent Range requests; choosing
+        // merely the first item labelled "Original" can select a stale/hidden
+        // rendition belonging to another backend object.
+        if let originalFileURL,
+           let expectedFileID = pikPakFileID(in: originalFileURL) {
+            let matchingMedia: [(metadata: [String: Any], url: URL)] = medias.compactMap { media in
+                guard let url = mediaLinkURL(media),
+                      pikPakFileID(in: url) == expectedFileID else { return nil }
+                return (media, url)
+            }
+            let selected = matchingMedia.first(where: {
+                (isOriginalMedia($0.metadata) || isOriginalPikPakURL($0.url))
+                    && ($0.metadata["is_visible"] as? Bool) != false
+            }) ?? matchingMedia.first(where: {
+                isOriginalMedia($0.metadata) || isOriginalPikPakURL($0.url)
+            }) ?? matchingMedia.first
+            if let selected {
+                DiagnosticLogger.log("[PikPakStream] route=original-media-fid-match host=\(selected.url.host ?? "unknown")")
+                return selected.url
             }
         }
-        // PikPak's official client ultimately plays the signed original
-        // download URL. Prefer that explicit field over `web_content_link`:
-        // the latter can point at a Web/preview route whose throughput is much
-        // lower even though both URLs represent the same cloud file.
+
+        // Prefer a visible original rendition next. `is_origin` is the actual
+        // API field; older payloads may instead use is_original or a name/category.
+        if let url = medias.lazy
+            .filter({ isOriginalMedia($0) && ($0["is_visible"] as? Bool) != false })
+            .compactMap({ mediaLinkURL($0) })
+            .first {
+            DiagnosticLogger.log("[PikPakStream] route=visible-original-media host=\(url.host ?? "unknown")")
+            return url
+        }
+        if let url = medias.lazy
+            .filter({ isOriginalMedia($0) })
+            .compactMap({ mediaLinkURL($0) })
+            .first {
+            DiagnosticLogger.log("[PikPakStream] route=original-media-fallback host=\(url.host ?? "unknown")")
+            return url
+        }
+
+        // If PikPak supplied no matching media route, use its original-file URL.
+        if let originalFileURL {
+            DiagnosticLogger.log("[PikPakStream] route=octet-stream host=\(originalFileURL.host ?? "unknown")")
+            return originalFileURL
+        }
         if let download = dict["download_url"] as? String,
            let url = URL(string: download),
            !download.isEmpty {
@@ -845,14 +879,8 @@ final class PikPakClient {
            !web.isEmpty {
             return url
         }
-        if let medias = dict["medias"] as? [[String: Any]], !medias.isEmpty {
-            for media in medias.reversed() {
-                if let link = media["link"] as? [String: Any],
-                   let u = link["url"] as? String,
-                   let url = URL(string: u), !u.isEmpty {
-                    return url
-                }
-            }
+        if let url = medias.reversed().compactMap({ mediaLinkURL($0) }).first {
+            return url
         }
         // 3) links map (mime → { url })
         if let links = dict["links"] as? [String: Any] {
@@ -880,8 +908,42 @@ final class PikPakClient {
         return nil
     }
 
+    private func applicationOctetStreamURL(in dict: [String: Any]) -> URL? {
+        guard let links = dict["links"] as? [String: Any] else { return nil }
+        let entry = links.first { element in
+            element.key.caseInsensitiveCompare("application/octet-stream") == .orderedSame
+        }?.value as? [String: Any]
+        guard let raw = entry?["url"] as? String, !raw.isEmpty else { return nil }
+        return URL(string: raw)
+    }
+
+    private func mediaLinkURL(_ media: [String: Any]) -> URL? {
+        guard (media["need_more_quota"] as? Bool) != true,
+              let link = media["link"] as? [String: Any],
+              let raw = link["url"] as? String,
+              !raw.isEmpty else { return nil }
+        return URL(string: raw)
+    }
+
+    private func pikPakFileID(in url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { $0.name.caseInsensitiveCompare("fid") == .orderedSame })?
+            .value
+    }
+
+    private func isOriginalPikPakURL(_ url: URL) -> Bool {
+        guard let category = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name.caseInsensitiveCompare("category") == .orderedSame })?
+            .value?
+            .lowercased() else { return false }
+        return category.contains("original") || category.contains("origin")
+    }
+
     private func isOriginalMedia(_ media: [String: Any]) -> Bool {
-        if (media["is_original"] as? Bool) == true { return true }
+        if (media["is_origin"] as? Bool) == true || (media["is_original"] as? Bool) == true {
+            return true
+        }
         for key in ["media_name", "name", "category", "type"] {
             if let value = media[key] as? String,
                value.lowercased().contains("original") {
