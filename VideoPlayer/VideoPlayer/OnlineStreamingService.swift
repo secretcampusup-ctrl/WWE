@@ -159,6 +159,167 @@ enum OnlineSourceSearchError: LocalizedError {
     }
 }
 
+/// Performs a lightweight swarm preflight in an isolated native session.
+/// A result is considered usable only after libtorrent receives its metadata
+/// and confirms that the torrent actually contains a streamable media file.
+/// No movie pieces are requested and this session never touches playback.
+actor TorrentAvailabilityChecker {
+    static let shared = TorrentAvailabilityChecker()
+
+    private struct CachedResult {
+        let isAvailable: Bool
+        let checkedAt: Date
+    }
+
+    private struct Probe {
+        let source: OnlineTorrentSource
+        let torrentID: lt_torrent_id
+    }
+
+    private var cache: [String: CachedResult] = [:]
+    private let healthyTTL: TimeInterval = 15 * 60
+    private let failedTTL: TimeInterval = 3 * 60
+    private let pollCount = 20
+    private let pollDelayNanoseconds: UInt64 = 500_000_000
+
+    func verifiedIDs(
+        for sources: [OnlineTorrentSource],
+        stopAfterOnePerQuality: Bool = true
+    ) async throws -> Set<String> {
+        guard !sources.isEmpty else { return [] }
+
+        let now = Date()
+        var verified = Set<String>()
+        var pending: [OnlineTorrentSource] = []
+        for source in sources {
+            let key = cacheKey(for: source)
+            if let cached = cache[key] {
+                let ttl = cached.isAvailable ? healthyTTL : failedTTL
+                if now.timeIntervalSince(cached.checkedAt) < ttl {
+                    if cached.isAvailable { verified.insert(source.id) }
+                    continue
+                }
+            }
+            pending.append(source)
+        }
+        if stopAfterOnePerQuality, !verified.isEmpty {
+            let cachedQualities = Set(
+                sources
+                    .filter { verified.contains($0.id) }
+                    .map(\.quality)
+            )
+            pending.removeAll { cachedQualities.contains($0.quality) }
+        }
+        guard !pending.isEmpty else { return verified }
+
+        let createdSession = "".withCString { lt_create_session($0, 0, 0) }
+        guard let session = createdSession else {
+            throw OnlinePlaybackResolutionError.torrentEngine(
+                "Could not initialize the torrent availability checker."
+            )
+        }
+
+        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TorrentPreflight", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+
+        var probes: [Probe] = []
+        defer {
+            for probe in probes {
+                lt_remove_torrent(session, probe.torrentID, 1)
+            }
+            lt_destroy_session(session)
+            try? FileManager.default.removeItem(at: cacheDirectory)
+        }
+
+        for source in pending {
+            try Task.checkCancellation()
+            let torrentID = source.magnet.withCString { magnetPointer in
+                cacheDirectory.path.withCString { pathPointer in
+                    lt_add_magnet(session, magnetPointer, pathPointer, 1)
+                }
+            }
+            if torrentID >= 0 {
+                probes.append(Probe(source: source, torrentID: torrentID))
+            } else {
+                cache[cacheKey(for: source)] = CachedResult(isAvailable: false, checkedAt: now)
+            }
+        }
+
+        var unresolved = Set(probes.map(\.source.id))
+        let requestedQualities = Set(probes.map(\.source.quality))
+
+        for _ in 0..<pollCount {
+            try Task.checkCancellation()
+
+            for probe in probes where unresolved.contains(probe.source.id) {
+                var status = lt_torrent_status()
+                guard lt_get_status(session, probe.torrentID, &status) != 0 else { continue }
+
+                if status.state == -2 {
+                    unresolved.remove(probe.source.id)
+                    cache[cacheKey(for: probe.source)] = CachedResult(isAvailable: false, checkedAt: Date())
+                    continue
+                }
+
+                if status.has_metadata != 0 {
+                    let available = containsStreamableFile(session: session, torrentID: probe.torrentID)
+                    unresolved.remove(probe.source.id)
+                    cache[cacheKey(for: probe.source)] = CachedResult(isAvailable: available, checkedAt: Date())
+                    if available { verified.insert(probe.source.id) }
+                }
+            }
+
+            let verifiedQualities = Set(
+                probes
+                    .filter { verified.contains($0.source.id) }
+                    .map(\.source.quality)
+            )
+            if stopAfterOnePerQuality, verifiedQualities == requestedQualities {
+                // Remaining probes are merely backups for qualities that have
+                // already passed. Do not cache them as failures.
+                unresolved.removeAll()
+                break
+            }
+            if unresolved.isEmpty { break }
+            try await Task.sleep(nanoseconds: pollDelayNanoseconds)
+        }
+
+        for id in unresolved {
+            guard let source = probes.first(where: { $0.source.id == id })?.source else { continue }
+            cache[cacheKey(for: source)] = CachedResult(isAvailable: false, checkedAt: Date())
+        }
+        return verified
+    }
+
+    private func cacheKey(for source: OnlineTorrentSource) -> String {
+        let hash = URLComponents(string: source.magnet)?.queryItems?
+            .first(where: { $0.name.caseInsensitiveCompare("xt") == .orderedSame })?
+            .value?
+            .replacingOccurrences(of: "urn:btih:", with: "", options: .caseInsensitive)
+            .lowercased()
+        if let hash, !hash.isEmpty { return hash }
+        return source.id
+    }
+
+    private func containsStreamableFile(
+        session: lt_session_t,
+        torrentID: lt_torrent_id
+    ) -> Bool {
+        let fileCount = lt_get_file_count(session, torrentID)
+        guard fileCount > 0 else { return false }
+        var files = Array(repeating: lt_file_info(), count: Int(fileCount))
+        let loadedCount = files.withUnsafeMutableBufferPointer { buffer in
+            lt_get_files(session, torrentID, buffer.baseAddress, fileCount)
+        }
+        guard loadedCount > 0 else { return false }
+        return files.prefix(Int(loadedCount)).contains {
+            $0.is_streamable != 0 && $0.size > 0
+        }
+    }
+}
+
 actor OnlineSourceSearchService {
     static let shared = OnlineSourceSearchService()
     private let minimumVisibleSize: Int64 = 400 * 1_024 * 1_024
@@ -171,26 +332,52 @@ actor OnlineSourceSearchService {
         } else {
             raw = try await searchPirateBay(context)
         }
-        return bestPerQuality(raw)
+        let eligible = eligibleSources(raw)
+        let candidates = verificationCandidates(eligible)
+        guard !candidates.isEmpty else { return [] }
+
+        let verifiedIDs = try await TorrentAvailabilityChecker.shared.verifiedIDs(for: candidates)
+        let verified = eligible.filter { verifiedIDs.contains($0.id) }
+        guard !verified.isEmpty else {
+            throw OnlineSourceSearchError.provider(
+                "Torrent results were found, but none passed the live availability check."
+            )
+        }
+        return bestPerQuality(verified)
     }
 
-    private func bestPerQuality(_ values: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
-        let eligible = values.filter { source in
+    private func eligibleSources(_ values: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
+        values.filter { source in
             source.sizeBytes == 0 || source.sizeBytes >= minimumVisibleSize
         }
+    }
+
+    private func verificationCandidates(_ eligible: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
+        OnlineStreamQuality.allCases.flatMap { quality in
+            rankedSources(for: quality, in: eligible).prefix(2)
+        }
+    }
+
+    private func bestPerQuality(_ eligible: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
         return OnlineStreamQuality.allCases.compactMap { quality in
-            let qualitySources = eligible.filter { $0.quality == quality }
-            let exactEpisodes = qualitySources.filter {
-                $0.requestsSpecificEpisode && $0.matchesRequestedEpisode(fileName: $0.name)
-            }
-            let candidates = exactEpisodes.isEmpty ? qualitySources : exactEpisodes
-            return candidates
-                .max {
-                    if $0.seeders != $1.seeders { return $0.seeders < $1.seeders }
-                    if $0.sizeBytes == 0 { return true }
-                    if $1.sizeBytes == 0 { return false }
-                    return $0.sizeBytes > $1.sizeBytes
-                }
+            rankedSources(for: quality, in: eligible).first
+        }
+    }
+
+    private func rankedSources(
+        for quality: OnlineStreamQuality,
+        in eligible: [OnlineTorrentSource]
+    ) -> [OnlineTorrentSource] {
+        let qualitySources = eligible.filter { $0.quality == quality }
+        let exactEpisodes = qualitySources.filter {
+            $0.requestsSpecificEpisode && $0.matchesRequestedEpisode(fileName: $0.name)
+        }
+        let candidates = exactEpisodes.isEmpty ? qualitySources : exactEpisodes
+        return candidates.sorted {
+            if $0.seeders != $1.seeders { return $0.seeders > $1.seeders }
+            if $0.sizeBytes == 0 { return false }
+            if $1.sizeBytes == 0 { return true }
+            return $0.sizeBytes < $1.sizeBytes
         }
     }
 

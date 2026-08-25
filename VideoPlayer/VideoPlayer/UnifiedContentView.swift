@@ -1865,22 +1865,25 @@ private struct ExperimentalOnlineSourcesView: View {
                     if isSearching {
                         VStack(spacing: 13) {
                             ProgressView().tint(AppPalette.purple)
-                            Text(OrionCredentialStore.isReady ? "Searching Orion by IMDb ID…" : "Searching The Pirate Bay…")
+                            Text(OrionCredentialStore.isReady
+                                 ? "Searching Orion and checking torrent health…"
+                                 : "Searching The Pirate Bay and checking torrent health…")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 55)
                     } else if sources.isEmpty {
                         statusCard(
                             title: "No matching sources",
-                            subtitle: message ?? "No 720p, 1080p, 1440p, or 4K source was found.",
+                            subtitle: message ?? "No verified 720p, 1080p, 1440p, or 4K torrent was found.",
                             icon: "magnifyingglass",
                             tint: .orange
                         )
                     } else {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("ONE BEST LINK PER QUALITY")
+                            Text("VERIFIED · ONE BEST LINK PER QUALITY")
                                 .font(.caption.bold())
                                 .tracking(0.8)
                                 .foregroundStyle(.secondary)
@@ -1974,11 +1977,11 @@ private struct ExperimentalOnlineSourcesView: View {
                         .foregroundStyle(.white)
                         .lineLimit(2)
                     HStack(spacing: 7) {
+                        Label("Verified", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(.green)
                         Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
                         Text("·")
                         Text(source.sizeLabel)
-                        Text("·")
-                        Text(source.origin.rawValue)
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2021,6 +2024,7 @@ private struct ExperimentalOnlineSourcesView: View {
             return
         }
         isSearching = true
+        sources = []
         message = nil
         var imdbID = entry.details?.imdbID
         if imdbID?.isEmpty != false {

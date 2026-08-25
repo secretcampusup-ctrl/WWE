@@ -2685,6 +2685,7 @@ private enum PirateBaySort: String, CaseIterable, Identifiable {
 private enum PirateBayQuality: String, CaseIterable, Identifiable {
     case fullHD = "1080p", ultraHD = "2160p"
     var id: String { rawValue }
+    var onlineQuality: OnlineStreamQuality { self == .fullHD ? .p1080 : .p2160 }
     func category(for section: PirateBaySection) -> Int {
         switch (section, self) {
         case (.movies, .fullHD): return 207
@@ -2701,12 +2702,14 @@ private enum PirateBayQuality: String, CaseIterable, Identifiable {
 private final class PirateBayLatestModel: ObservableObject {
     @Published var items: [PirateBayResult] = []
     @Published var isLoading = false
+    @Published var loadingMessage = "Loading torrents…"
     @Published var error: String?
     private var requestID = UUID()
+    private let healthCheckCandidateLimit = 12
 
     func load(section: PirateBaySection, quality: PirateBayQuality, query rawQuery: String = "") async {
         let currentID = UUID(); requestID = currentID
-        isLoading = true; error = nil
+        isLoading = true; loadingMessage = "Loading torrents…"; error = nil; items = []
         defer { if requestID == currentID { isLoading = false } }
         let category = quality.category(for: section)
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2727,11 +2730,49 @@ private final class PirateBayLatestModel: ObservableObject {
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw URLError(.badServerResponse) }
             let decoded = try JSONDecoder().decode([PirateBayResult].self, from: data)
             guard requestID == currentID else { return }
-            items = decoded.filter { $0.id != "0" && !$0.infoHash.isEmpty }.sorted { $0.addedDate > $1.addedDate }
-            if items.isEmpty { error = "No results found" }
+
+            let candidates = decoded
+                .filter { $0.id != "0" && !$0.infoHash.isEmpty && $0.seedCount > 0 }
+                .sorted {
+                    if query.isEmpty { return $0.addedDate > $1.addedDate }
+                    if $0.seedCount != $1.seedCount { return $0.seedCount > $1.seedCount }
+                    return $0.addedDate > $1.addedDate
+                }
+                .prefix(healthCheckCandidateLimit)
+            let candidateItems = Array(candidates)
+            guard !candidateItems.isEmpty else {
+                items = []
+                error = "No torrents with active seeders were found"
+                return
+            }
+
+            loadingMessage = "Checking torrent health…"
+            let verificationSources = candidateItems.map { item in
+                OnlineTorrentSource(
+                    id: "discover|\(item.infoHash.lowercased())",
+                    name: item.name,
+                    magnet: item.magnet,
+                    quality: quality.onlineQuality,
+                    seeders: item.seedCount,
+                    sizeBytes: item.byteCount,
+                    origin: .pirateBay
+                )
+            }
+            let verifiedIDs = try await TorrentAvailabilityChecker.shared.verifiedIDs(
+                for: verificationSources,
+                stopAfterOnePerQuality: false
+            )
+            guard requestID == currentID else { return }
+            items = candidateItems.filter {
+                verifiedIDs.contains("discover|\($0.infoHash.lowercased())")
+            }
+            if items.isEmpty { error = "No working torrents passed the live check" }
         } catch {
             guard requestID == currentID else { return }
-            items = []; self.error = "Could not load this category"
+            items = []
+            self.error = error.localizedDescription.isEmpty
+                ? "Could not load this category"
+                : error.localizedDescription
         }
     }
 }
@@ -2842,11 +2883,19 @@ private struct PirateBayView: View {
     }
 
     @ViewBuilder private var statusArea: some View {
-        if model.isLoading { ProgressView().tint(section.tint).padding(.top, 35) }
+        if model.isLoading {
+            VStack(spacing: 10) {
+                ProgressView().tint(section.tint)
+                Text(model.loadingMessage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 35)
+        }
         else if let error = model.error { Text(error).foregroundStyle(.secondary).padding(.top, 35) }
         else {
             HStack {
-                Text("LATEST \(section.rawValue.uppercased()) · \(quality.rawValue)").font(.caption.bold()).tracking(0.8).foregroundStyle(.secondary)
+                Text("VERIFIED \(section.rawValue.uppercased()) · \(quality.rawValue)").font(.caption.bold()).tracking(0.8).foregroundStyle(.secondary)
                 Spacer()
                 Menu { Picker("Sort", selection: $sort) { ForEach(PirateBaySort.allCases) { option in Label(option.rawValue, systemImage: option.icon).tag(option) } } }
                 label: { Label(sort.rawValue, systemImage: sort.icon).font(.caption.bold()).foregroundStyle(.white).padding(.horizontal, 11).padding(.vertical, 7).background(Color.white.opacity(0.09), in: Capsule()) }
@@ -2861,6 +2910,7 @@ private struct PirateBayView: View {
             VStack(alignment: .leading, spacing: 11) {
                 HStack(alignment: .top) { Text(item.name).font(.headline).foregroundStyle(.white).lineLimit(3); Spacer(minLength: 8); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 4) }
                 HStack(spacing: 12) {
+                    Label("Verified", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
                     Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green)
                     Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange)
                     Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary)
