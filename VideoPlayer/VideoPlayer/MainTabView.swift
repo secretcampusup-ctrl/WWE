@@ -448,6 +448,42 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
     }
 }
 
+private struct HomeSearchRadialRevealModifier: AnimatableModifier {
+    var progress: CGFloat
+    let topInset: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content.mask {
+            GeometryReader { proxy in
+                let diagonal = (
+                    proxy.size.width * proxy.size.width
+                        + proxy.size.height * proxy.size.height
+                ).squareRoot()
+                let diameter = max(1, diagonal * 2.25 * progress)
+                Circle()
+                    .frame(width: diameter, height: diameter)
+                    // The search control sits immediately left of the 40pt
+                    // refresh control (16pt edge inset + 8pt spacing).
+                    .position(x: proxy.size.width - 84, y: topInset + 32)
+            }
+        }
+    }
+}
+
+private extension AnyTransition {
+    static func homeSearchRadialReveal(topInset: CGFloat) -> AnyTransition {
+        .modifier(
+            active: HomeSearchRadialRevealModifier(progress: 0, topInset: topInset),
+            identity: HomeSearchRadialRevealModifier(progress: 1, topInset: topInset)
+        )
+    }
+}
+
 struct HomeLibraryView: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var catalog: UnifiedContentModel
@@ -462,8 +498,10 @@ struct HomeLibraryView: View {
     @State private var showFavorites = false
     @State private var showRefreshOverlay = false
     @State private var isHomeSearchExpanded = false
+    @State private var isHomeSearchContentVisible = false
     @State private var homeSearchText = ""
     @State private var homeSearchResults: [UnifiedMediaEntry] = []
+    @State private var homeSearchFilter: HomeSearchFilter = .all
     @State private var isHomeSearching = false
     @State private var homeSearchMessage: String?
     @State private var homeSearchTask: Task<Void, Never>?
@@ -479,7 +517,6 @@ struct HomeLibraryView: View {
     @State private var derivedData = HomeLibraryDerivedData()
     @State private var derivedRebuildTask: Task<Void, Never>?
     @FocusState private var isHomeSearchFocused: Bool
-    @Namespace private var homeSearchAnimation
 
     // Check the wall-clock slot periodically. The featured set itself only
     // changes when a new two-hour window begins.
@@ -489,6 +526,14 @@ struct HomeLibraryView: View {
     private let posterWidth: CGFloat = 112
     private let posterHeight: CGFloat = 168
     private static let sourceISO8601Formatter = ISO8601DateFormatter()
+
+    private enum HomeSearchFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case movies = "Movies"
+        case shows = "TV Shows"
+
+        var id: String { rawValue }
+    }
 
     init(vm: AppViewModel, catalog: UnifiedContentModel, isActive: Bool) {
         self.vm = vm
@@ -594,8 +639,7 @@ struct HomeLibraryView: View {
 
                 if isHomeSearchExpanded {
                     homeSearchResultsOverlay
-                        .padding(.top, 64)
-                        .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
+                        .transition(.homeSearchRadialReveal(topInset: homeTopSafeAreaInset))
                         .zIndex(14)
                 }
 
@@ -627,7 +671,13 @@ struct HomeLibraryView: View {
             .onChange(of: heroRotationSlot) { _ in scheduleDerivedDataRebuild() }
             .onChange(of: homeSearchText) { query in scheduleHomeSearch(query) }
             .onChange(of: isActive) { active in
-                if !active { isHomeSearchFocused = false }
+                if !active {
+                    if isHomeSearchExpanded {
+                        closeHomeSearch()
+                    } else {
+                        isHomeSearchFocused = false
+                    }
+                }
             }
             .onReceive(heroSlideTimer) { _ in
                 guard isActive, !isHomeSearchExpanded,
@@ -707,46 +757,7 @@ struct HomeLibraryView: View {
     private var homeHeader: some View {
         HStack(spacing: 8) {
             Spacer(minLength: 0)
-            if isHomeSearchExpanded {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(AppPalette.accent)
-
-                    TextField("Search movies & TV shows", text: $homeSearchText)
-                        .textInputAutocapitalization(.words)
-                        .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .focused($isHomeSearchFocused)
-                        .foregroundStyle(.white)
-                        .font(.system(size: 14, weight: .semibold))
-                        .onSubmit {
-                            scheduleHomeSearch(homeSearchText, debounceNanoseconds: 0)
-                        }
-
-                    Button {
-                        if homeSearchText.isEmpty {
-                            closeHomeSearch()
-                        } else {
-                            homeSearchText = ""
-                        }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.62))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 13)
-                .frame(height: 40)
-                .background {
-                    Capsule().fill(.ultraThinMaterial)
-                    Capsule().fill(Color.black.opacity(0.18))
-                }
-                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 0.8))
-                .shadow(color: .black.opacity(0.28), radius: 9, y: 4)
-                .matchedGeometryEffect(id: "home-search-control", in: homeSearchAnimation)
-            } else {
+            if !isHomeSearchExpanded {
                 Button(action: openHomeSearch) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 18, weight: .semibold))
@@ -756,89 +767,237 @@ struct HomeLibraryView: View {
                         .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 0.8))
                         .shadow(color: .black.opacity(0.28), radius: 9, y: 4)
                 }
-                .buttonStyle(.plain)
-                .matchedGeometryEffect(id: "home-search-control", in: homeSearchAnimation)
+                .buttonStyle(PremiumPressButtonStyle())
                 .accessibilityLabel("Search")
-            }
-            homeHeaderButton("arrow.clockwise") {
-                Task { await refreshLibrary() }
+                homeHeaderButton("arrow.clockwise") {
+                    Task { await refreshLibrary() }
+                }
             }
         }
         .padding(.horizontal, 16)
         .frame(width: UIScreen.main.bounds.width)
+        .animation(.easeOut(duration: 0.16), value: isHomeSearchExpanded)
     }
 
     private var homeSearchResultsOverlay: some View {
-        ZStack(alignment: .top) {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .opacity(0.88)
-            Color.black.opacity(0.48)
+        ZStack {
+            Color(red: 0.035, green: 0.035, blue: 0.052)
+            RadialGradient(
+                colors: [AppPalette.accent.opacity(0.27), Color.clear],
+                center: .topTrailing,
+                startRadius: 4,
+                endRadius: 260
+            )
 
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .bottom) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(homeSearchText.trimmingCharacters(in: .whitespacesAndNewlines).count < 2
-                             ? "Search the catalogue"
-                             : "Search Results")
-                            .font(.title3.bold())
+                        Text("DISCOVER")
+                            .font(.system(size: 10, weight: .black))
+                            .tracking(1.8)
+                            .foregroundStyle(Color(red: 0.64, green: 0.58, blue: 1))
+                        Text("Search")
+                            .font(.system(size: 30, weight: .black, design: .rounded))
+                            .tracking(-1.1)
                             .foregroundStyle(.white)
-                        if !homeSearchResults.isEmpty {
-                            Text("\(homeSearchResults.count) movies and TV shows")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                     }
-                    Spacer()
+                    Spacer(minLength: 12)
+                    Button(action: closeHomeSearch) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.86))
+                            .frame(width: 39, height: 39)
+                            .background(Color.white.opacity(0.075), in: Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 0.8))
+                    }
+                    .buttonStyle(PremiumPressButtonStyle())
+                    .accessibilityLabel("Close Search")
+                }
+                .padding(.bottom, 15)
+                .opacity(isHomeSearchContentVisible ? 1 : 0)
+                .offset(y: isHomeSearchContentVisible ? 0 : -14)
+                .animation(.easeOut(duration: 0.34).delay(0.08), value: isHomeSearchContentVisible)
+
+                HStack(spacing: 11) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+
+                    TextField("Movie, show or actor", text: $homeSearchText)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                        .focused($isHomeSearchFocused)
+                        .foregroundStyle(.white)
+                        .font(.system(size: 15, weight: .semibold))
+                        .onSubmit { scheduleHomeSearch(homeSearchText, debounceNanoseconds: 0) }
+
                     if isHomeSearching {
                         ProgressView()
+                            .controlSize(.small)
                             .tint(AppPalette.accent)
-                    }
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 16)
-
-                if homeSearchText.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
-                    homeSearchEmptyState(
-                        icon: "magnifyingglass.circle.fill",
-                        title: "Find anything to watch",
-                        subtitle: "Type at least two characters to search movies and TV shows."
-                    )
-                } else if isHomeSearching && homeSearchResults.isEmpty {
-                    homeSearchEmptyState(
-                        icon: "magnifyingglass",
-                        title: "Searching…",
-                        subtitle: "Looking through movies and TV shows."
-                    )
-                } else if homeSearchResults.isEmpty {
-                    homeSearchEmptyState(
-                        icon: "film.stack",
-                        title: homeSearchMessage ?? "No results found",
-                        subtitle: homeSearchMessage == nil
-                            ? "Try another title or check the spelling."
-                            : "Please try again in a moment."
-                    )
-                } else {
-                    ScrollView {
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 100, maximum: 124), spacing: 13)],
-                            alignment: .leading,
-                            spacing: 18
-                        ) {
-                            ForEach(homeSearchResults) { entry in
-                                homeSearchResultCard(entry)
-                            }
+                    } else if !homeSearchText.isEmpty {
+                        Button {
+                            homeSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.48))
                         }
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 125)
+                        .buttonStyle(.plain)
                     }
-                    .scrollIndicators(.hidden)
-                    .scrollDismissesKeyboard(.interactively)
                 }
+                .padding(.horizontal, 15)
+                .frame(height: 57)
+                .background {
+                    RoundedRectangle(cornerRadius: 19, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 19, style: .continuous)
+                        .fill(Color.white.opacity(0.035))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 19, style: .continuous)
+                        .stroke(
+                            isHomeSearchFocused ? AppPalette.accent.opacity(0.62) : Color.white.opacity(0.15),
+                            lineWidth: isHomeSearchFocused ? 1.1 : 0.8
+                        )
+                }
+                .shadow(color: .black.opacity(0.34), radius: 24, y: 12)
+                .scaleEffect(isHomeSearchContentVisible ? 1 : 0.86, anchor: .topTrailing)
+                .opacity(isHomeSearchContentVisible ? 1 : 0)
+                .animation(
+                    .spring(response: 0.54, dampingFraction: 0.78).delay(0.04),
+                    value: isHomeSearchContentVisible
+                )
+
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(HomeSearchFilter.allCases) { filter in
+                            Button {
+                                UISelectionFeedbackGenerator().selectionChanged()
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    homeSearchFilter = filter
+                                }
+                            } label: {
+                                Text(filter.rawValue)
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(homeSearchFilter == filter ? .white : .white.opacity(0.55))
+                                    .padding(.horizontal, 14)
+                                    .frame(height: 34)
+                                    .background {
+                                        if homeSearchFilter == filter {
+                                            Capsule()
+                                                .fill(AppPalette.gradient)
+                                                .opacity(0.42)
+                                        } else {
+                                            Capsule().fill(Color.white.opacity(0.055))
+                                        }
+                                    }
+                                    .overlay {
+                                        Capsule().stroke(
+                                            homeSearchFilter == filter
+                                                ? AppPalette.accent.opacity(0.54)
+                                                : Color.white.opacity(0.09),
+                                            lineWidth: 0.8
+                                        )
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .padding(.vertical, 13)
+                .opacity(isHomeSearchContentVisible ? 1 : 0)
+                .offset(y: isHomeSearchContentVisible ? 0 : 8)
+                .animation(.easeOut(duration: 0.32).delay(0.16), value: isHomeSearchContentVisible)
+
+                HStack {
+                    Text(searchResultHeading)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    if !visibleHomeSearchResults.isEmpty {
+                        Text(
+                            visibleHomeSearchResults.count == 1
+                                ? "1 result"
+                                : "\(visibleHomeSearchResults.count) results"
+                        )
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.46))
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.bottom, 10)
+                .opacity(isHomeSearchContentVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.3).delay(0.23), value: isHomeSearchContentVisible)
+
+                Group {
+                    if homeSearchText.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
+                        homeSearchEmptyState(
+                            icon: "magnifyingglass.circle.fill",
+                            title: "Find your next story",
+                            subtitle: "Search movies, TV shows, or an actor."
+                        )
+                    } else if isHomeSearching && homeSearchResults.isEmpty {
+                        homeSearchEmptyState(
+                            icon: "magnifyingglass",
+                            title: "Searching…",
+                            subtitle: "Looking through movies and TV shows."
+                        )
+                    } else if visibleHomeSearchResults.isEmpty {
+                        homeSearchEmptyState(
+                            icon: "film.stack",
+                            title: homeSearchMessage ?? "No results found",
+                            subtitle: homeSearchMessage == nil
+                                ? "Try another title or choose a different filter."
+                                : "Please try again in a moment."
+                        )
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 10) {
+                                ForEach(Array(visibleHomeSearchResults.enumerated()), id: \.element.id) { index, entry in
+                                    homeSearchResultRow(entry)
+                                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                        .animation(
+                                            .spring(response: 0.5, dampingFraction: 0.82)
+                                                .delay(min(Double(index) * 0.055, 0.33)),
+                                            value: visibleHomeSearchResults.map(\.id)
+                                        )
+                                }
+                            }
+                            .padding(.bottom, 120)
+                        }
+                        .scrollIndicators(.hidden)
+                        .scrollDismissesKeyboard(.interactively)
+                    }
+                }
+                .opacity(isHomeSearchContentVisible ? 1 : 0)
+                .offset(y: isHomeSearchContentVisible ? 0 : 22)
+                .animation(.easeOut(duration: 0.38).delay(0.28), value: isHomeSearchContentVisible)
             }
+            .padding(.horizontal, 18)
+            .padding(.top, homeTopSafeAreaInset + 13)
         }
+        .ignoresSafeArea()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
+    }
+
+    private var visibleHomeSearchResults: [UnifiedMediaEntry] {
+        switch homeSearchFilter {
+        case .all:
+            return homeSearchResults
+        case .movies:
+            return homeSearchResults.filter { section(for: $0) == .movies }
+        case .shows:
+            return homeSearchResults.filter { section(for: $0) == .shows }
+        }
+    }
+
+    private var searchResultHeading: String {
+        let query = homeSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.count < 2 ? "Start typing to search" : "Top matches"
     }
 
     private func homeSearchEmptyState(icon: String, title: String, subtitle: String) -> some View {
@@ -859,59 +1018,101 @@ struct HomeLibraryView: View {
         .offset(y: -42)
     }
 
-    private func homeSearchResultCard(_ entry: UnifiedMediaEntry) -> some View {
+    private func homeSearchResultRow(_ entry: UnifiedMediaEntry) -> some View {
         Button {
             isHomeSearchFocused = false
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             selectedEntry = entry
         } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                ZStack(alignment: .bottomTrailing) {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .fill(AppTheme.card)
+            HStack(spacing: 13) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(AppTheme.cardElevated)
                     UnifiedPosterArtwork(entry: entry, section: section(for: entry))
-                        .frame(maxWidth: .infinity)
-                        .aspectRatio(2 / 3, contentMode: .fill)
+                        .frame(width: 77, height: 103)
                         .clipped()
+                }
+                .frame(width: 77, height: 103)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.11), lineWidth: 0.8)
+                }
+                .shadow(color: .black.opacity(0.28), radius: 9, y: 5)
 
-                    if let rating = ratingLabel(entry) {
-                        Text(rating)
-                            .font(.system(size: 9, weight: .black, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 4)
-                            .background(Color.black.opacity(0.78), in: Capsule())
-                            .padding(7)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(section(for: entry) == .shows ? "TV SERIES" : "MOVIE")
+                        .font(.system(size: 9, weight: .black))
+                        .tracking(1.1)
+                        .foregroundStyle(Color(red: 0.66, green: 0.59, blue: 1))
+
+                    Text(entry.title)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+
+                    Text(searchResultMetadata(entry))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .lineLimit(1)
+
+                    if let overview = entry.details?.overview, !overview.isEmpty {
+                        Text(overview)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.42))
+                            .lineLimit(2)
+                            .lineSpacing(1)
                     }
                 }
-                .aspectRatio(2 / 3, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 0.8)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(entry.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(subtitle(entry))
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.48))
-                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.06), in: Circle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(9)
+            .frame(maxWidth: .infinity, minHeight: 121, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.white.opacity(0.018))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.white.opacity(0.085), lineWidth: 0.8)
+            }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PremiumPressButtonStyle())
+    }
+
+    private func searchResultMetadata(_ entry: UnifiedMediaEntry) -> String {
+        var values: [String] = []
+        if let rating = ratingLabel(entry) { values.append("★ \(rating)") }
+        let year = releaseYear(entry)
+        if year != "—" { values.append(year) }
+        if entry.details?.isSeries == true || !entry.episodes.isEmpty {
+            values.append(subtitle(entry))
+        } else if let runtime = entry.details?.runtimeMinutes, runtime > 0 {
+            values.append("\(runtime / 60)h \(runtime % 60)m")
+        }
+        return values.joined(separator: "  •  ")
     }
 
     private func openHomeSearch() {
         UISelectionFeedbackGenerator().selectionChanged()
-        withAnimation(.spring(response: 0.44, dampingFraction: 0.78)) {
+        withAnimation(.timingCurve(0.64, 0, 0.22, 1, duration: 0.72)) {
             isHomeSearchExpanded = true
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            guard isHomeSearchExpanded else { return }
+            withAnimation(.spring(response: 0.52, dampingFraction: 0.8)) {
+                isHomeSearchContentVisible = true
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
             if isHomeSearchExpanded { isHomeSearchFocused = true }
         }
         scheduleHomeSearch(homeSearchText)
@@ -921,13 +1122,22 @@ struct HomeLibraryView: View {
         homeSearchTask?.cancel()
         homeSearchRevision &+= 1
         isHomeSearchFocused = false
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
-            isHomeSearchExpanded = false
+        withAnimation(.easeOut(duration: 0.15)) {
+            isHomeSearchContentVisible = false
         }
-        homeSearchText = ""
-        homeSearchResults = []
-        homeSearchMessage = nil
-        isHomeSearching = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            withAnimation(.timingCurve(0.64, 0, 0.22, 1, duration: 0.58)) {
+                isHomeSearchExpanded = false
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.58) {
+            guard !isHomeSearchExpanded else { return }
+            homeSearchText = ""
+            homeSearchResults = []
+            homeSearchMessage = nil
+            homeSearchFilter = .all
+            isHomeSearching = false
+        }
     }
 
     private func scheduleHomeSearch(
@@ -947,6 +1157,7 @@ struct HomeLibraryView: View {
 
         isHomeSearching = true
         homeSearchMessage = nil
+        homeSearchResults = []
         homeSearchTask = Task { @MainActor in
             do {
                 if debounceNanoseconds > 0 {
