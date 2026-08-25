@@ -10,6 +10,21 @@ Pod::Spec.new do |s|
     :commit => '9a666923fcac04583e9a0abdacaeef9dc6ab6423'
   }
 
+  # The upstream XCFramework calls its archive `liblibtorrent_flutter.a`.
+  # CocoaPods normalizes the XCFramework product to `-ltorrent_flutter`, which
+  # searches for `libtorrent_flutter.a`; leaving the upstream double `lib`
+  # prefix therefore makes the final application link fail. Normalize both
+  # device/simulator archives and the XCFramework manifest after download.
+  s.prepare_command = <<-'CMD'
+    set -e
+    for archive in ios/libtorrent_flutter.xcframework/*/liblibtorrent_flutter.a; do
+      [ -f "$archive" ] || continue
+      mv "$archive" "$(dirname "$archive")/libtorrent_flutter.a"
+    done
+    /usr/bin/sed -i.bak 's/liblibtorrent_flutter\.a/libtorrent_flutter.a/g' ios/libtorrent_flutter.xcframework/Info.plist
+    rm -f ios/libtorrent_flutter.xcframework/Info.plist.bak
+  CMD
+
   s.platform = :ios, '16.0'
   s.static_framework = true
   s.vendored_frameworks = 'ios/libtorrent_flutter.xcframework'
@@ -18,7 +33,7 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
-    'OTHER_LDFLAGS[sdk=iphoneos*]' => '-force_load "$(PODS_TARGET_SRCROOT)/ios/libtorrent_flutter.xcframework/ios-arm64/liblibtorrent_flutter.a"',
-    'OTHER_LDFLAGS[sdk=iphonesimulator*]' => '-force_load "$(PODS_TARGET_SRCROOT)/ios/libtorrent_flutter.xcframework/ios-arm64_x86_64-simulator/liblibtorrent_flutter.a"'
+    'OTHER_LDFLAGS[sdk=iphoneos*]' => '-force_load "$(PODS_TARGET_SRCROOT)/ios/libtorrent_flutter.xcframework/ios-arm64/libtorrent_flutter.a"',
+    'OTHER_LDFLAGS[sdk=iphonesimulator*]' => '-force_load "$(PODS_TARGET_SRCROOT)/ios/libtorrent_flutter.xcframework/ios-arm64_x86_64-simulator/libtorrent_flutter.a"'
   }
 end
