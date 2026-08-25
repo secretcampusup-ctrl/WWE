@@ -41,6 +41,30 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
     let seeders: Int
     let sizeBytes: Int64
     let origin: Origin
+    let requestedSeason: Int?
+    let requestedEpisode: Int?
+
+    init(
+        id: String,
+        name: String,
+        magnet: String,
+        quality: OnlineStreamQuality,
+        seeders: Int,
+        sizeBytes: Int64,
+        origin: Origin,
+        requestedSeason: Int? = nil,
+        requestedEpisode: Int? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.magnet = magnet
+        self.quality = quality
+        self.seeders = seeders
+        self.sizeBytes = sizeBytes
+        self.origin = origin
+        self.requestedSeason = requestedSeason
+        self.requestedEpisode = requestedEpisode
+    }
 
     var sizeLabel: String {
         guard sizeBytes > 0 else { return "Unknown size" }
@@ -48,6 +72,51 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: sizeBytes)
+    }
+
+    var requestsSpecificEpisode: Bool {
+        requestedSeason != nil && requestedEpisode != nil
+    }
+
+    func matchesRequestedEpisode(fileName: String) -> Bool {
+        guard let requestedSeason, let requestedEpisode else { return true }
+        guard let found = parsedEpisode(in: fileName) else { return false }
+        return found.season == requestedSeason && found.episode == requestedEpisode
+    }
+
+    func hasRecognizableEpisodeTag(fileName: String) -> Bool {
+        parsedEpisode(in: fileName) != nil
+    }
+
+    private func parsedEpisode(in fileName: String) -> (season: Int, episode: Int)? {
+        let patterns = [
+            #"(?i)\bS(\d{1,3})[ ._-]*E(\d{1,3})\b"#,
+            #"(?i)\b(\d{1,3})x(\d{1,3})\b"#
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(
+                    in: fileName,
+                    range: NSRange(fileName.startIndex..<fileName.endIndex, in: fileName)
+                  ),
+                  let seasonRange = Range(match.range(at: 1), in: fileName),
+                  let episodeRange = Range(match.range(at: 2), in: fileName),
+                  let season = Int(fileName[seasonRange]),
+                  let episode = Int(fileName[episodeRange]) else { continue }
+            return (season, episode)
+        }
+        let episodeOnlyPattern = #"(?i)\b(?:E|EP|Episode)[ ._-]?(\d{1,3})\b"#
+        if let requestedSeason,
+           let expression = try? NSRegularExpression(pattern: episodeOnlyPattern),
+           let match = expression.firstMatch(
+            in: fileName,
+            range: NSRange(fileName.startIndex..<fileName.endIndex, in: fileName)
+           ),
+           let episodeRange = Range(match.range(at: 1), in: fileName),
+           let episode = Int(fileName[episodeRange]) {
+            return (requestedSeason, episode)
+        }
+        return nil
     }
 }
 
@@ -110,8 +179,12 @@ actor OnlineSourceSearchService {
             source.sizeBytes == 0 || source.sizeBytes >= minimumVisibleSize
         }
         return OnlineStreamQuality.allCases.compactMap { quality in
-            eligible
-                .filter { $0.quality == quality }
+            let qualitySources = eligible.filter { $0.quality == quality }
+            let exactEpisodes = qualitySources.filter {
+                $0.requestsSpecificEpisode && $0.matchesRequestedEpisode(fileName: $0.name)
+            }
+            let candidates = exactEpisodes.isEmpty ? qualitySources : exactEpisodes
+            return candidates
                 .max {
                     if $0.seeders != $1.seeders { return $0.seeders < $1.seeders }
                     if $0.sizeBytes == 0 { return true }
@@ -169,6 +242,11 @@ actor OnlineSourceSearchService {
             let links = stream["links"] as? [String] ?? []
             guard let magnet = links.first(where: { $0.lowercased().hasPrefix("magnet:?") }) else { return nil }
             let name = (file["name"] as? String) ?? context.fallbackQuery
+            if context.mediaType == "tv",
+               let found = Self.episodeIdentity(in: name),
+               (found.season != (context.season ?? 1) || found.episode != (context.episode ?? 1)) {
+                return nil
+            }
             guard let quality = OnlineStreamQuality.detect(
                 hint: Self.stringValue(video["quality"]),
                 fileName: name
@@ -181,14 +259,26 @@ actor OnlineSourceSearchService {
                 quality: quality,
                 seeders: Self.intValue(streamInfo["seeds"]),
                 sizeBytes: Self.int64Value(file["size"]),
-                origin: .orion
+                origin: .orion,
+                requestedSeason: context.mediaType == "tv" ? context.season : nil,
+                requestedEpisode: context.mediaType == "tv" ? context.episode : nil
             )
         }
     }
 
     private func searchPirateBay(_ context: OnlineSourceLookupContext) async throws -> [OnlineTorrentSource] {
         var queries: [String] = []
-        if let imdbID = context.imdbID, !imdbID.isEmpty { queries.append(imdbID) }
+        if let imdbID = context.imdbID, !imdbID.isEmpty {
+            if context.mediaType == "tv" {
+                queries.append("\(imdbID) " + String(
+                    format: "S%02dE%02d",
+                    context.season ?? 1,
+                    context.episode ?? 1
+                ))
+            } else {
+                queries.append(imdbID)
+            }
+        }
         queries.append(context.fallbackQuery)
         var combined: [OnlineTorrentSource] = []
         var seen = Set<String>()
@@ -206,6 +296,11 @@ actor OnlineSourceSearchService {
             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { continue }
             let payload = (try? JSONDecoder().decode([PirateBaySearchPayload].self, from: data)) ?? []
             for value in payload where value.id != "0" && !value.infoHash.isEmpty {
+                if context.mediaType == "tv",
+                   let found = Self.episodeIdentity(in: value.name),
+                   (found.season != (context.season ?? 1) || found.episode != (context.episode ?? 1)) {
+                    continue
+                }
                 guard let quality = OnlineStreamQuality.detect(hint: nil, fileName: value.name) else { continue }
                 let key = value.infoHash.lowercased()
                 guard seen.insert(key).inserted else { continue }
@@ -216,7 +311,9 @@ actor OnlineSourceSearchService {
                     quality: quality,
                     seeders: Int(value.seeders) ?? 0,
                     sizeBytes: Int64(value.size) ?? 0,
-                    origin: .pirateBay
+                    origin: .pirateBay,
+                    requestedSeason: context.mediaType == "tv" ? context.season : nil,
+                    requestedEpisode: context.mediaType == "tv" ? context.episode : nil
                 ))
             }
             if Set(combined.map(\.quality)).count == OnlineStreamQuality.allCases.count { break }
@@ -241,6 +338,26 @@ actor OnlineSourceSearchService {
         URLComponents(string: magnet)?.queryItems?
             .first(where: { $0.name.lowercased() == "xt" })?.value?
             .replacingOccurrences(of: "urn:btih:", with: "", options: .caseInsensitive)
+    }
+
+    private static func episodeIdentity(in value: String) -> (season: Int, episode: Int)? {
+        let patterns = [
+            #"(?i)\bS(\d{1,3})[ ._-]*E(\d{1,3})\b"#,
+            #"(?i)\b(\d{1,3})x(\d{1,3})\b"#
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(
+                    in: value,
+                    range: NSRange(value.startIndex..<value.endIndex, in: value)
+                  ),
+                  let seasonRange = Range(match.range(at: 1), in: value),
+                  let episodeRange = Range(match.range(at: 2), in: value),
+                  let season = Int(value[seasonRange]),
+                  let episode = Int(value[episodeRange]) else { continue }
+            return (season, episode)
+        }
+        return nil
     }
 
     private static func stringValue(_ value: Any?) -> String? {
@@ -313,8 +430,7 @@ actor OnlinePlaybackResolver {
     func resolve(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
         let preference = OnlinePlaybackProviderPreference.selected
         if preference == .directTorrent {
-            let url = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
-            return ResolvedOnlinePlayback(url: url, title: source.name, provider: "Direct Torrent", headers: nil)
+            return try await resolveDirectTorrent(source)
         }
 
         let providers: [Provider]
@@ -332,8 +448,7 @@ actor OnlinePlaybackResolver {
         }
 
         guard !providers.isEmpty else {
-            let url = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
-            return ResolvedOnlinePlayback(url: url, title: source.name, provider: "Direct Torrent", headers: nil)
+            return try await resolveDirectTorrent(source)
         }
 
         var failures: [String] = []
@@ -351,6 +466,17 @@ actor OnlinePlaybackResolver {
             }
         }
         throw OnlinePlaybackResolutionError.allProvidersFailed(failures.joined(separator: "\n"))
+    }
+
+    private func resolveDirectTorrent(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
+        if source.requestsSpecificEpisode,
+           !source.matchesRequestedEpisode(fileName: source.name) {
+            throw OnlineSourceSearchError.provider(
+                "Direct Torrent cannot safely choose the requested episode from this season pack. Choose an episode-specific source or a cloud provider."
+            )
+        }
+        let url = try await DirectTorrentPlaybackEngine.shared.start(magnet: source.magnet)
+        return ResolvedOnlinePlayback(url: url, title: source.name, provider: "Direct Torrent", headers: nil)
     }
 
     private func provider(for preference: OnlinePlaybackProviderPreference) -> Provider? {
@@ -388,13 +514,25 @@ actor OnlinePlaybackResolver {
                     let resolvedFile = try? await client.getFile(id: fileID)
                     if let resolved = resolvedFile {
                         if resolved.item.isVideo, let url = resolved.streamURL {
+                            let hasWrongEpisode = source.requestsSpecificEpisode
+                                && source.hasRecognizableEpisodeTag(fileName: resolved.item.name)
+                                && !source.matchesRequestedEpisode(fileName: resolved.item.name)
+                            if hasWrongEpisode {
+                                throw OnlineSourceSearchError.provider(
+                                    "PikPak returned a different episode than the one selected."
+                                )
+                            }
                             return ResolvedOnlinePlayback(
                                 url: url, title: resolved.item.name, provider: Provider.pikpak.rawValue,
                                 headers: client.directPlaybackHeaders()
                             )
                         }
                         if resolved.item.isFolder {
-                            let folderVideo = await largestPikPakVideo(items: [resolved.item], client: client)
+                            let folderVideo = await largestPikPakVideo(
+                                items: [resolved.item],
+                                client: client,
+                                source: source
+                            )
                             if let item = folderVideo {
                                 let streamURL = try? await client.streamURL(forFileId: item.id)
                                 if let url = streamURL {
@@ -403,6 +541,10 @@ actor OnlinePlaybackResolver {
                                         headers: client.directPlaybackHeaders()
                                     )
                                 }
+                            } else if source.requestsSpecificEpisode {
+                                throw OnlineSourceSearchError.provider(
+                                    "PikPak prepared the torrent, but it does not contain the requested episode."
+                                )
                             }
                         }
                     }
@@ -412,7 +554,7 @@ actor OnlinePlaybackResolver {
             let listedRoots = try? await client.listFiles()
             if let roots = listedRoots {
                 let newRoots = roots.filter { !before.contains($0.id) || $0.id == taskID }
-                let rootVideo = await largestPikPakVideo(items: newRoots, client: client)
+                let rootVideo = await largestPikPakVideo(items: newRoots, client: client, source: source)
                 if let item = rootVideo {
                     let streamURL = try? await client.streamURL(forFileId: item.id)
                     if let url = streamURL {
@@ -430,7 +572,8 @@ actor OnlinePlaybackResolver {
 
     private func largestPikPakVideo(
         items: [PikPakFileItem],
-        client: PikPakClient
+        client: PikPakClient,
+        source: OnlineTorrentSource
     ) async -> PikPakFileItem? {
         var candidates = items.filter(\.isVideo)
         for folder in items.filter(\.isFolder).prefix(4) {
@@ -444,6 +587,15 @@ actor OnlinePlaybackResolver {
                     }
                 }
             }
+        }
+        if source.requestsSpecificEpisode {
+            let matching = candidates.filter { source.matchesRequestedEpisode(fileName: $0.name) }
+            if let file = matching.max(by: { $0.size < $1.size }) { return file }
+            if candidates.count == 1,
+               !source.hasRecognizableEpisodeTag(fileName: candidates[0].name) {
+                return candidates[0]
+            }
+            return nil
         }
         return candidates.max { $0.size < $1.size }
     }
@@ -463,8 +615,12 @@ actor OnlinePlaybackResolver {
                 if let expectedHash { return torrent.hash?.lowercased() == expectedHash }
                 return false
             }
-            if let torrent, torrent.isReady,
-               let file = torrent.videoFiles.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }) {
+            if let torrent, torrent.isReady {
+                guard let file = selectedTorBoxFile(from: torrent.videoFiles, source: source) else {
+                    throw OnlineSourceSearchError.provider(
+                        "TorBox prepared the torrent, but it does not contain the requested episode."
+                    )
+                }
                 let url = try await client.downloadURL(torrentId: torrent.id, fileId: file.id)
                 return ResolvedOnlinePlayback(
                     url: url, title: file.displayName, provider: Provider.torBox.rawValue, headers: nil
@@ -475,9 +631,29 @@ actor OnlinePlaybackResolver {
         throw OnlinePlaybackResolutionError.timedOut(Provider.torBox.rawValue)
     }
 
+    private func selectedTorBoxFile(
+        from files: [TorBoxFile],
+        source: OnlineTorrentSource
+    ) -> TorBoxFile? {
+        if source.requestsSpecificEpisode {
+            let matching = files.filter { source.matchesRequestedEpisode(fileName: $0.displayName) }
+            if let file = matching.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }) { return file }
+            if files.count == 1,
+               !source.hasRecognizableEpisodeTag(fileName: files[0].displayName) {
+                return files[0]
+            }
+            return nil
+        }
+        return files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) })
+    }
+
     private func resolveRealDebrid(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
         let client = RealDebridClient(apiKey: RealDebridKeyStore.key)
-        let resolved = try await client.resolve(magnet: source.magnet)
+        let resolved = try await client.resolve(
+            magnet: source.magnet,
+            requestedSeason: source.requestedSeason,
+            requestedEpisode: source.requestedEpisode
+        )
         return ResolvedOnlinePlayback(
             url: resolved.url, title: resolved.fileName ?? source.name,
             provider: Provider.realDebrid.rawValue, headers: nil
@@ -486,12 +662,19 @@ actor OnlinePlaybackResolver {
 
     private func resolveOffcloud(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
         let client = OffcloudClient(apiKey: OffcloudKeyStore.load())
-        if let cached = try await client.cachedFilesIfAvailable(for: source.magnet),
-           let file = cached.filter(\.isVideo).max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
-           let url = file.streamURL {
-            return ResolvedOnlinePlayback(
-                url: url, title: file.name, provider: Provider.offcloud.rawValue, headers: nil
-            )
+        if let cached = try await client.cachedFilesIfAvailable(for: source.magnet) {
+            let cachedVideos = cached.filter(\.isVideo)
+            if let file = selectedOffcloudFile(from: cachedVideos, source: source),
+               let url = file.streamURL {
+                return ResolvedOnlinePlayback(
+                    url: url, title: file.name, provider: Provider.offcloud.rawValue, headers: nil
+                )
+            }
+            if source.requestsSpecificEpisode, !cachedVideos.isEmpty {
+                throw OnlineSourceSearchError.provider(
+                    "Offcloud cache does not contain the requested episode."
+                )
+            }
         }
 
         let transfer = try await client.create(url: source.magnet)
@@ -505,16 +688,38 @@ actor OnlinePlaybackResolver {
                 } catch OffcloudError.badArchive {
                     files = try await client.cachedFilesIfAvailable(for: source.magnet) ?? []
                 }
-                if let file = files.filter(\.isVideo).max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
+                let videoFiles = files.filter(\.isVideo)
+                if let file = selectedOffcloudFile(from: videoFiles, source: source),
                    let url = file.streamURL {
                     return ResolvedOnlinePlayback(
                         url: url, title: file.name, provider: Provider.offcloud.rawValue, headers: nil
+                    )
+                }
+                if source.requestsSpecificEpisode, !videoFiles.isEmpty {
+                    throw OnlineSourceSearchError.provider(
+                        "Offcloud prepared the torrent, but it does not contain the requested episode."
                     )
                 }
             }
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
         throw OnlinePlaybackResolutionError.timedOut(Provider.offcloud.rawValue)
+    }
+
+    private func selectedOffcloudFile(
+        from files: [OffcloudFile],
+        source: OnlineTorrentSource
+    ) -> OffcloudFile? {
+        if source.requestsSpecificEpisode {
+            let matching = files.filter { source.matchesRequestedEpisode(fileName: $0.name) }
+            if let file = matching.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }) { return file }
+            if files.count == 1,
+               !source.hasRecognizableEpisodeTag(fileName: files[0].name) {
+                return files[0]
+            }
+            return nil
+        }
+        return files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) })
     }
 }
 
@@ -528,94 +733,138 @@ private struct RealDebridClient: Sendable {
         self.apiKey = apiKey
     }
 
-    func resolve(magnet: String) async throws -> Resolved {
-        let cachedVariant = try await cachedVariant(for: magnet)
+    func resolve(magnet: String, requestedSeason: Int?, requestedEpisode: Int?) async throws -> Resolved {
         let added: AddedTorrent = try await send(path: "torrents/addMagnet", method: "POST", form: ["magnet": magnet])
+
+        var availableFiles: [TorrentFile] = []
+        for _ in 0..<30 {
+            let info: TorrentInfo = try await send(path: "torrents/info/\(added.id)", method: "GET")
+            try validate(status: info.status)
+            availableFiles = info.files ?? []
+            if !availableFiles.isEmpty { break }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        let videoFiles = availableFiles.filter { isVideoFile($0.path) }
+        let candidates = videoFiles.isEmpty ? availableFiles : videoFiles
+        guard let selectedFile = bestFile(
+            in: candidates,
+            requestedSeason: requestedSeason,
+            requestedEpisode: requestedEpisode
+        ) else {
+            throw OnlineSourceSearchError.provider(
+                "The selected torrent does not contain the requested episode. Choose another source."
+            )
+        }
         try await sendEmpty(
             path: "torrents/selectFiles/\(added.id)",
             method: "POST",
-            form: ["files": cachedVariant.fileIDs.map { String($0) }.joined(separator: ",")]
+            form: ["files": String(selectedFile.id)]
         )
 
-        // Cached torrents normally become ready within a few seconds. Do not leave
-        // the player behind an indefinite spinner if Real-Debrid cannot prepare it.
-        for _ in 0..<20 {
+        // A cached file is ready almost immediately. An uncached but healthy
+        // torrent may still finish during this bounded preparation window.
+        for _ in 0..<45 {
             let info: TorrentInfo = try await send(path: "torrents/info/\(added.id)", method: "GET")
-            if ["magnet_error", "error", "virus", "dead"].contains(info.status.lowercased()) {
-                throw OnlinePlaybackResolutionError.noPlayableFile("Real-Debrid")
-            }
-            if info.status.lowercased() == "downloaded", !info.links.isEmpty {
-                let selected = info.files.enumerated().filter { $0.element.selected == 1 }
+            try validate(status: info.status)
+            let links = info.links ?? []
+            if info.status.lowercased() == "downloaded", !links.isEmpty {
+                let selected = (info.files ?? []).enumerated().filter { $0.element.selected == 1 }
                 let selectedVideos = selected.filter { isVideoFile($0.element.path) }
                 let playableFiles = selectedVideos.isEmpty ? selected : selectedVideos
                 let largest = playableFiles.max { $0.element.bytes < $1.element.bytes }
                 let linkIndex = largest.flatMap { match in
                     selected.firstIndex(where: { $0.offset == match.offset })
                 } ?? 0
-                let restricted = info.links[min(linkIndex, info.links.count - 1)]
+                let restricted = links[min(linkIndex, links.count - 1)]
                 let result: UnrestrictedLink = try await send(
                     path: "unrestrict/link", method: "POST", form: ["link": restricted]
                 )
+                if let requestedSeason, let requestedEpisode, let fileName = result.filename {
+                    let expected = "s\(requestedSeason)e\(requestedEpisode)"
+                    let fullIdentity = episodeIdentity(in: fileName)
+                    let episodeOnly = episodeOnlyNumber(in: fileName)
+                    let hasRecognizableIdentity = fullIdentity != nil || episodeOnly != nil
+                    let matches = fullIdentity == expected
+                        || (fullIdentity == nil && episodeOnly == requestedEpisode)
+                    if hasRecognizableIdentity && !matches {
+                        throw OnlineSourceSearchError.provider(
+                            "Real-Debrid returned a different episode than the one selected."
+                        )
+                    }
+                }
                 guard let url = URL(string: result.download) else {
                     throw OnlineSourceSearchError.invalidResponse
                 }
                 return Resolved(url: url, fileName: result.filename)
             }
-            try await Task.sleep(nanoseconds: 750_000_000)
+            try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw OnlinePlaybackResolutionError.timedOut("Real-Debrid")
     }
 
-    private func cachedVariant(for magnet: String) async throws -> CachedVariant {
-        guard let hash = infoHash(from: magnet) else {
-            throw OnlineSourceSearchError.provider("The torrent link does not contain a valid info hash.")
+    private func validate(status: String) throws {
+        if ["magnet_error", "error", "virus", "dead"].contains(status.lowercased()) {
+            throw OnlinePlaybackResolutionError.noPlayableFile("Real-Debrid")
         }
-
-        let data = try await sendData(
-            path: "torrents/instantAvailability/\(hash)",
-            method: "GET"
-        )
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hashEntry = root.first(where: { $0.key.caseInsensitiveCompare(hash) == .orderedSame })?.value
-                as? [String: Any],
-              let variants = hashEntry["rd"] as? [[String: Any]] else {
-            throw OnlineSourceSearchError.provider(
-                "This source is not cached on Real-Debrid. Choose another result."
-            )
-        }
-
-        let parsed = variants.compactMap { variant -> CachedVariant? in
-            let files = variant.compactMap { key, value -> CachedFile? in
-                guard let id = Int(key), let details = value as? [String: Any] else { return nil }
-                let filename = details["filename"] as? String ?? ""
-                let filesize = (details["filesize"] as? NSNumber)?.int64Value ?? 0
-                return CachedFile(id: id, filename: filename, filesize: filesize)
-            }
-            guard let largestVideo = files.filter({ isVideoFile($0.filename) })
-                .max(by: { $0.filesize < $1.filesize }) else { return nil }
-
-            // Real-Debrid requires all IDs from one cached variant to preserve
-            // instant availability, even when the torrent includes sidecar files.
-            return CachedVariant(
-                fileIDs: files.map(\.id).sorted(),
-                largestVideoBytes: largestVideo.filesize
-            )
-        }
-
-        guard let best = parsed.max(by: { $0.largestVideoBytes < $1.largestVideoBytes }),
-              !best.fileIDs.isEmpty else {
-            throw OnlineSourceSearchError.provider(
-                "Real-Debrid has no cached playable video for this result. Choose another result."
-            )
-        }
-        return best
     }
 
-    private func infoHash(from magnet: String) -> String? {
-        URLComponents(string: magnet)?.queryItems?
-            .first(where: { $0.name.caseInsensitiveCompare("xt") == .orderedSame })?.value?
-            .replacingOccurrences(of: "urn:btih:", with: "", options: .caseInsensitive)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    private func bestFile(
+        in files: [TorrentFile],
+        requestedSeason: Int?,
+        requestedEpisode: Int?
+    ) -> TorrentFile? {
+        if let requestedSeason, let requestedEpisode {
+            let identity = "s\(requestedSeason)e\(requestedEpisode)"
+            if let matchingEpisode = files.filter({ file in
+                episodeIdentity(in: file.path) == identity
+                    || (episodeIdentity(in: file.path) == nil
+                        && episodeOnlyNumber(in: file.path) == requestedEpisode)
+            })
+                .max(by: { $0.bytes < $1.bytes }) {
+                return matchingEpisode
+            }
+            // A single-file torrent returned for an episode query is safe even
+            // when the release name does not include a conventional SxxExx tag.
+            if files.count == 1,
+               episodeIdentity(in: files[0].path) == nil,
+               episodeOnlyNumber(in: files[0].path) == nil {
+                return files[0]
+            }
+            return nil
+        }
+        return files.max(by: { $0.bytes < $1.bytes })
+    }
+
+    private func episodeIdentity(in value: String) -> String? {
+        let patterns = [
+            #"(?i)\bS(\d{1,3})[ ._-]*E(\d{1,3})\b"#,
+            #"(?i)\b(\d{1,3})x(\d{1,3})\b"#
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern),
+                  let match = expression.firstMatch(
+                    in: value,
+                    range: NSRange(value.startIndex..<value.endIndex, in: value)
+                  ),
+                  let seasonRange = Range(match.range(at: 1), in: value),
+                  let episodeRange = Range(match.range(at: 2), in: value),
+                  let season = Int(value[seasonRange]),
+                  let episode = Int(value[episodeRange]) else { continue }
+            return "s\(season)e\(episode)"
+        }
+        return nil
+    }
+
+    private func episodeOnlyNumber(in value: String) -> Int? {
+        let pattern = #"(?i)\b(?:E|EP|Episode)[ ._-]?(\d{1,3})\b"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: value,
+                range: NSRange(value.startIndex..<value.endIndex, in: value)
+              ),
+              let episodeRange = Range(match.range(at: 1), in: value) else { return nil }
+        return Int(value[episodeRange])
     }
 
     private func isVideoFile(_ name: String) -> Bool {
@@ -665,11 +914,13 @@ private struct RealDebridClient: Sendable {
         _ = try await sendData(path: path, method: method, form: form)
     }
 
-    private struct CachedFile { let id: Int; let filename: String; let filesize: Int64 }
-    private struct CachedVariant { let fileIDs: [Int]; let largestVideoBytes: Int64 }
     private struct AddedTorrent: Decodable { let id: String }
     private struct TorrentFile: Decodable { let id: Int; let path: String; let bytes: Int64; let selected: Int }
-    private struct TorrentInfo: Decodable { let status: String; let files: [TorrentFile]; let links: [String] }
+    private struct TorrentInfo: Decodable {
+        let status: String
+        let files: [TorrentFile]?
+        let links: [String]?
+    }
     private struct UnrestrictedLink: Decodable { let filename: String?; let download: String }
 }
 
