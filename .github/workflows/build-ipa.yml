@@ -16,8 +16,34 @@ jobs:
       - name: Show Xcode
         run: xcodebuild -version
 
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: ${{ runner.os }}-cocoapods-${{ hashFiles('VideoPlayer/Podfile', 'VideoPlayer/*.podspec') }}
+          restore-keys: |
+            ${{ runner.os }}-cocoapods-
+
       - name: Prepare video player library
-        run: pod install --project-directory=VideoPlayer
+        shell: bash
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3 4; do
+            if pod install --project-directory=VideoPlayer; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 4 ]; then
+              echo "CocoaPods installation failed after $attempt attempts."
+              exit 1
+            fi
+
+            delay=$((attempt * 15))
+            echo "CocoaPods request failed; retrying in ${delay}s (attempt $((attempt + 1))/4)."
+            sleep "$delay"
+          done
 
       - name: Build (unsigned)
         run: |
