@@ -347,7 +347,7 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
             let cached = await TMDBOnlineCatalogService.shared.cachedSnapshot()
             if !cached.isEmpty {
                 apply(cached)
-                await enrichFeatured(from: cached.trending)
+                await enrichFeatured(from: cached.newMovies)
             }
         }
         let currentSnapshot = await TMDBOnlineCatalogService.shared.cachedSnapshot()
@@ -359,7 +359,7 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
         do {
             let snapshot = try await TMDBOnlineCatalogService.shared.refresh(force: force)
             apply(snapshot)
-            await enrichFeatured(from: snapshot.trending)
+            await enrichFeatured(from: snapshot.newMovies)
         } catch {
             if featured.isEmpty { self.error = "Could not refresh the online catalogue" }
         }
@@ -447,7 +447,7 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
 
     private func enrichFeatured(from items: [TMDBCatalogItem]) async {
         let entriesByID = Dictionary(
-            trending.map { ($0.id, $0) },
+            newMovies.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
         var enriched: [UnifiedMediaEntry] = []
@@ -622,7 +622,7 @@ struct HomeLibraryView: View {
                             favoritesSection
                             if onlinePlatformEnabled {
                                 posterSection("Trending Now", items: onlineCatalog.trending)
-                                posterSection("New Movies", items: onlineCatalog.newMovies)
+                                posterSection("Digital Releases", items: onlineCatalog.newMovies)
                                 posterSection("Popular Movies", items: onlineCatalog.popularMovies)
                                 posterSection("TV Shows Airing Now", items: onlineCatalog.airingTV)
                                 posterSection("New Episodes", items: onlineCatalog.newEpisodes)
@@ -685,6 +685,8 @@ struct HomeLibraryView: View {
                         .zIndex(20)
                 }
             }
+            // Keep the top-anchored search header stable when the keyboard appears.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .toolbar(.hidden, for: .navigationBar)
             .task(id: "\(homeRefreshID)|online:\(onlinePlatformEnabled)") {
                 guard isActive else { return }
@@ -1010,7 +1012,8 @@ struct HomeLibraryView: View {
             .padding(.horizontal, 18)
             .padding(.top, homeTopSafeAreaInset + 13)
         }
-        .ignoresSafeArea()
+        .ignoresSafeArea(.container)
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
     }
@@ -2342,7 +2345,6 @@ private struct PersistentHeroArtwork: View {
     let onPrepared: () -> Void
     let onReleased: () -> Void
     @State private var image: UIImage?
-    @State private var didCheckStableCache = false
 
     // The TMDB artwork URL is the real image identity. Entry IDs include provider
     // paths/server UUIDs and may change even though the poster did not, which made
@@ -2368,21 +2370,6 @@ private struct PersistentHeroArtwork: View {
                 AppTheme.bg
             }
 
-            if image == nil, didCheckStableCache, shouldPrepare, let remoteURL {
-                KFImage(remoteURL)
-                    .placeholder { Color.clear }
-                    .cacheOriginalImage()
-                    .onSuccess { result in
-                        image = result.image
-                        VideoThumbnailLoader.cacheHeroImageInBackground(
-                            result.image,
-                            forStableKey: cacheKey
-                        )
-                        onPrepared()
-                    }
-                    .resizable()
-                    .scaledToFill()
-            }
         }
         .task(id: "\(cacheKey)|\(shouldPrepare)") {
             if !shouldPrepare {
@@ -2391,7 +2378,6 @@ private struct PersistentHeroArtwork: View {
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 guard !Task.isCancelled else { return }
                 image = nil
-                didCheckStableCache = false
                 onReleased()
                 return
             }
@@ -2404,8 +2390,14 @@ private struct PersistentHeroArtwork: View {
                 try? await Task.sleep(nanoseconds: 620_000_000)
                 guard !Task.isCancelled else { return }
             }
-            didCheckStableCache = false
-            image = nil
+            // A decoded image already on this layer is the only image the user
+            // should ever see. Replacing it with a temporary remote image and
+            // then replacing that again with UIImage caused the visible
+            // one-frame zoom/flicker during the first Hero presentation.
+            if image != nil {
+                onPrepared()
+                return
+            }
             if let primary = await VideoThumbnailLoader.cachedHeroImageAsync(forStableKey: cacheKey) {
                 image = primary
                 onPrepared()
@@ -2415,8 +2407,16 @@ private struct PersistentHeroArtwork: View {
                 image = legacy
                 VideoThumbnailLoader.cacheHeroImageInBackground(legacy, forStableKey: cacheKey)
                 onPrepared()
+            } else if let remoteURL,
+                      let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: remoteURL),
+                      let downloaded = UIImage(data: data),
+                      !Task.isCancelled {
+                // Publish one final decoded image; never put a second remote
+                // image with a different rendering lifecycle into the Hero.
+                image = downloaded
+                VideoThumbnailLoader.cacheHeroImageInBackground(downloaded, forStableKey: cacheKey)
+                onPrepared()
             }
-            didCheckStableCache = true
         }
         .onDisappear { onReleased() }
     }
@@ -3149,7 +3149,19 @@ private struct PirateBayDetailsView: View {
     private func playWithSelectedProvider() {
         let source = onlineSource
         resolvingSourceID = source.id
-        vm.prepareOnlineSource(source)
+        vm.prepareOnlineSource(
+            source,
+            historyItem: VideoDetailsItem(
+                id: "discover|\(item.id)",
+                title: item.name,
+                // This identity is committed only after the resolver supplies
+                // the real playback URL; the details value itself needs a URL.
+                url: URL(string: item.magnet) ?? URL(string: "https://placeholder.invalid")!,
+                posterCacheKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.name),
+                fileExtension: (item.name as NSString).pathExtension.uppercased(),
+                source: "Discover"
+            )
+        )
     }
     private func handlePlaybackTransfer(_ transfer: OnlinePlaybackTransfer?) {
         guard let resolvingSourceID,

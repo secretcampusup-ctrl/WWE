@@ -83,6 +83,10 @@ class AppViewModel: ObservableObject {
     @Published private(set) var onlinePlaybackTransfer: OnlinePlaybackTransfer?
     private var onlinePlaybackPreparationTask: Task<Void, Never>?
     private var preparedOnlinePlayback: ResolvedOnlinePlayback?
+    /// The library identity belongs to the title/episode selected before a
+    /// provider resolves its temporary stream URL. Keep it beside that
+    /// preparation so every provider reaches the same playback-history path.
+    private var preparedOnlinePlaybackHistoryItem: VideoDetailsItem?
     /// Library of auto-saved links (newest first).
     @Published var savedLinks: [SavedVideoLink] = []
     /// Small local-only resume history. It never stores stream URLs and never
@@ -1488,6 +1492,7 @@ class AppViewModel: ObservableObject {
         nowPlayingSubtitleContext = nil
         nowPlaying = nil
         preparedOnlinePlayback = nil
+        preparedOnlinePlaybackHistoryItem = nil
     }
 
     /// TorBox CDN links are generated on demand and expire, so they must never
@@ -1763,9 +1768,13 @@ extension AppViewModel {
     /// Starts resolving without toggling the app's blocking `isLoading` state.
     /// The task is owned by AppViewModel, so dismissing the source sheet does
     /// not cancel an uncached Real-Debrid transfer.
-    func prepareOnlineSource(_ source: OnlineTorrentSource) {
+    func prepareOnlineSource(
+        _ source: OnlineTorrentSource,
+        historyItem: VideoDetailsItem? = nil
+    ) {
         onlinePlaybackPreparationTask?.cancel()
         preparedOnlinePlayback = nil
+        preparedOnlinePlaybackHistoryItem = nil
         DiagnosticLogger.log("[OnlinePlayback] begin quality=\(source.quality.label) provider=\(OnlinePlaybackProviderPreference.selected.title)")
 
         let transferID = source.id
@@ -1830,6 +1839,7 @@ extension AppViewModel {
                 try Task.checkCancellation()
                 guard self.onlinePlaybackTransfer?.id == transferID else { return }
                 self.preparedOnlinePlayback = resolved
+                self.preparedOnlinePlaybackHistoryItem = historyItem
                 DiagnosticLogger.log("[OnlinePlayback] ready provider=\(resolved.provider) requiredDownload=\(resolved.requiredDownload)")
                 self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
                     id: transferID,
@@ -1859,6 +1869,14 @@ extension AppViewModel {
         guard let resolved = preparedOnlinePlayback else { return false }
         DiagnosticLogger.log("[OnlinePlayback] opening player provider=\(resolved.provider)")
         if nowPlayingURL != resolved.url || nowPlaying == nil {
+            if let historyItem = preparedOnlinePlaybackHistoryItem {
+                // Resolve URLs are temporary and provider-specific. Record the
+                // stable media identity immediately before presentation so the
+                // same title appears in Resume Playback regardless of whether
+                // it was opened through Orion, an add-on, PikPak, TorBox, or
+                // direct torrent playback.
+                preparePlaybackHistory(for: historyItem)
+            }
             startPlayback(
                 url: resolved.url,
                 title: resolved.title,
@@ -1885,6 +1903,7 @@ extension AppViewModel {
         guard let phase = onlinePlaybackTransfer?.phase,
               phase == .ready || phase == .failed else { return }
         preparedOnlinePlayback = nil
+        preparedOnlinePlaybackHistoryItem = nil
         onlinePlaybackPreparationTask = nil
         onlinePlaybackTransfer = nil
     }

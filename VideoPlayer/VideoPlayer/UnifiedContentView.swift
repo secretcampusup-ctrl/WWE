@@ -1927,6 +1927,24 @@ private struct ExperimentalOnlineSourcesView: View {
         return String(format: "Season %d · Episode %d", episode.season, episode.episode)
     }
 
+    private var playbackHistoryItem: VideoDetailsItem {
+        let activeEpisode = episode
+        let title = activeEpisode?.title ?? entry.title
+        return VideoDetailsItem(
+            id: activeEpisode?.id ?? entry.id,
+            title: title,
+            url: activeEpisode?.url ?? entry.streamURL,
+            posterCacheKey: "unified|\(entry.id)",
+            fileExtension: (title as NSString).pathExtension.uppercased(),
+            source: entry.sourceLabel,
+            relatedEpisodes: entry.episodes.map {
+                VideoEpisodeItem(id: $0.id, title: $0.title, season: $0.season, episode: $0.episode)
+            },
+            seriesIdentity: "unified|\(entry.id)",
+            suppliedTMDBDetails: entry.details
+        )
+    }
+
     private var providerStrip: some View {
         HStack(spacing: 11) {
             Image(systemName: activeProviders.isEmpty ? "bolt.horizontal.circle.fill" : "icloud.and.arrow.up.fill")
@@ -2058,7 +2076,7 @@ private struct ExperimentalOnlineSourcesView: View {
     private func resolve(_ source: OnlineTorrentSource) {
         resolvingID = source.id
         message = nil
-        vm.prepareOnlineSource(source)
+        vm.prepareOnlineSource(source, historyItem: playbackHistoryItem)
     }
 
     private var currentTransfer: OnlinePlaybackTransfer? {

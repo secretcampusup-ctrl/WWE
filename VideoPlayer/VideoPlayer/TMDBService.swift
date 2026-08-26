@@ -658,7 +658,9 @@ actor TMDBOnlineCatalogService {
         let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PersistentMetadata/OnlineCatalog", isDirectory: true)
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        cacheURL = directory.appendingPathComponent("tmdb-online-v1.json")
+        // v2 replaces the theatrical "now playing" feed with actual digital
+        // releases. Do not briefly restore the old cinema-only Home cache.
+        cacheURL = directory.appendingPathComponent("tmdb-online-v2.json")
         if let data = try? Data(contentsOf: cacheURL),
            let saved = try? JSONDecoder().decode(TMDBOnlineCatalogSnapshot.self, from: data) {
             snapshot = saved
@@ -690,8 +692,30 @@ actor TMDBOnlineCatalogService {
         guard TMDBSettings.isConfigured else { return snapshot }
         if !force, !snapshot.isEmpty, !snapshot.isStale { return snapshot }
 
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let today = Date()
+        let digitalWindowStart = Calendar.current.date(byAdding: .day, value: -90, to: today) ?? today
+
         async let trendingResponse = list("/3/trending/all/day", fallbackMediaType: nil)
-        async let newMoviesResponse = list("/3/movie/now_playing", fallbackMediaType: "movie", extra: ["region": "US"])
+        // TMDB release type 4 is Digital. This deliberately replaces the
+        // theatre-only now_playing list, so Home never promotes a title before
+        // its digital release is available.
+        async let newMoviesResponse = list(
+            "/3/discover/movie",
+            fallbackMediaType: "movie",
+            extra: [
+                "region": "US",
+                "with_release_type": "4",
+                "release_date.gte": dateFormatter.string(from: digitalWindowStart),
+                "release_date.lte": dateFormatter.string(from: today),
+                "sort_by": "release_date.desc",
+                "include_adult": "false",
+                "include_video": "false"
+            ]
+        )
         async let popularMoviesResponse = list("/3/movie/popular", fallbackMediaType: "movie", extra: ["region": "US"])
         async let airingTVResponse = list("/3/tv/on_the_air", fallbackMediaType: "tv")
         async let newEpisodesResponse = list("/3/tv/airing_today", fallbackMediaType: "tv")

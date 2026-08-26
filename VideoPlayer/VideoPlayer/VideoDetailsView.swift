@@ -1972,24 +1972,14 @@ private struct FullPosterDetailsBackdrop: View {
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .top) {
-                // A filled copy guarantees continuous artwork behind the full
-                // poster instead of exposing its physical bottom edge.
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .scaleEffect(1.04)
-                    .opacity(0.72)
-                    .clipped()
-
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
-            .clipped()
+            // Keep a single, fixed rendering path. The earlier fill + fit
+            // layers had different crops of the same poster and looked like a
+            // momentary zoom whenever either layer decoded or refreshed.
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
+                .clipped()
         }
         .transaction { $0.animation = nil }
     }

@@ -267,7 +267,10 @@ actor OnlineSourceSearchService {
 
     private func bestPerQuality(_ eligible: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
         OnlineStreamQuality.allCases.flatMap { quality in
-            Array(rankedSources(for: quality, in: eligible).prefix(3))
+            // The player presents one best option per quality.  Keeping this at
+            // one avoids consuming link quota for alternatives that are never
+            // shown to the user.
+            Array(rankedSources(for: quality, in: eligible).prefix(1))
         }
     }
 
@@ -296,7 +299,10 @@ actor OnlineSourceSearchService {
             "action": "retrieve",
             "type": context.mediaType == "tv" ? "show" : "movie",
             "idimdb": imdbID,
-            "limitcount": "100",
+            // Orion counts every returned link against the user's daily quota,
+            // not only the sources that survive our UI filtering.  We display
+            // at most one source for each of the four supported qualities.
+            "limitcount": "4",
             "sort": "best",
             "streamtype": "torrent",
             "protocoltorrent": "magnet",

@@ -1408,23 +1408,38 @@ private final class MKVPlaybackControls: ObservableObject {
         requestedProgress = target
         surface?.seek(to: target)
     }
-    func updateProgress(_ value: Double) {
-        progress = value
-        if value > 0 { isBuffering = false }
-        if let requestedProgress, abs(value - requestedProgress) < 0.025 {
-            self.requestedProgress = nil
+    /// VLC can briefly report a stale `time` while its normalized `position`
+    /// has already moved (notably after buffering or a seek). Update both from
+    /// the same sample and discard a clock that disagrees with its position.
+    func updatePlaybackSample(current: Double, duration: Double, position: Double) {
+        let safeDuration = duration.isFinite && duration > 0 ? duration : 0
+        let safePosition = position.isFinite ? min(1, max(0, position)) : progress
+        durationSeconds = safeDuration
+        progress = safePosition
+        if safePosition > 0 { isBuffering = false }
+
+        if let requestedProgress {
+            let requestedSeconds = requestedProgress * safeDuration
+            // A fraction is misleading for long films: even 0.3% can be more
+            // than twenty seconds. Confirm a seek by actual media time.
+            if safeDuration > 0, abs(safePosition * safeDuration - requestedSeconds) <= 1.25 {
+                self.requestedProgress = nil
+            }
         }
-    }
-    func updateTime(current: Double, duration: Double) {
-        durationSeconds = max(0, duration)
-        // VLC keeps reporting the pre-seek clock while it fills the new buffer.
-        // Hold the requested label steady until updateProgress confirms arrival.
-        if let requestedProgress, durationSeconds > 0 {
-            currentSeconds = requestedProgress * durationSeconds
-        } else {
-            currentSeconds = max(0, current)
-        }
-        if durationSeconds > 0, currentSeconds >= durationSeconds - 0.5 {
+
+        guard safeDuration > 0 else { return }
+        let positionSeconds = safePosition * safeDuration
+        let clockIsValid = current.isFinite && current >= 0 && current <= safeDuration
+        // A small difference is normal because VLC updates the two values at
+        // different points in its decode loop. A larger difference is not a
+        // real playback timestamp, so use the normalized media position.
+        let allowedDrift = max(1.5, min(5, safeDuration * 0.005))
+        let confirmedSeconds = clockIsValid && abs(current - positionSeconds) <= allowedDrift
+            ? current : positionSeconds
+        // Hold the requested label steady until the player reaches that seek.
+        currentSeconds = requestedProgress.map { $0 * safeDuration } ?? confirmedSeconds
+
+        if currentSeconds >= safeDuration - 0.5 {
             didReachEnd = true
             isPlaying = false
         }
@@ -1673,11 +1688,15 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         loadingTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.controls?.isPlaying = self.mediaPlayer.isPlaying
-            self.controls?.updateProgress(min(1, max(0, Double(self.mediaPlayer.position))))
             // MobileVLCKit: `time` is non-optional VLCTime in current versions.
             let currentTime = Double(self.mediaPlayer.time.intValue) / 1000
             let duration = Double(self.mediaPlayer.media?.length.intValue ?? 0) / 1000
-            self.controls?.updateTime(current: currentTime, duration: duration)
+            let position = Double(self.mediaPlayer.position)
+            self.controls?.updatePlaybackSample(
+                current: currentTime,
+                duration: duration,
+                position: position
+            )
             self.updateNetworkTelemetry()
             let size = self.mediaPlayer.videoSize
             if size.width > 1, size.height > 1 {
