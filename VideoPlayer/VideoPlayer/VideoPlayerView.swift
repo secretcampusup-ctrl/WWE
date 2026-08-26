@@ -1657,11 +1657,10 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         }
         if let userAgent = httpHeaders?["User-Agent"] { media.addOption(":http-user-agent=\(userAgent)") }
         if let referer = httpHeaders?["Referer"] ?? httpHeaders?["Referrer"] { media.addOption(":http-referrer=\(referer)") }
-        let isPikPakStream = LinkResolver.isPikPakDirectDownload(url.absoluteString)
-        // One second was too shallow for signed cloud URLs, especially 4K MKV
-        // remuxes where every Range request pays CDN latency. Keep a larger
-        // read-ahead for PikPak while retaining responsive startup elsewhere.
-        media.addOption(":network-caching=\(isPikPakStream ? 6000 : 2500)")
+        // Six seconds made PikPak look like it was frozen before the first
+        // frame. A 2.5s read-ahead is enough for signed CDN Range requests,
+        // while starting materially faster than the old 6s buffer.
+        media.addOption(":network-caching=2500")
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=1000")
         media.addOption(":drop-late-frames")

@@ -823,6 +823,21 @@ final class PikPakClient {
         let medias = dict["medias"] as? [[String: Any]] ?? []
         let originalFileURL = applicationOctetStreamURL(in: dict)
 
+        // PikPak returns every server-side rendition in `medias`. Playback
+        // should start at 4K when it is available, otherwise use the highest
+        // visible rendition instead of always locking the user to Original.
+        let availableMedia = medias.compactMap { media -> (metadata: [String: Any], url: URL)? in
+            guard (media["is_visible"] as? Bool) != false,
+                  let url = self.mediaLinkURL(media) else { return nil }
+            return (media, url)
+        }
+        if let selected = availableMedia.max(by: {
+            self.mediaResolutionScore($0.metadata) < self.mediaResolutionScore($1.metadata)
+        }) {
+            DiagnosticLogger.log("[PikPakStream] route=best-quality score=\(mediaResolutionScore(selected.metadata)) host=\(selected.url.host ?? "unknown")")
+            return selected.url
+        }
+
         // Match rclone/PikPak's fast path: begin with the stable original-file
         // link, read its fid, then select the media URL carrying that same fid.
         // Media URLs allow less restrictive concurrent Range requests; choosing
@@ -961,6 +976,29 @@ final class PikPakClient {
             return true
         }
         return false
+    }
+
+    private func mediaResolutionScore(_ media: [String: Any]) -> Int {
+        if let video = media["video"] as? [String: Any] {
+            if let height = video["height"] as? Int { return height }
+            if let height = video["height"] as? String, let value = Int(height) { return value }
+        }
+        for key in ["height", "resolution_name", "media_name", "name", "category", "type"] {
+            let value: String?
+            if let number = media[key] as? NSNumber { return number.intValue }
+            value = media[key] as? String
+            guard let value else { continue }
+            let normalized = value.lowercased()
+            if normalized.contains("4320") || normalized.contains("8k") { return 4320 }
+            if normalized.contains("2160") || normalized.contains("4k") { return 2160 }
+            if normalized.contains("1440") || normalized.contains("2k") { return 1440 }
+            if normalized.contains("1080") { return 1080 }
+            if normalized.contains("720") { return 720 }
+            if normalized.contains("480") { return 480 }
+        }
+        // Keep an unlabelled original route usable, but never let it outrank a
+        // confirmed 720p+ rendition.
+        return isOriginalMedia(media) ? 1 : 0
     }
 
     // MARK: - HTTP
