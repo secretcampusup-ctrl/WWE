@@ -1817,14 +1817,30 @@ private struct PikPakQualityChoiceSheet: View {
         .padding(.vertical, 34)
     }
 
+    @ViewBuilder
     private var emptyView: some View {
-        ContentUnavailableView(
-            "No stream qualities found",
-            systemImage: "video.slash",
-            description: Text(message ?? "Try another title or search provider.")
-        )
-        .foregroundStyle(.white.opacity(0.78))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        if #available(iOS 17.0, *) {
+            ContentUnavailableView(
+                "No stream qualities found",
+                systemImage: "video.slash",
+                description: Text(message ?? "Try another title or search provider.")
+            )
+            .foregroundStyle(.white.opacity(0.78))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 12) {
+                Image(systemName: "video.slash")
+                    .font(.system(size: 40))
+                Text("No stream qualities found")
+                    .font(.headline)
+                Text(message ?? "Try another title or search provider.")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+            }
+            .foregroundStyle(.white.opacity(0.78))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 24)
+        }
     }
 
     private var sourcesListView: some View {
