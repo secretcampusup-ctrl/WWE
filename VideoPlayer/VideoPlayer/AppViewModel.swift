@@ -942,6 +942,29 @@ class AppViewModel: ObservableObject {
 
     }
 
+    /// Returns the native PikPak reference for the currently presented item.
+    /// A signed URL fallback also covers old direct-link favourites whose file
+    /// id has not yet been persisted locally.
+    func pikPakFileID(for linkID: UUID?, playbackURL: URL?) -> String? {
+        if let linkID,
+           let fileID = savedLinks.first(where: { $0.id == linkID })?.pikpakFileId,
+           !fileID.isEmpty {
+            return fileID
+        }
+        return playbackURL.flatMap { PikPakClient.shared.fileID(fromPlaybackURL: $0) }
+    }
+
+    /// Replaces only the expiring CDN rendition and preserves the active
+    /// library/history identity. ResolvedPlayerScreen re-creates the engine
+    /// with this URL and seeks back to the sampled playback second.
+    func switchPikPakQuality(to streamURL: URL, resumeAt: Double) {
+        guard nowPlaying != nil else { return }
+        nowPlayingURL = streamURL
+        nowPlayingResumeAt = max(0, resumeAt)
+        nowPlayingHeaders = PikPakClient.shared.directPlaybackHeaders()
+        DiagnosticLogger.log("[PikPakPlayback] quality switch resume=\(Int(max(0, resumeAt))) host=\(streamURL.host ?? \"unknown\")")
+    }
+
     /// Persist exact playback position + detected resolution for resume / badges.
     func updatePlaybackProgress(
         seconds: Double,
@@ -1880,6 +1903,15 @@ extension AppViewModel {
             startPlayback(
                 url: resolved.url,
                 title: resolved.title,
+                linkId: resolved.pikpakFileID.flatMap {
+                    saveDirectLink(
+                        resolved.url.absoluteString,
+                        resolvedStream: resolved.url,
+                        source: .pikpak,
+                        title: resolved.title,
+                        pikpakFileId: $0
+                    )?.id
+                },
                 headers: resolved.headers
             )
         }

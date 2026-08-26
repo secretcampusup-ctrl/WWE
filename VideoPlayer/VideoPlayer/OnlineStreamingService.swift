@@ -569,19 +569,24 @@ struct ResolvedOnlinePlayback: Sendable {
     let provider: String
     let headers: [String: String]?
     let requiredDownload: Bool
+    /// Present only for a native PikPak file, allowing the player to refresh
+    /// and switch server-transcoded qualities without leaving playback.
+    let pikpakFileID: String?
 
     init(
         url: URL,
         title: String,
         provider: String,
         headers: [String: String]?,
-        requiredDownload: Bool = false
+        requiredDownload: Bool = false,
+        pikpakFileID: String? = nil
     ) {
         self.url = url
         self.title = title
         self.provider = provider
         self.headers = headers
         self.requiredDownload = requiredDownload
+        self.pikpakFileID = pikpakFileID
     }
 }
 
@@ -650,7 +655,11 @@ actor OnlinePlaybackResolver {
         _ source: OnlineTorrentSource,
         onProgress: @escaping OnlinePlaybackProgressHandler = { _ in }
     ) async throws -> ResolvedOnlinePlayback {
-        if let url = source.directURL {
+        // A direct URL from an add-on belongs to that add-on's debrid account.
+        // When the user explicitly selected PikPak, honour that choice: send
+        // the magnet to PikPak instead so its quality selector is available.
+        if let url = source.directURL,
+           OnlinePlaybackProviderPreference.selected != .pikpak {
             return ResolvedOnlinePlayback(url: url, title: source.name, provider: source.origin.rawValue, headers: nil)
         }
         let preference = OnlinePlaybackProviderPreference.selected
@@ -755,7 +764,7 @@ actor OnlinePlaybackResolver {
                             }
                             return ResolvedOnlinePlayback(
                                 url: url, title: resolved.item.name, provider: Provider.pikpak.rawValue,
-                                headers: client.directPlaybackHeaders()
+                                headers: client.directPlaybackHeaders(), pikpakFileID: resolved.item.id
                             )
                         }
                         if resolved.item.isFolder {
@@ -769,7 +778,7 @@ actor OnlinePlaybackResolver {
                                 if let url = streamURL {
                                     return ResolvedOnlinePlayback(
                                         url: url, title: item.name, provider: Provider.pikpak.rawValue,
-                                        headers: client.directPlaybackHeaders()
+                                        headers: client.directPlaybackHeaders(), pikpakFileID: item.id
                                     )
                                 }
                             } else if source.requestsSpecificEpisode {
@@ -791,7 +800,7 @@ actor OnlinePlaybackResolver {
                     if let url = streamURL {
                         return ResolvedOnlinePlayback(
                             url: url, title: item.name, provider: Provider.pikpak.rawValue,
-                            headers: client.directPlaybackHeaders()
+                            headers: client.directPlaybackHeaders(), pikpakFileID: item.id
                         )
                     }
                 }

@@ -2371,6 +2371,7 @@ struct ResolvedPlayerScreen: View {
 
         Group {
         if let url = playbackURL, let file = playbackFile {
+            let pikPakFileID = vm.pikPakFileID(for: linkID, playbackURL: url)
             RoutedVideoPlayerView(
                 url: url,
                 title: file.name,
@@ -2379,7 +2380,11 @@ struct ResolvedPlayerScreen: View {
                 linkId: linkID,
                 httpHeaders: headers,
                 episodeOptions: episodeOptions,
-                onSelectEpisode: onSelectEpisode
+                onSelectEpisode: onSelectEpisode,
+                pikPakFileID: pikPakFileID,
+                onPikPakQualitySelected: { quality, resumeAt in
+                    vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
+                }
             ) { seconds, duration, width, height in
                 vm.updatePlaybackProgress(
                     seconds: seconds,

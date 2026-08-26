@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 import AVKit
 import AVFoundation
 import UIKit
@@ -27,6 +28,9 @@ struct VideoPlayerView: View {
     var episodeOptions: [PlayerEpisodeOption] = []
     var onSelectEpisode: ((String) -> Void)? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
+    /// Nil for normal URLs. Native PikPak files expose server-side renditions.
+    var pikPakFileID: String? = nil
+    var onPikPakQualitySelected: ((PikPakStreamQuality, Double) -> Void)? = nil
 
     @Environment(\.dismiss) var dismiss
     @StateObject private var engine = VideoPlaybackEngine()
@@ -79,10 +83,33 @@ struct VideoPlayerView: View {
     // exclusively controlled by the in-player button.
     @State private var isPlayerLandscape = false
     @State private var isClosingPlayer = false
+    @State private var pikPakQualities: [PikPakStreamQuality] = []
+    @State private var isLoadingPikPakQualities = false
+    @State private var showPikPakQualityPicker = false
 
     // Keep formats Apple handles well on AVPlayer; route MKV and other extended
     // containers through MobileVLCKit.
+    /// PikPak's `medias` routes are server-transcoded playback renditions.
+    /// Their signed URLs are extensionless while `title` still contains the
+    /// original torrent name (often `.mkv`). Routing those MP4 renditions by
+    /// the original name needlessly sent them through VLC instead of Apple's
+    /// hardware-accelerated player. Original routes remain on the safe path.
+    private var isPikPakTranscodedRendition: Bool {
+        guard LinkResolver.isPikPakDirectDownload(url.absoluteString),
+              let category = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first(where: { $0.name.caseInsensitiveCompare("category") == .orderedSame })?
+                .value?
+                .lowercased(),
+              !category.contains("original"),
+              !category.contains("origin") else { return false }
+        return true
+    }
+
     private var usesMKVPlayer: Bool {
+        // Prefer AVPlayer's fast hardware path for PikPak's converted stream;
+        // fall back to VLC on the rare rendition AVPlayer cannot decode.
+        if isPikPakTranscodedRendition { return useExtendedPlayer }
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
         let explicitExtension = url.pathExtension.lowercased()
 
@@ -416,6 +443,7 @@ struct VideoPlayerView: View {
                 mkvControls.selectSubtitleTrack(id: nil)
             }
             scheduleAutoHide()
+            loadPikPakQualitiesIfNeeded()
         }
         .onDisappear {
             ScreenOrientationLock.setPlayerLandscape(false)
@@ -488,6 +516,10 @@ struct VideoPlayerView: View {
         }
         .onChange(of: playbackDidEnd) { ended in
             if ended { beginEndCountdown() } else { endCountdownTask?.cancel() }
+        }
+        .onChange(of: pikPakFileID) { _ in
+            pikPakQualities = []
+            loadPikPakQualitiesIfNeeded()
         }
     }
 
@@ -1181,6 +1213,9 @@ struct VideoPlayerView: View {
             HStack(spacing: 8) {
                 compactTransportButton("gobackward.10") { skipPlayback(by: -10) }
                 compactTransportButton("goforward.10") { skipPlayback(by: 10) }
+                if pikPakFileID != nil {
+                    pikPakQualityButton
+                }
                 if !episodeOptions.isEmpty {
                     Button {
                         showEpisodePicker = true
@@ -1203,6 +1238,82 @@ struct VideoPlayerView: View {
                 }
             }
         }
+    }
+
+    private var pikPakQualityButton: some View {
+        Button {
+            hideTask?.cancel()
+            hideTask = nil
+            showPikPakQualityPicker = true
+        } label: {
+            HStack(spacing: 4) {
+                if isLoadingPikPakQualities {
+                    ProgressView().tint(.white).scaleEffect(0.65)
+                } else {
+                    Text(activePikPakQualityLabel)
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundColor(.white)
+            .frame(minWidth: 42, height: 38)
+            .padding(.horizontal, 7)
+            .background(
+                LinearGradient(colors: [AppPalette.purple.opacity(0.95), AppPalette.accent.opacity(0.82)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.28), lineWidth: 0.7))
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+        .disabled(isLoadingPikPakQualities)
+        .popover(isPresented: $showPikPakQualityPicker, arrowEdge: .bottom) {
+            PikPakQualityPicker(
+                qualities: pikPakQualities,
+                currentURL: url,
+                onSelect: selectPikPakQuality
+            )
+            .playerPopoverAdaptation()
+        }
+    }
+
+    private var activePikPakQualityLabel: String {
+        if let quality = pikPakQualities.first(where: { $0.url.absoluteString == url.absoluteString }) {
+            return quality.label
+        }
+        // Normal PikPak playback starts with the highest visible rendition.
+        // Signed URLs can be refreshed between the initial play request and
+        // this menu request, so their token strings need not compare equal.
+        if let highestAvailable = pikPakQualities.first {
+            return highestAvailable.label
+        }
+        return usesMKVPlayer ? mkvQualityLabel : engine.resolutionTier.badgeText
+    }
+
+    private func loadPikPakQualitiesIfNeeded() {
+        guard let pikPakFileID, !isLoadingPikPakQualities else { return }
+        isLoadingPikPakQualities = true
+        Task { @MainActor in
+            defer { isLoadingPikPakQualities = false }
+            do {
+                pikPakQualities = try await PikPakClient.shared.streamQualities(forFileId: pikPakFileID)
+            } catch {
+                // Playback is already using a valid rendition. A failed refresh
+                // must not interrupt it or become a player error.
+                DiagnosticLogger.log("[PikPakPlayback] quality menu unavailable error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func selectPikPakQuality(_ quality: PikPakStreamQuality) {
+        showPikPakQualityPicker = false
+        guard quality.url != url else {
+            scheduleAutoHide()
+            return
+        }
+        let resumeAt = currentPlaybackSeconds
+        if usesMKVPlayer { mkvControls.pause() } else { engine.player.pause() }
+        onPikPakQualitySelected?(quality, resumeAt)
     }
 
     private func compactTransportButton(_ systemName: String, action: @escaping () -> Void) -> some View {
@@ -1657,12 +1768,15 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         }
         if let userAgent = httpHeaders?["User-Agent"] { media.addOption(":http-user-agent=\(userAgent)") }
         if let referer = httpHeaders?["Referer"] ?? httpHeaders?["Referrer"] { media.addOption(":http-referrer=\(referer)") }
-        // Six seconds made PikPak look like it was frozen before the first
-        // frame. A 2.5s read-ahead is enough for signed CDN Range requests,
-        // while starting materially faster than the old 6s buffer.
-        media.addOption(":network-caching=2500")
+        // PikPak delivers its media rendition from a responsive signed CDN;
+        // forcing VLC to accumulate 2.5 seconds before every first frame made
+        // it visibly slower than the official player. Keep a modest 1.2s
+        // safety buffer for that route, while preserving the more conservative
+        // buffer used by ordinary remote MKV/WebDAV streams.
+        let isPikPakDirect = LinkResolver.isPikPakDirectDownload(url.absoluteString)
+        media.addOption(":network-caching=\(isPikPakDirect ? 1200 : 2500)")
         media.addOption(":http-reconnect")
-        media.addOption(":file-caching=1000")
+        media.addOption(":file-caching=\(isPikPakDirect ? 500 : 1000)")
         media.addOption(":drop-late-frames")
         media.addOption(":freetype-font=\(subtitleStyle.fontName)")
         media.addOption(":sub-text-scale=\(vlcTextScale(for: subtitleStyle.fontSize))")
@@ -3517,16 +3631,96 @@ struct RoutedVideoPlayerView: View {
     var episodeOptions: [PlayerEpisodeOption] = []
     var onSelectEpisode: ((String) -> Void)? = nil
     var onProgress: ((Double, Double, Int, Int) -> Void)? = nil
+    var pikPakFileID: String? = nil
+    var onPikPakQualitySelected: ((PikPakStreamQuality, Double) -> Void)? = nil
+    @State private var locallySelectedPikPakURL: URL?
+    @State private var locallySelectedResumeAt: Double?
 
-    init(url: URL, title: String, subtitleMediaContext: SubtitleMediaContext? = nil, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
+    init(url: URL, title: String, subtitleMediaContext: SubtitleMediaContext? = nil, resumeAt: Double = 0, linkId: UUID? = nil, httpHeaders: [String: String]? = nil, episodeOptions: [PlayerEpisodeOption] = [], onSelectEpisode: ((String) -> Void)? = nil, pikPakFileID: String? = nil, onPikPakQualitySelected: ((PikPakStreamQuality, Double) -> Void)? = nil, onProgress: ((Double, Double, Int, Int) -> Void)? = nil) {
         self.url = url; self.title = title; self.resumeAt = resumeAt; self.linkId = linkId
         self.subtitleMediaContext = subtitleMediaContext
         self.httpHeaders = httpHeaders; self.onProgress = onProgress
         self.episodeOptions = episodeOptions; self.onSelectEpisode = onSelectEpisode
+        self.pikPakFileID = pikPakFileID; self.onPikPakQualitySelected = onPikPakQualitySelected
     }
 
     var body: some View {
-        VideoPlayerView(url: url, title: title, subtitleMediaContext: subtitleMediaContext, resumeAt: resumeAt, linkId: linkId, httpHeaders: httpHeaders, episodeOptions: episodeOptions, onSelectEpisode: onSelectEpisode, onProgress: onProgress)
+        let playbackURL = locallySelectedPikPakURL ?? url
+        let nativePikPakFileID = pikPakFileID ?? PikPakClient.shared.fileID(fromPlaybackURL: playbackURL)
+        VideoPlayerView(
+            url: playbackURL,
+            title: title,
+            subtitleMediaContext: subtitleMediaContext,
+            resumeAt: locallySelectedResumeAt ?? resumeAt,
+            linkId: linkId,
+            httpHeaders: httpHeaders,
+            episodeOptions: episodeOptions,
+            onSelectEpisode: onSelectEpisode,
+            onProgress: onProgress,
+            pikPakFileID: nativePikPakFileID,
+            onPikPakQualitySelected: { quality, position in
+                if let onPikPakQualitySelected {
+                    onPikPakQualitySelected(quality, position)
+                } else {
+                    // Covers every standalone player section too (PikPak DAV,
+                    // favourites and home). The stream reloads at the same
+                    // timestamp even when that screen does not own AppViewModel.
+                    locallySelectedResumeAt = position
+                    locallySelectedPikPakURL = quality.url
+                }
+            }
+        )
+        .id(playbackURL.absoluteString)
     }
 
+}
+
+private struct PikPakQualityPicker: View {
+    let qualities: [PikPakStreamQuality]
+    let currentURL: URL
+    let onSelect: (PikPakStreamQuality) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("STREAM QUALITY")
+                .font(.system(size: 11, weight: .black))
+                .tracking(1)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 15)
+            if qualities.isEmpty {
+                Label("No alternate quality is available for this file.", systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            } else {
+                ForEach(qualities) { quality in
+                    Button { onSelect(quality) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: quality.url == currentURL ? "checkmark.circle.fill" : "play.circle")
+                                .foregroundStyle(quality.url == currentURL ? AppPalette.purple : .white.opacity(0.72))
+                            Text(quality.label)
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                            Spacer()
+                            if quality.height > 1 {
+                                Text("PikPak")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(height: 48)
+                        .background(quality.url == currentURL ? AppPalette.purple.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 7)
+                }
+            }
+        }
+        .frame(width: 230)
+        .padding(.bottom, 8)
+        .background(AppTheme.bg)
+    }
 }

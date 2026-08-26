@@ -70,7 +70,11 @@ struct ContentView: View {
                         title: file.name,
                         resumeAt: vm.nowPlayingResumeAt,
                         linkId: vm.nowPlayingLinkId,
-                        httpHeaders: vm.nowPlayingHeaders
+                        httpHeaders: vm.nowPlayingHeaders,
+                        pikPakFileID: vm.pikPakFileID(for: vm.nowPlayingLinkId, playbackURL: url),
+                        onPikPakQualitySelected: { quality, resumeAt in
+                            vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
+                        }
                     ) { seconds, duration, w, h in
                         vm.updatePlaybackProgress(
                             seconds: seconds,
@@ -952,7 +956,11 @@ struct FavoritesAllView: View {
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
-                    httpHeaders: vm.nowPlayingHeaders
+                    httpHeaders: vm.nowPlayingHeaders,
+                    pikPakFileID: vm.pikPakFileID(for: vm.nowPlayingLinkId, playbackURL: url),
+                    onPikPakQualitySelected: { quality, resumeAt in
+                        vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
+                    }
                 ) { seconds, duration, w, h in
                     vm.updatePlaybackProgress(
                         seconds: seconds,
@@ -1138,7 +1146,11 @@ struct PlaylistAllView: View {
                     title: file.name,
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
-                    httpHeaders: vm.nowPlayingHeaders
+                    httpHeaders: vm.nowPlayingHeaders,
+                    pikPakFileID: vm.pikPakFileID(for: vm.nowPlayingLinkId, playbackURL: url),
+                    onPikPakQualitySelected: { quality, resumeAt in
+                        vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
+                    }
                 ) { seconds, duration, w, h in
                     vm.updatePlaybackProgress(
                         seconds: seconds,

@@ -83,6 +83,16 @@ struct PikPakOfflineTask: Sendable {
     }
 }
 
+/// A playable server-side rendition reported by PikPak for one cloud file.
+/// The URLs are short lived, so callers must fetch this list immediately before
+/// offering a quality change rather than persisting it with the library item.
+struct PikPakStreamQuality: Identifiable, Hashable, Sendable {
+    let id: String
+    let label: String
+    let height: Int
+    let url: URL
+}
+
 enum PikPakError: LocalizedError {
     case invalidCredentials
     case notLoggedIn
@@ -625,6 +635,57 @@ final class PikPakClient {
         return url
     }
 
+    /// Fetch all visible, immediately playable renditions for the quality menu.
+    /// This deliberately uses the same FETCH request as normal playback, so a
+    /// quality switch always receives fresh signed CDN URLs.
+    func streamQualities(forFileId id: String) async throws -> [PikPakStreamQuality] {
+        let account = try await ensureValidToken()
+        var components = URLComponents(string: "\(driveBase)/drive/v1/files/\(id)")!
+        components.queryItems = [
+            URLQueryItem(name: "thumbnail_size", value: "SIZE_LARGE"),
+            URLQueryItem(name: "usage", value: "FETCH")
+        ]
+        let json = try await getJSON(url: components.url!.absoluteString, token: account.accessToken)
+        let medias = json["medias"] as? [[String: Any]] ?? []
+
+        var seenURLs = Set<String>()
+        var qualities: [PikPakStreamQuality] = []
+        for media in medias {
+            guard (media["is_visible"] as? Bool) != false,
+                  let url = mediaLinkURL(media),
+                  seenURLs.insert(url.absoluteString).inserted else { continue }
+            let score = mediaResolutionScore(media)
+            qualities.append(PikPakStreamQuality(
+                id: url.absoluteString,
+                label: mediaQualityLabel(media, score: score),
+                height: score,
+                url: url
+            ))
+        }
+
+        // Some files expose the original route only through links. Keep it
+        // selectable too, but never let an unknown original displace a known
+        // encoded quality in the automatic selection.
+        if let original = applicationOctetStreamURL(in: json),
+           seenURLs.insert(original.absoluteString).inserted {
+            qualities.append(PikPakStreamQuality(
+                id: original.absoluteString,
+                label: "Original",
+                height: 1,
+                url: original
+            ))
+        }
+        return qualities.sorted {
+            if $0.height != $1.height { return $0.height > $1.height }
+            return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+        }
+    }
+
+    /// Extracts the stable PikPak file id when it is embedded in a signed URL.
+    func fileID(fromPlaybackURL url: URL) -> String? {
+        pikPakFileID(in: url)
+    }
+
     // MARK: - Share links (all common PikPak share shapes)
 
     /// Resolve a PikPak share URL and return files + pass token for further calls.
@@ -999,6 +1060,17 @@ final class PikPakClient {
         // Keep an unlabelled original route usable, but never let it outrank a
         // confirmed 720p+ rendition.
         return isOriginalMedia(media) ? 1 : 0
+    }
+
+    private func mediaQualityLabel(_ media: [String: Any], score: Int) -> String {
+        if score >= 4320 { return "8K" }
+        if score >= 2160 { return "4K" }
+        if score >= 1440 { return "1440p" }
+        if score >= 1080 { return "1080p" }
+        if score >= 720 { return "720p" }
+        if score >= 480 { return "480p" }
+        if isOriginalMedia(media) { return "Original" }
+        return "Auto"
     }
 
     // MARK: - HTTP

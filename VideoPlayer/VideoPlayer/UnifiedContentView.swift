@@ -1520,6 +1520,10 @@ struct UnifiedMediaDetailsHost: View {
     @State private var showPlayer = false
     @State private var showOnlineSources = false
     @State private var presentOnlinePlayerAfterSourcesDismiss = false
+    /// The source sheet is bypassed only for an explicit PikPak choice. The
+    /// ID lets us ignore stale updates after changing episode or leaving.
+    @State private var automaticPikPakTransferID: String?
+    @State private var isSearchingAutomaticPikPakSource = false
 
     init(
         vm: AppViewModel,
@@ -1624,6 +1628,9 @@ struct UnifiedMediaDetailsHost: View {
                     showOnlineSources = false
                 }
             )
+        }
+        .onChange(of: vm.onlinePlaybackTransfer) { transfer in
+            handleAutomaticPikPakTransfer(transfer)
         }
     }
 
@@ -1755,10 +1762,77 @@ struct UnifiedMediaDetailsHost: View {
             }
             return
         case .catalog:
-            showOnlineSources = true
+            if OnlinePlaybackProviderPreference.selected == .pikpak {
+                Task { @MainActor in
+                    await prepareAutomaticPikPakPlayback()
+                }
+            } else {
+                showOnlineSources = true
+            }
             return
         }
         showPlayer = true
+    }
+
+    /// PikPak is the one-tap route: search all configured source providers,
+    /// choose the highest advertised resolution (then seeders), and send it to
+    /// PikPak without presenting the manual source picker.
+    @MainActor
+    private func prepareAutomaticPikPakPlayback() async {
+        guard automaticPikPakTransferID == nil, !isSearchingAutomaticPikPakSource else { return }
+        guard case let .catalog(mediaType, tmdbID) = activeEntry.source else { return }
+        isSearchingAutomaticPikPakSource = true
+        defer { isSearchingAutomaticPikPakSource = false }
+
+        var imdbID = activeEntry.details?.imdbID
+        if imdbID?.isEmpty != false {
+            imdbID = await TMDBService.shared.externalIMDbID(mediaType: mediaType, tmdbID: tmdbID)
+        }
+        let context = OnlineSourceLookupContext(
+            title: activeEntry.details?.title ?? activeEntry.title,
+            year: activeEntry.details?.releaseDate.map { String($0.prefix(4)) },
+            mediaType: mediaType,
+            tmdbID: tmdbID,
+            imdbID: imdbID,
+            season: selectedEpisode?.season ?? (mediaType == "tv" ? 1 : nil),
+            episode: selectedEpisode?.episode ?? (mediaType == "tv" ? 1 : nil)
+        )
+        do {
+            let sources = try await OnlineSourceSearchService.shared.search(context)
+            guard let best = sources.max(by: { lhs, rhs in
+                if lhs.quality != rhs.quality { return lhs.quality < rhs.quality }
+                if lhs.seeders != rhs.seeders { return lhs.seeders < rhs.seeders }
+                return lhs.sizeBytes < rhs.sizeBytes
+            }) else {
+                vm.errorMessage = "No supported torrent source was found for this title."
+                return
+            }
+            automaticPikPakTransferID = best.id
+            vm.prepareOnlineSource(best, historyItem: currentDetailsItem)
+        } catch {
+            vm.errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func handleAutomaticPikPakTransfer(_ transfer: OnlinePlaybackTransfer?) {
+        guard let transfer,
+              transfer.id == automaticPikPakTransferID else { return }
+        switch transfer.phase {
+        case .preparing, .downloading:
+            break
+        case .ready:
+            automaticPikPakTransferID = nil
+            guard vm.playPreparedOnlineSource() else {
+                vm.errorMessage = "The stream was prepared, but the player did not receive its URL."
+                return
+            }
+            showPlayer = true
+        case .failed:
+            automaticPikPakTransferID = nil
+            vm.errorMessage = transfer.message
+            vm.clearFinishedOnlineTransfer()
+        }
     }
 
     @MainActor
