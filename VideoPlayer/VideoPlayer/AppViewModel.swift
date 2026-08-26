@@ -962,7 +962,7 @@ class AppViewModel: ObservableObject {
         nowPlayingURL = streamURL
         nowPlayingResumeAt = max(0, resumeAt)
         nowPlayingHeaders = PikPakClient.shared.directPlaybackHeaders()
-        DiagnosticLogger.log("[PikPakPlayback] quality switch resume=\(Int(max(0, resumeAt))) host=\(streamURL.host ?? \"unknown\")")
+        DiagnosticLogger.log("[PikPakPlayback] quality switch resume=\(Int(max(0, resumeAt))) host=\(streamURL.host ?? "unknown")")
     }
 
     /// Persist exact playback position + detected resolution for resume / badges.

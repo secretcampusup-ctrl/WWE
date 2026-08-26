@@ -1257,7 +1257,7 @@ struct VideoPlayerView: View {
                     .font(.system(size: 8, weight: .bold))
             }
             .foregroundColor(.white)
-            .frame(minWidth: 42, height: 38)
+            .frame(minWidth: 42, minHeight: 38)
             .padding(.horizontal, 7)
             .background(
                 LinearGradient(colors: [AppPalette.purple.opacity(0.95), AppPalette.accent.opacity(0.82)], startPoint: .topLeading, endPoint: .bottomTrailing),
@@ -1287,7 +1287,7 @@ struct VideoPlayerView: View {
         if let highestAvailable = pikPakQualities.first {
             return highestAvailable.label
         }
-        return usesMKVPlayer ? mkvQualityLabel : engine.resolutionTier.badgeText
+        return (usesMKVPlayer ? mkvQualityLabel : engine.resolutionTier.badgeText) ?? "HD"
     }
 
     private func loadPikPakQualitiesIfNeeded() {

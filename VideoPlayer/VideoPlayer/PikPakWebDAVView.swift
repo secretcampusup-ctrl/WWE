@@ -216,14 +216,14 @@ struct PikPakWebDAVView: View {
                     resumeAt: vm.nowPlayingResumeAt,
                     linkId: vm.nowPlayingLinkId,
                     httpHeaders: vm.nowPlayingHeaders,
-                    pikPakFileID: vm.pikPakFileID(for: vm.nowPlayingLinkId, playbackURL: url),
-                    onPikPakQualitySelected: { quality, resumeAt in
-                        vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
-                    },
                     episodeOptions: currentPlayerEpisodeOptions,
                     onSelectEpisode: { episodeID in
                         guard let activeServer = server else { return }
                         switchToEpisode(episodeID, on: activeServer, fromDetails: false)
+                    },
+                    pikPakFileID: vm.pikPakFileID(for: vm.nowPlayingLinkId, playbackURL: url),
+                    onPikPakQualitySelected: { quality, resumeAt in
+                        vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
                     }
                 ) { seconds, duration, width, height in
                     vm.updatePlaybackProgress(
