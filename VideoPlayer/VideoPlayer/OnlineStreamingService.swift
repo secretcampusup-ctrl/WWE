@@ -33,6 +33,7 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
         case pirateBay = "The Pirate Bay"
         case manual = "Manual Magnet"
         case stremioAddon = "Manual Add-on"
+        case nyaa = "Nyaa"
     }
 
     let id: String
@@ -169,46 +170,31 @@ actor OnlineSourceSearchService {
     private let minimumVisibleSize: Int64 = 400 * 1_024 * 1_024
 
     func search(_ context: OnlineSourceLookupContext) async throws -> [OnlineTorrentSource] {
-        switch OnlineSearchProviderPreference.selected {
-        case .stremioAddon:
-            guard StremioAddonStore.isConfigured else { throw OnlineSourceSearchError.provider("Add a manual Stremio add-on URL in Settings first.") }
-            guard let imdb = context.imdbID, !imdb.isEmpty else { throw OnlineSourceSearchError.missingIMDbID }
-            return bestPerQuality(eligibleSources(try await searchStremioAddon(context, imdbID: imdb)))
-        case .orion:
-            guard OrionCredentialStore.isReady else { throw OnlineSourceSearchError.provider("Enter Orion credentials in Settings first.") }
-            guard let imdb = context.imdbID, !imdb.isEmpty else { throw OnlineSourceSearchError.missingIMDbID }
-            return bestPerQuality(eligibleSources(try await searchOrion(context, imdbID: imdb)))
-        case .pirateBay:
-            return bestPerQuality(eligibleSources(try await searchPirateBay(context)))
-        case .automatic:
-            break
-        }
-        // Keep the original provider search available even after a manual
-        // add-on is configured. The add-on is placed first so it wins ties.
         var raw: [OnlineTorrentSource] = []
         var errors: [Error] = []
-        if StremioAddonStore.isConfigured {
-            if let imdb = context.imdbID, !imdb.isEmpty {
-                do {
-                    raw += try await searchStremioAddon(context, imdbID: imdb)
-                } catch {
-                    errors.append(error)
-                }
-            } else {
-                errors.append(OnlineSourceSearchError.missingIMDbID)
-            }
+        let providers = OnlineSearchProviderSelection.selected
+        guard !providers.isEmpty else {
+            throw OnlineSourceSearchError.provider("Choose at least one search provider in Settings.")
         }
-        do {
-            if OrionCredentialStore.isReady {
-                guard let imdb = context.imdbID, !imdb.isEmpty else {
-                    throw OnlineSourceSearchError.missingIMDbID
+        for provider in OnlineSearchProviderSelection.available where providers.contains(provider) {
+            do {
+                switch provider {
+                case .stremioAddon:
+                    guard StremioAddonStore.isConfigured, let imdb = context.imdbID, !imdb.isEmpty else { continue }
+                    raw += try await searchStremioAddon(context, imdbID: imdb)
+                case .orion:
+                    guard OrionCredentialStore.isReady, let imdb = context.imdbID, !imdb.isEmpty else { continue }
+                    raw += try await searchOrion(context, imdbID: imdb)
+                case .pirateBay:
+                    raw += try await searchPirateBay(context)
+                case .nyaa:
+                    raw += try await searchNyaa(context)
+                case .automatic:
+                    continue
                 }
-                raw += try await searchOrion(context, imdbID: imdb)
-            } else {
-                raw += try await searchPirateBay(context)
+            } catch {
+                errors.append(error)
             }
-        } catch {
-            errors.append(error)
         }
         if raw.isEmpty, let error = errors.first { throw error }
         return bestPerQuality(eligibleSources(raw))
@@ -275,13 +261,13 @@ actor OnlineSourceSearchService {
 
     private func eligibleSources(_ values: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
         values.filter { source in
-            source.sizeBytes == 0 || source.sizeBytes >= minimumVisibleSize
+            source.origin == .nyaa || source.sizeBytes == 0 || source.sizeBytes >= minimumVisibleSize
         }
     }
 
     private func bestPerQuality(_ eligible: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
-        return OnlineStreamQuality.allCases.compactMap { quality in
-            rankedSources(for: quality, in: eligible).first
+        OnlineStreamQuality.allCases.flatMap { quality in
+            Array(rankedSources(for: quality, in: eligible).prefix(3))
         }
     }
 
@@ -429,6 +415,42 @@ actor OnlineSourceSearchService {
         return combined
     }
 
+    private func searchNyaa(_ context: OnlineSourceLookupContext) async throws -> [OnlineTorrentSource] {
+        var components = URLComponents(string: "https://nyaa.media/")!
+        components.queryItems = [
+            URLQueryItem(name: "f", value: "0"),
+            URLQueryItem(name: "c", value: "0_0"),
+            URLQueryItem(name: "q", value: context.fallbackQuery)
+        ]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 35
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+              let html = String(data: data, encoding: .utf8) else { throw OnlineSourceSearchError.invalidResponse }
+
+        let rowPattern = #"<tr class=\"(?:default|success|danger|warning)\">(.*?)</tr>"#
+        let rows = Self.matches(rowPattern, in: html, capture: 1, options: [.dotMatchesLineSeparators])
+        return rows.compactMap { row in
+            guard let magnet = Self.matches(#"href=\"(magnet:\?[^\"]+)\""#, in: row, capture: 1).first else { return nil }
+            let nameHTML = Self.matches(#"href=\"(?:https?://nyaa\.media)?/view/[^\"]+\"[^>]*>(.*?)</a>"#, in: row, capture: 1, options: [.dotMatchesLineSeparators]).first ?? ""
+            let name = Self.decodeHTML(nameHTML).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, let quality = OnlineStreamQuality.detect(hint: nil, fileName: name) else { return nil }
+            if context.mediaType == "tv", let found = Self.episodeIdentity(in: name),
+               (found.season != (context.season ?? 1) || found.episode != (context.episode ?? 1)) { return nil }
+            let sizeText = Self.matches(#"([0-9]+(?:\.[0-9]+)?\s*(?:KiB|MiB|GiB|TiB))"#, in: row).first
+            let numericCells = Self.matches(#"<td class=\"text-center\">\s*([0-9]+)\s*</td>"#, in: row, capture: 1)
+            let seeders = numericCells.suffix(3).first.flatMap { Int($0) } ?? 0
+            return OnlineTorrentSource(
+                id: "nyaa|\(Self.infoHash(from: Self.decodeHTML(magnet)) ?? name)", name: name,
+                magnet: Self.decodeHTML(magnet), quality: quality, seeders: seeders,
+                sizeBytes: Self.byteSize(from: sizeText), origin: .nyaa,
+                requestedSeason: context.mediaType == "tv" ? context.season : nil,
+                requestedEpisode: context.mediaType == "tv" ? context.episode : nil
+            )
+        }
+    }
+
     private static func magnet(infoHash: String, name: String) -> String {
         var components = URLComponents()
         components.scheme = "magnet"
@@ -500,6 +522,25 @@ actor OnlineSourceSearchService {
             return Int64(number * multiplier)
         }
         return 0
+    }
+
+    private static func matches(
+        _ pattern: String, in text: String, capture: Int = 0,
+        options: NSRegularExpression.Options = []
+    ) -> [String] {
+        guard let expression = try? NSRegularExpression(pattern: pattern, options: options) else { return [] }
+        return expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+            guard $0.numberOfRanges > capture, let range = Range($0.range(at: capture), in: text) else { return nil }
+            return String(text[range])
+        }
+    }
+
+    private static func decodeHTML(_ value: String) -> String {
+        value.replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
     }
 }
 

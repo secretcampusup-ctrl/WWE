@@ -568,10 +568,12 @@ struct VideoDetailsView: View {
     }
 
     private var isMovieDetailsPage: Bool {
-        item.suppliedAdultMetadata != nil
-            || item.manualMetadataProvider == "theporndb"
-            || !item.relatedEpisodes.isEmpty
-            || (item.relatedEpisodes.isEmpty && item.seasonEpisodeLabel == nil)
+        // This is the single supported details experience. The former standard
+        // branch was selected for files whose S/E marker had not arrived yet,
+        // which made the UI appear to randomly fall back to the old screen.
+        // `movieDetailsScreen` already contains the season and episode section,
+        // so series, movies, and uncategorized videos can all use it safely.
+        true
     }
 
     /// Warm solid background used by the movie artwork fade (#211A13).

@@ -316,10 +316,30 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
     @Published private(set) var newEpisodes: [UnifiedMediaEntry] = []
     @Published private(set) var topRated: [UnifiedMediaEntry] = []
     @Published private(set) var genres: [HomeCategoryCardModel] = []
+    /// Search results are not part of the rotating online catalogue. Retain a
+    /// small local snapshot for titles the user actually opens so their saved
+    /// playback position has a Home card to attach to later.
+    @Published private(set) var resumeCandidates: [UnifiedMediaEntry] = []
     @Published private(set) var isLoading = false
     @Published private(set) var error: String?
 
     private var didRestoreCache = false
+    private let resumeCandidatesKey = "home.online.resumeCandidates.v1"
+
+    init() {
+        guard let data = UserDefaults.standard.data(forKey: resumeCandidatesKey),
+              let stored = try? JSONDecoder().decode([UnifiedMediaEntry].self, from: data) else { return }
+        resumeCandidates = Array(stored.prefix(30))
+    }
+
+    func rememberForResume(_ entry: UnifiedMediaEntry) {
+        guard case .catalog = entry.source else { return }
+        resumeCandidates.removeAll { $0.id == entry.id }
+        resumeCandidates.insert(entry, at: 0)
+        resumeCandidates = Array(resumeCandidates.prefix(30))
+        guard let data = try? JSONEncoder().encode(resumeCandidates) else { return }
+        UserDefaults.standard.set(data, forKey: resumeCandidatesKey)
+    }
 
     func load(force: Bool = false) async {
         if !didRestoreCache {
@@ -676,6 +696,7 @@ struct HomeLibraryView: View {
             .onReceive(catalog.$movies) { _ in scheduleDerivedDataRebuild() }
             .onReceive(catalog.$shows) { _ in scheduleDerivedDataRebuild() }
             .onReceive(catalog.$unknown) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(onlineCatalog.$resumeCandidates) { _ in scheduleDerivedDataRebuild() }
             .onReceive(vm.$playbackHistory) { _ in scheduleDerivedDataRebuild() }
             .onReceive(vm.$savedLinks) { _ in scheduleDerivedDataRebuild() }
             .onChange(of: heroRotationSlot) { _ in scheduleDerivedDataRebuild() }
@@ -1032,6 +1053,7 @@ struct HomeLibraryView: View {
         Button {
             isHomeSearchFocused = false
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onlineCatalog.rememberForResume(entry)
             selectedEntry = entry
         } label: {
             HStack(spacing: 13) {
@@ -1692,6 +1714,7 @@ struct HomeLibraryView: View {
         let onlineItems = onlinePlatformEnabled
             ? onlineCatalog.trending + onlineCatalog.newMovies + onlineCatalog.popularMovies
                 + onlineCatalog.airingTV + onlineCatalog.newEpisodes + onlineCatalog.topRated
+                + onlineCatalog.resumeCandidates
             : []
         return (catalog.movies + catalog.shows + catalog.unknown + onlineItems)
             .filter { seen.insert($0.id).inserted }

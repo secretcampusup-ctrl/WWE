@@ -349,7 +349,7 @@ struct VideoPlayerView: View {
                     if usesMKVPlayer { mkvControls.setRate(rate) } else { engine.setRate(rate) }
                 },
                 onSubtitleSelected: { subtitle in
-                    loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
+                    return loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
                 }
             )
         }
@@ -360,8 +360,9 @@ struct VideoPlayerView: View {
                 mediaTitle: title,
                 mediaContext: subtitleMediaContext,
                 onSubtitleSelected: { subtitle in
-                    loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
-                    showSubtitleSearch = false
+                    let applied = loadExternalSubtitle(data: subtitle.data, fileName: subtitle.fileName)
+                    if applied { showSubtitleSearch = false }
+                    return applied
                 }
             )
         }
@@ -798,10 +799,17 @@ struct VideoPlayerView: View {
         .buttonStyle(PremiumPressButtonStyle())
     }
 
-    private func loadExternalSubtitle(data: Data, fileName: String) {
-        guard let content = decodeSubtitleText(data) else { return }
+    @discardableResult
+    private func loadExternalSubtitle(data: Data, fileName: String) -> Bool {
+        guard let content = decodeSubtitleText(data) else {
+            subtitleImportError = "The downloaded file is not readable subtitle text."
+            return false
+        }
         let cues = ExternalSubtitleParser.parse(content)
-        guard !cues.isEmpty else { return }
+        guard !cues.isEmpty else {
+            subtitleImportError = "The downloaded file has no supported subtitle cues."
+            return false
+        }
         mkvSubtitleExtractionTask?.cancel()
         mkvSubtitleExtractionTask = nil
         externalSubtitleCues = cues
@@ -811,6 +819,7 @@ struct VideoPlayerView: View {
         selectedSubtitleTrack = fileName
         if usesMKVPlayer { mkvControls.selectSubtitleTrack(id: nil) }
         else { engine.selectSubtitleTrack(id: nil) }
+        return true
     }
 
     private var subtitleDocumentTypes: [UTType] {
@@ -2536,7 +2545,7 @@ private struct PlayerAdvancedSettingsSheet: View {
     let onBrightnessChange: (Double) -> Void
     let onAudioTrackChange: (String) -> Void
     let onRateChange: (Float) -> Void
-    let onSubtitleSelected: (DownloadedSubtitle) -> Void
+    let onSubtitleSelected: (DownloadedSubtitle) -> Bool
     @State private var section = 2
     @State private var showSubtitleSearch = false
 
@@ -3044,13 +3053,11 @@ private struct ZoomableVideoView: UIViewRepresentable, Equatable {
     func makeCoordinator() -> Coordinator { Coordinator() }
     final class Coordinator { var resetToken = 0; var fillToken = 0 }
 
-    // Without this, switching to VR mode (which swaps this view out for
-    // attached to the shared AVPlayer for a brief window before ARC tears it
-    // down. Two consumers pulling video output from the same AVPlayer at once
-    // is exactly what produced "VR mode looks identical to the flat player" —
-    // detaching immediately guarantees only the sphere is ever consuming frames.
+    // An orientation geometry update can temporarily dismantle this view.
+    // The engine owns actual teardown; detaching here leaves audio playing
+    // while the AVPlayerLayer has no video output after rotation.
     static func dismantleUIView(_ view: ZoomablePlayerSurface, coordinator: Coordinator) {
-        view.detachPlayer()
+        view.prepareForTemporaryRemoval()
     }
 }
 
@@ -3067,6 +3074,7 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
     private let scrollView = UIScrollView()
     private let contentView = UIView()
     private let playerLayer = AVPlayerLayer()
+    private weak var attachedPlayer: AVPlayer?
     private var doubleTap: UITapGestureRecognizer!
     private var singleTap: UITapGestureRecognizer!
     private var videoSize: CGSize = .zero
@@ -3103,6 +3111,7 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
         contentView.clipsToBounds = true
         scrollView.addSubview(contentView)
 
+        attachedPlayer = player
         playerLayer.player = player
         playerLayer.videoGravity = .resizeAspect
         contentView.layer.addSublayer(playerLayer)
@@ -3172,15 +3181,26 @@ private final class ZoomablePlayerSurface: UIView, UIScrollViewDelegate {
         }
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil, playerLayer.player == nil, let attachedPlayer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        playerLayer.player = attachedPlayer
+        playerLayer.frame = contentView.bounds
+        CATransaction.commit()
+    }
+
     func updatePlayer(_ player: AVPlayer) {
+        attachedPlayer = player
         if playerLayer.player !== player { playerLayer.player = player }
     }
 
-    /// Called when this surface is removed from the view hierarchy.
-    /// Detaches from the AVPlayer immediately rather than waiting on ARC/dealloc
-    /// timing, so the shared player never has two active visual consumers.
-    func detachPlayer() {
-        playerLayer.player = nil
+    func prepareForTemporaryRemoval() {
+        if reportedInteracting {
+            reportedInteracting = false
+            onInteractionChange?(false)
+        }
     }
 
     func updateVideoSize(_ size: CGSize) {

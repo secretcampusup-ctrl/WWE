@@ -1834,14 +1834,8 @@ private struct ExperimentalOnlineSourcesView: View {
     }
 
     private var sourceSearchLabel: String {
-        switch OnlineSearchProviderPreference.selected {
-        case .stremioAddon: return "Searching manual add-on…"
-        case .orion: return "Searching Orion…"
-        case .pirateBay: return "Searching The Pirate Bay…"
-        case .automatic:
-            if StremioAddonStore.isConfigured { return "Searching manual add-on and your default provider…" }
-            return OrionCredentialStore.isReady ? "Searching Orion…" : "Searching The Pirate Bay…"
-        }
+        let count = OnlineSearchProviderSelection.selected.count
+        return count == 1 ? "Searching 1 provider…" : "Searching \(count) providers…"
     }
 
     private var fastestID: String? {
@@ -1892,7 +1886,7 @@ private struct ExperimentalOnlineSourcesView: View {
                         )
                     } else {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("ONE BEST LINK PER QUALITY")
+                            Text("TOP SOURCES BY QUALITY")
                                 .font(.caption.bold())
                                 .tracking(0.8)
                                 .foregroundStyle(.secondary)
@@ -1986,6 +1980,8 @@ private struct ExperimentalOnlineSourcesView: View {
                         .foregroundStyle(.white)
                         .lineLimit(2)
                     HStack(spacing: 7) {
+                        Text(source.origin.rawValue)
+                        Text("·")
                         Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
                         Text("·")
                         Text(source.sizeLabel)
@@ -2250,17 +2246,21 @@ private struct StreamingPlatformSettingsView: View {
     @AppStorage("online_platform_experimental_enabled_v1") private var platformEnabled = true
     @AppStorage("online_playback_provider_preference_v1") private var playbackProvider =
         OnlinePlaybackProviderPreference.automatic.rawValue
-    @AppStorage("online_search_provider_preference_v1") private var searchProvider =
-        OnlineSearchProviderPreference.automatic.rawValue
     @State private var orionUserKey = ""
     @State private var orionAppKey = ""
     @State private var realDebridKey = ""
     @State private var stremioAddonURL = ""
+    @State private var selectedSearchProviders = OnlineSearchProviderSelection.selected
     @State private var status = ""
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    streamingHero
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 12, trailing: 0))
+                }
                 Section("Online Platform") {
                     Toggle("Enable Experimental Home", isOn: $platformEnabled)
                     Text("TMDB powers the catalogue. Your existing Content library and Resume Playback remain independent.")
@@ -2279,15 +2279,27 @@ private struct StreamingPlatformSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Search Provider") {
-                    Picker("Search with", selection: $searchProvider) {
-                        ForEach(OnlineSearchProviderPreference.allCases) { provider in
-                            Text(provider.title).tag(provider.rawValue)
-                        }
-                    }
-                    Text("Automatic searches the manual add-on first, then Orion when configured or The Pirate Bay. Choose a provider here to use it on its own.")
+                Section("Search Providers") {
+                    Text("Choose one or more providers. Their results are combined, so you see more links for each quality.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    ForEach(OnlineSearchProviderSelection.available) { provider in
+                        Button { toggleSearchProvider(provider) } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: searchProviderIcon(provider))
+                                    .font(.headline)
+                                    .foregroundStyle(selectedSearchProviders.contains(provider) ? .white : AppPalette.accent)
+                                    .frame(width: 34, height: 34)
+                                    .background(selectedSearchProviders.contains(provider) ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)), in: Circle())
+                                Text(provider.title).foregroundStyle(.primary)
+                                Spacer()
+                                Image(systemName: selectedSearchProviders.contains(provider) ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(selectedSearchProviders.contains(provider) ? AppPalette.accent : .secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
 
                 Section("Orion") {
@@ -2354,6 +2366,11 @@ private struct StreamingPlatformSettingsView: View {
                     Section("Status") { Text(status).font(.footnote).foregroundStyle(.secondary) }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(
+                LinearGradient(colors: [AppTheme.bg, AppPalette.purple.opacity(0.18), AppTheme.bg], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .ignoresSafeArea()
+            )
             .navigationTitle("Streaming")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -2366,6 +2383,7 @@ private struct StreamingPlatformSettingsView: View {
                 orionAppKey = OrionCredentialStore.appKey
                 realDebridKey = RealDebridKeyStore.key
                 stremioAddonURL = StremioAddonStore.manifestURL
+                selectedSearchProviders = OnlineSearchProviderSelection.selected
             }
         }
         .preferredColorScheme(.dark)
@@ -2391,6 +2409,48 @@ private struct StreamingPlatformSettingsView: View {
             return
         }
         status = StremioAddonStore.save(value) ? "Manual add-on saved" : "Could not save add-on URL"
+    }
+
+    private var streamingHero: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 25, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 58, height: 58)
+                .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Streaming Studio").font(.title3.bold()).foregroundStyle(.white)
+                Text("Search, sources and playback in one place")
+                    .font(.caption).foregroundStyle(.white.opacity(0.65))
+            }
+            Spacer()
+        }
+        .padding(16)
+        .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 1))
+    }
+
+    private func toggleSearchProvider(_ provider: OnlineSearchProviderPreference) {
+        if selectedSearchProviders.contains(provider) {
+            guard selectedSearchProviders.count > 1 else {
+                status = "Keep at least one search provider enabled"
+                return
+            }
+            selectedSearchProviders.remove(provider)
+        } else {
+            selectedSearchProviders.insert(provider)
+        }
+        OnlineSearchProviderSelection.selected = selectedSearchProviders
+    }
+
+    private func searchProviderIcon(_ provider: OnlineSearchProviderPreference) -> String {
+        switch provider {
+        case .stremioAddon: return "puzzlepiece.extension.fill"
+        case .orion: return "sparkles"
+        case .pirateBay: return "sailboat.fill"
+        case .nyaa: return "tv.inset.filled"
+        case .automatic: return "wand.and.stars"
+        }
     }
 }
 

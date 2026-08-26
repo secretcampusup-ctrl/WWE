@@ -21,12 +21,16 @@ private enum SubtitleSearchError: LocalizedError {
     case invalidResponse
     case service(String)
     case archiveOnly
+    case timedOut
+    case unreadableSubtitle
 
     var errorDescription: String? {
         switch self {
         case .invalidResponse: return "SubDL returned an unreadable response."
         case .service(let message): return message
         case .archiveOnly: return "This result contains multiple files. Choose a single-file result."
+        case .timedOut: return "The subtitle server took too long. Please try another result."
+        case .unreadableSubtitle: return "This download is not a supported subtitle file. Please choose another result."
         }
     }
 }
@@ -119,13 +123,25 @@ enum SubDLSubtitleService {
         }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 30
+        // SubDL occasionally leaves a download response open instead of failing.
+        // Keep this short and enforce a separate wall-clock timeout below so the
+        // result row can never spin indefinitely.
+        request.timeoutInterval = 18
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await AppNetworkSession.shared.data(for: request)
+        let (data, response) = try await dataWithDeadline(for: request, seconds: 22)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), !data.isEmpty else {
             throw SubtitleSearchError.invalidResponse
         }
         if data.starts(with: [0x50, 0x4B]) { throw SubtitleSearchError.archiveOnly }
+
+        // The provider can sometimes return a successful HTML error page. Do
+        // not close the picker or pretend that it was applied in that case.
+        if let text = String(data: data.prefix(512), encoding: .utf8) {
+            let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalized.hasPrefix("<!doctype html") || normalized.hasPrefix("<html") {
+                throw SubtitleSearchError.unreadableSubtitle
+            }
+        }
 
         let responseName = http.suggestedFilename?.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackName = result.title.hasSuffix(".\(result.format)")
@@ -133,6 +149,26 @@ enum SubDLSubtitleService {
             : "\(result.title).\(result.format.isEmpty ? "srt" : result.format)"
         let fileName = (responseName?.isEmpty == false ? responseName : nil) ?? fallbackName
         return DownloadedSubtitle(data: data, fileName: fileName)
+    }
+
+    private static func dataWithDeadline(
+        for request: URLRequest,
+        seconds: UInt64
+    ) async throws -> (Data, URLResponse) {
+        try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+            group.addTask {
+                try await AppNetworkSession.shared.data(for: request)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                throw SubtitleSearchError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw SubtitleSearchError.invalidResponse
+            }
+            return first
+        }
     }
 
     static func automaticDownload(
@@ -301,7 +337,8 @@ struct SubtitleSearchView: View {
     @Environment(\.dismiss) private var dismiss
     let mediaTitle: String
     let mediaContext: SubtitleMediaContext?
-    let onSubtitleSelected: (DownloadedSubtitle) -> Void
+    /// Returns `true` only after the player parsed and applied the subtitle.
+    let onSubtitleSelected: (DownloadedSubtitle) -> Bool
 
     @State private var query: String
     @State private var language = "CONFIGURED"
@@ -320,7 +357,7 @@ struct SubtitleSearchView: View {
     init(
         mediaTitle: String,
         mediaContext: SubtitleMediaContext? = nil,
-        onSubtitleSelected: @escaping (DownloadedSubtitle) -> Void
+        onSubtitleSelected: @escaping (DownloadedSubtitle) -> Bool
     ) {
         self.mediaTitle = mediaTitle
         self.mediaContext = mediaContext
@@ -502,7 +539,9 @@ struct SubtitleSearchView: View {
         Task {
             do {
                 let subtitle = try await SubDLSubtitleService.download(result)
-                onSubtitleSelected(subtitle)
+                guard onSubtitleSelected(subtitle) else {
+                    throw SubtitleSearchError.unreadableSubtitle
+                }
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

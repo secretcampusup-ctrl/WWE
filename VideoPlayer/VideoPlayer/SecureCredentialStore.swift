@@ -117,7 +117,7 @@ enum OnlinePlaybackProviderPreference: String, CaseIterable, Identifiable {
 }
 
 enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
-    case automatic, stremioAddon, orion, pirateBay
+    case automatic, stremioAddon, orion, pirateBay, nyaa
     private static let defaultsKey = "online_search_provider_preference_v1"
     var id: String { rawValue }
     var title: String {
@@ -126,6 +126,7 @@ enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
         case .stremioAddon: return "Manual Add-on"
         case .orion: return "Orion"
         case .pirateBay: return "The Pirate Bay"
+        case .nyaa: return "Nyaa"
         }
     }
     static var selected: Self {
@@ -134,6 +135,27 @@ enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
             return value
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
+    }
+}
+
+enum OnlineSearchProviderSelection {
+    private static let defaultsKey = "online_search_providers_v2"
+
+    static var available: [OnlineSearchProviderPreference] {
+        [.stremioAddon, .orion, .pirateBay, .nyaa]
+    }
+
+    static var selected: Set<OnlineSearchProviderPreference> {
+        get {
+            if let values = UserDefaults.standard.stringArray(forKey: defaultsKey) {
+                return Set(values.compactMap(OnlineSearchProviderPreference.init(rawValue:)))
+            }
+            // Migrate the old single-provider setting; new users receive all
+            // public providers so they get a broader source list immediately.
+            let legacy = OnlineSearchProviderPreference.selected
+            return legacy == .automatic ? Set(available) : [legacy]
+        }
+        set { UserDefaults.standard.set(newValue.map(\.rawValue), forKey: defaultsKey) }
     }
 }
 
