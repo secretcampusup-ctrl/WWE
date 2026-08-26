@@ -67,6 +67,7 @@ enum AppCredentialKeys {
     static let orionUserAPIKey = "orion-user-api-key"
     static let orionAppAPIKey = "orion-app-api-key"
     static let realDebridAPIKey = "realdebrid-api-key"
+    static let stremioAddonManifestURL = "stremio-addon-manifest-url"
     static func webDAVPassword(serverID: UUID) -> String { "webdav-password-\(serverID.uuidString)" }
 }
 
@@ -115,6 +116,27 @@ enum OnlinePlaybackProviderPreference: String, CaseIterable, Identifiable {
     }
 }
 
+enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
+    case automatic, stremioAddon, orion, pirateBay
+    private static let defaultsKey = "online_search_provider_preference_v1"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .stremioAddon: return "Manual Add-on"
+        case .orion: return "Orion"
+        case .pirateBay: return "The Pirate Bay"
+        }
+    }
+    static var selected: Self {
+        get {
+            guard let rawValue = UserDefaults.standard.string(forKey: defaultsKey), let value = Self(rawValue: rawValue) else { return .automatic }
+            return value
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
+    }
+}
+
 enum OrionCredentialStore {
     static var userKey: String { SecureCredentialStore.string(for: AppCredentialKeys.orionUserAPIKey) ?? "" }
     static var appKey: String { SecureCredentialStore.string(for: AppCredentialKeys.orionAppAPIKey) ?? "" }
@@ -139,5 +161,23 @@ enum RealDebridKeyStore {
     }
     @discardableResult static func clear() -> Bool {
         SecureCredentialStore.remove(AppCredentialKeys.realDebridAPIKey)
+    }
+}
+
+/// A configured Stremio add-on URL can embed a provider token, so keep it out
+/// of UserDefaults and only expose whether an add-on is configured.
+enum StremioAddonStore {
+    static var manifestURL: String {
+        SecureCredentialStore.string(for: AppCredentialKeys.stremioAddonManifestURL) ?? ""
+    }
+
+    static var isConfigured: Bool { !manifestURL.isEmpty }
+
+    @discardableResult static func save(_ value: String) -> Bool {
+        SecureCredentialStore.set(value, for: AppCredentialKeys.stremioAddonManifestURL)
+    }
+
+    @discardableResult static func clear() -> Bool {
+        SecureCredentialStore.remove(AppCredentialKeys.stremioAddonManifestURL)
     }
 }

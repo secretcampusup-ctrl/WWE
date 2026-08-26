@@ -1833,6 +1833,17 @@ private struct ExperimentalOnlineSourcesView: View {
         }
     }
 
+    private var sourceSearchLabel: String {
+        switch OnlineSearchProviderPreference.selected {
+        case .stremioAddon: return "Searching manual add-on…"
+        case .orion: return "Searching Orion…"
+        case .pirateBay: return "Searching The Pirate Bay…"
+        case .automatic:
+            if StremioAddonStore.isConfigured { return "Searching manual add-on and your default provider…" }
+            return OrionCredentialStore.isReady ? "Searching Orion…" : "Searching The Pirate Bay…"
+        }
+    }
+
     private var fastestID: String? {
         sources.max {
             if $0.seeders != $1.seeders { return $0.seeders < $1.seeders }
@@ -1865,9 +1876,7 @@ private struct ExperimentalOnlineSourcesView: View {
                     if isSearching {
                         VStack(spacing: 13) {
                             ProgressView().tint(AppPalette.purple)
-                            Text(OrionCredentialStore.isReady
-                                ? "Searching Orion…"
-                                : "Searching The Pirate Bay…")
+                            Text(sourceSearchLabel)
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -2041,9 +2050,7 @@ private struct ExperimentalOnlineSourcesView: View {
         do {
             sources = try await OnlineSourceSearchService.shared.search(context)
             if sources.isEmpty {
-                message = OrionCredentialStore.isReady
-                    ? "Orion returned no supported quality for this title."
-                    : "No supported quality was found on The Pirate Bay."
+                message = "No supported quality was returned by the selected search provider."
             }
         } catch {
             message = error.localizedDescription
@@ -2243,9 +2250,12 @@ private struct StreamingPlatformSettingsView: View {
     @AppStorage("online_platform_experimental_enabled_v1") private var platformEnabled = true
     @AppStorage("online_playback_provider_preference_v1") private var playbackProvider =
         OnlinePlaybackProviderPreference.automatic.rawValue
+    @AppStorage("online_search_provider_preference_v1") private var searchProvider =
+        OnlineSearchProviderPreference.automatic.rawValue
     @State private var orionUserKey = ""
     @State private var orionAppKey = ""
     @State private var realDebridKey = ""
+    @State private var stremioAddonURL = ""
     @State private var status = ""
 
     var body: some View {
@@ -2265,6 +2275,17 @@ private struct StreamingPlatformSettingsView: View {
                         }
                     }
                     Text("Playback uses only the provider selected here. Automatic tries configured services in order, starting with Real-Debrid.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Search Provider") {
+                    Picker("Search with", selection: $searchProvider) {
+                        ForEach(OnlineSearchProviderPreference.allCases) { provider in
+                            Text(provider.title).tag(provider.rawValue)
+                        }
+                    }
+                    Text("Automatic searches the manual add-on first, then Orion when configured or The Pirate Bay. Choose a provider here to use it on its own.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -2310,6 +2331,25 @@ private struct StreamingPlatformSettingsView: View {
                     }
                 }
 
+                Section("Manual Stremio Add-on") {
+                    SecureField("https://…/manifest.json", text: $stremioAddonURL)
+                        .textContentType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Text("Paste a Stremio-compatible manifest URL here. If it contains a debrid token, it is stored securely in the iPhone Keychain. The add-on is searched first, alongside the existing Orion or Pirate Bay search.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Save Add-on URL") { saveStremioAddon() }
+                        .disabled(stremioAddonURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if StremioAddonStore.isConfigured {
+                        Button("Remove Add-on URL", role: .destructive) {
+                            _ = StremioAddonStore.clear()
+                            stremioAddonURL = ""
+                            status = "Manual add-on removed"
+                        }
+                    }
+                }
+
                 if !status.isEmpty {
                     Section("Status") { Text(status).font(.footnote).foregroundStyle(.secondary) }
                 }
@@ -2325,6 +2365,7 @@ private struct StreamingPlatformSettingsView: View {
                 orionUserKey = OrionCredentialStore.userKey
                 orionAppKey = OrionCredentialStore.appKey
                 realDebridKey = RealDebridKeyStore.key
+                stremioAddonURL = StremioAddonStore.manifestURL
             }
         }
         .preferredColorScheme(.dark)
@@ -2340,6 +2381,16 @@ private struct StreamingPlatformSettingsView: View {
         } else {
             status = "Could not save Orion credentials"
         }
+    }
+
+    private func saveStremioAddon() {
+        let value = stremioAddonURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: value), url.scheme?.lowercased() == "https",
+              url.path.lowercased().hasSuffix("/manifest.json") else {
+            status = "Enter a valid HTTPS URL ending in /manifest.json"
+            return
+        }
+        status = StremioAddonStore.save(value) ? "Manual add-on saved" : "Could not save add-on URL"
     }
 }
 

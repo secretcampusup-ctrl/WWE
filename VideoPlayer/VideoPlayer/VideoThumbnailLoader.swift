@@ -434,7 +434,7 @@ enum VideoThumbnailLoader {
     }
 
     static func tmdbDetailsPosterCacheKey(forMetadataIdentity identity: String) -> String {
-        "tmdb-details-poster-nolang-en-original-v1|\(identity)"
+        "tmdb-details-poster-nolang-original-v2|\(identity)"
     }
 
     /// Shared identity for the exact original-size TMDB portrait used by both

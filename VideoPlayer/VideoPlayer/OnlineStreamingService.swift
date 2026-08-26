@@ -32,11 +32,14 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
         case orion = "Orion"
         case pirateBay = "The Pirate Bay"
         case manual = "Manual Magnet"
+        case stremioAddon = "Manual Add-on"
     }
 
     let id: String
     let name: String
     let magnet: String
+    /// Some debrid-backed add-ons return an already playable HTTPS URL.
+    let directURL: URL?
     let quality: OnlineStreamQuality
     let seeders: Int
     let sizeBytes: Int64
@@ -48,6 +51,7 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
         id: String,
         name: String,
         magnet: String,
+        directURL: URL? = nil,
         quality: OnlineStreamQuality,
         seeders: Int,
         sizeBytes: Int64,
@@ -58,6 +62,7 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.magnet = magnet
+        self.directURL = directURL
         self.quality = quality
         self.seeders = seeders
         self.sizeBytes = sizeBytes
@@ -164,14 +169,108 @@ actor OnlineSourceSearchService {
     private let minimumVisibleSize: Int64 = 400 * 1_024 * 1_024
 
     func search(_ context: OnlineSourceLookupContext) async throws -> [OnlineTorrentSource] {
-        let raw: [OnlineTorrentSource]
-        if OrionCredentialStore.isReady {
+        switch OnlineSearchProviderPreference.selected {
+        case .stremioAddon:
+            guard StremioAddonStore.isConfigured else { throw OnlineSourceSearchError.provider("Add a manual Stremio add-on URL in Settings first.") }
             guard let imdb = context.imdbID, !imdb.isEmpty else { throw OnlineSourceSearchError.missingIMDbID }
-            raw = try await searchOrion(context, imdbID: imdb)
-        } else {
-            raw = try await searchPirateBay(context)
+            return bestPerQuality(eligibleSources(try await searchStremioAddon(context, imdbID: imdb)))
+        case .orion:
+            guard OrionCredentialStore.isReady else { throw OnlineSourceSearchError.provider("Enter Orion credentials in Settings first.") }
+            guard let imdb = context.imdbID, !imdb.isEmpty else { throw OnlineSourceSearchError.missingIMDbID }
+            return bestPerQuality(eligibleSources(try await searchOrion(context, imdbID: imdb)))
+        case .pirateBay:
+            return bestPerQuality(eligibleSources(try await searchPirateBay(context)))
+        case .automatic:
+            break
         }
+        // Keep the original provider search available even after a manual
+        // add-on is configured. The add-on is placed first so it wins ties.
+        var raw: [OnlineTorrentSource] = []
+        var errors: [Error] = []
+        if StremioAddonStore.isConfigured {
+            if let imdb = context.imdbID, !imdb.isEmpty {
+                do {
+                    raw += try await searchStremioAddon(context, imdbID: imdb)
+                } catch {
+                    errors.append(error)
+                }
+            } else {
+                errors.append(OnlineSourceSearchError.missingIMDbID)
+            }
+        }
+        do {
+            if OrionCredentialStore.isReady {
+                guard let imdb = context.imdbID, !imdb.isEmpty else {
+                    throw OnlineSourceSearchError.missingIMDbID
+                }
+                raw += try await searchOrion(context, imdbID: imdb)
+            } else {
+                raw += try await searchPirateBay(context)
+            }
+        } catch {
+            errors.append(error)
+        }
+        if raw.isEmpty, let error = errors.first { throw error }
         return bestPerQuality(eligibleSources(raw))
+    }
+
+    /// Loads streams from a manually configured Stremio-compatible manifest URL.
+    private func searchStremioAddon(_ context: OnlineSourceLookupContext, imdbID: String) async throws -> [OnlineTorrentSource] {
+        let manifest = StremioAddonStore.manifestURL
+        guard let manifestURL = URL(string: manifest), manifestURL.scheme?.lowercased() == "https" else {
+            throw OnlineSourceSearchError.provider("Enter a valid HTTPS add-on manifest URL.")
+        }
+        let suffix = "/manifest.json"
+        guard manifestURL.absoluteString.lowercased().hasSuffix(suffix) else {
+            throw OnlineSourceSearchError.provider("The add-on URL must end with /manifest.json.")
+        }
+        let contentID: String
+        if context.mediaType == "tv" {
+            contentID = "\(imdbID):\(context.season ?? 1):\(context.episode ?? 1)"
+        } else {
+            contentID = imdbID
+        }
+        let base = String(manifestURL.absoluteString.dropLast(suffix.count))
+        guard let url = URL(string: "\(base)/stream/\(context.mediaType)/\(contentID).json") else {
+            throw OnlineSourceSearchError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 35
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let streams = root["streams"] as? [[String: Any]] else {
+            throw OnlineSourceSearchError.invalidResponse
+        }
+        return streams.enumerated().compactMap { index, stream in
+            let name = (stream["title"] as? String)?.replacingOccurrences(of: "\n", with: " · ")
+                ?? (stream["name"] as? String) ?? context.fallbackQuery
+            let rawURL = stream["url"] as? String
+            let directURL = rawURL.flatMap { URL(string: $0) }.flatMap {
+                $0.scheme?.lowercased().hasPrefix("http") == true ? $0 : nil
+            }
+            let magnet: String
+            if let rawURL, rawURL.lowercased().hasPrefix("magnet:?") {
+                magnet = rawURL
+            } else if let hash = stream["infoHash"] as? String, !hash.isEmpty {
+                magnet = Self.magnet(infoHash: hash, name: name)
+            } else if directURL != nil {
+                magnet = ""
+            } else {
+                return nil
+            }
+            guard let quality = OnlineStreamQuality.detect(hint: name, fileName: name) else { return nil }
+            let seeders = Self.intValue(stream["seeders"] ?? stream["seeds"])
+            let size = Self.byteSize(from: stream["size"] ?? stream["sizeBytes"])
+            return OnlineTorrentSource(
+                id: "addon|\(index)|\(stream["infoHash"] as? String ?? name)", name: name,
+                magnet: magnet, directURL: directURL, quality: quality, seeders: seeders, sizeBytes: size,
+                origin: .stremioAddon,
+                requestedSeason: context.mediaType == "tv" ? context.season : nil,
+                requestedEpisode: context.mediaType == "tv" ? context.episode : nil
+            )
+        }
     }
 
     private func eligibleSources(_ values: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
@@ -388,6 +487,20 @@ actor OnlineSourceSearchService {
         if let value = value as? String { return Int64(value) ?? 0 }
         return 0
     }
+
+    private static func byteSize(from value: Any?) -> Int64 {
+        if let number = value as? NSNumber { return number.int64Value }
+        if let text = value as? String {
+            let normalized = text.lowercased().replacingOccurrences(of: ",", with: ".")
+            guard let match = try? NSRegularExpression(pattern: #"([0-9]+(?:\.[0-9]+)?)\s*(gb|mb|kb|b)?"#)
+                .firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
+                  let numberRange = Range(match.range(at: 1), in: normalized), let number = Double(normalized[numberRange]) else { return 0 }
+            let unit = match.range(at: 2).location == NSNotFound ? "b" : String(normalized[Range(match.range(at: 2), in: normalized)!])
+            let multiplier: Double = unit == "gb" ? 1_073_741_824 : unit == "mb" ? 1_048_576 : unit == "kb" ? 1_024 : 1
+            return Int64(number * multiplier)
+        }
+        return 0
+    }
 }
 
 private struct PirateBaySearchPayload: Decodable {
@@ -490,6 +603,9 @@ actor OnlinePlaybackResolver {
         _ source: OnlineTorrentSource,
         onProgress: @escaping OnlinePlaybackProgressHandler = { _ in }
     ) async throws -> ResolvedOnlinePlayback {
+        if let url = source.directURL {
+            return ResolvedOnlinePlayback(url: url, title: source.name, provider: source.origin.rawValue, headers: nil)
+        }
         let preference = OnlinePlaybackProviderPreference.selected
         if preference == .directTorrent {
             return try await resolveDirectTorrent(source)

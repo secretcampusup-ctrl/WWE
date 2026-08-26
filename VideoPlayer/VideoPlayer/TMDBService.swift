@@ -62,13 +62,11 @@ struct TMDBTitleDetails: Identifiable, Codable {
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var detailsPosterURL: URL? {
-        guard let path = detailsPosterPath ?? posterPath else { return nil }
+        guard let path = noLanguagePosterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var heroPosterURL: URL? {
-        // detailsPosterPath keeps old on-disk metadata compatible; it already
-        // preferred a No-Language poster before the explicit field was added.
-        guard let path = noLanguagePosterPath ?? detailsPosterPath ?? posterPath else { return nil }
+        guard let path = noLanguagePosterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var logoURL: URL? {

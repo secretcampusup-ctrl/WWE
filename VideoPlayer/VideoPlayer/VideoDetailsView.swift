@@ -277,6 +277,10 @@ struct VideoDetailsView: View {
                 return
             }
 
+            // TMDB artwork is loaded only from its No Language poster below.
+            // Do not flash a grid image or a generated video frame first.
+            guard item.manualMetadataProvider == "theporndb" else { return }
+
             // A catalog movie/show already knows the exact portrait artwork that
             // Details must use. Do not briefly show the grid poster, a generated
             // video frame, or a legacy series cover while the original TMDB image
@@ -383,7 +387,7 @@ struct VideoDetailsView: View {
             withAnimation(.easeOut(duration: 0.18)) { isPreparingPlayback = false }
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
-            guard !(isMovieDetailsPage && item.suppliedTMDBDetails?.detailsPosterURL != nil) else { return }
+            guard item.manualMetadataProvider == "theporndb" else { return }
             guard let key = notification.object as? String,
                   key == item.posterCacheKey else { return }
             Task {
@@ -410,12 +414,7 @@ struct VideoDetailsView: View {
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
             let titleArtworkKey = tmdbTitleArtworkCacheKey
-            let requiresFinalTMDBPoster = isMovieDetailsPage
-                && item.suppliedTMDBDetails?.detailsPosterURL != nil
-            if !requiresFinalTMDBPoster,
-               let cachedEpisode = await VideoThumbnailLoader.cachedImageAsync(forStableKey: episodeArtworkKey) {
-                setArtworkFrame(cachedEpisode)
-            } else if let cachedTitle = await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) {
+            if let cachedTitle = await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) {
                 setArtworkFrame(cachedTitle)
             }
             if item.relatedEpisodes.isEmpty,
@@ -430,16 +429,15 @@ struct VideoDetailsView: View {
                    let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled, requestedItemID == item.id else { return }
-                    setArtworkFrame(image)
                     VideoThumbnailLoader.cacheImageInBackground(
                         image,
                         forStableKeys: [episodeArtworkKey] + [item.posterCacheKey].compactMap { $0 }
                     )
                 }
             }
-            // Snapshots created before poster-based Details do not contain the
-            // preferred No Language/English poster path. Upgrade them once.
-            if tmdbDetails?.detailsPosterPath == nil, item.manualMetadataProvider != "theporndb" {
+            // Older snapshots may only contain a language-specific poster.
+            // Refresh those records before drawing any Details artwork.
+            if tmdbDetails?.noLanguagePosterPath == nil, item.manualMetadataProvider != "theporndb" {
                 let loadedDetails = await TMDBService.shared.details(for: item.title)
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 if let loadedDetails { tmdbDetails = loadedDetails }
@@ -447,7 +445,7 @@ struct VideoDetailsView: View {
             if let tmdbDetails { VideoDetailsMemoryCache.details[metadataKey] = tmdbDetails }
             if tmdbEpisode?.imageURL == nil,
                await VideoThumbnailLoader.cachedImageAsync(forStableKey: titleArtworkKey) == nil,
-               let imageURL = isMovieDetailsPage ? tmdbDetails?.detailsPosterURL : tmdbDetails?.imageURL,
+               let imageURL = tmdbDetails?.detailsPosterURL,
                let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: imageURL),
                let image = UIImage(data: data) {
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
@@ -508,8 +506,7 @@ struct VideoDetailsView: View {
             }
             VideoDetailsMemoryCache.details[stableMetadataCacheKey] = suppliedDetails
 
-            guard isMovieDetailsPage,
-                  let posterURL = suppliedDetails.detailsPosterURL else { return }
+            guard let posterURL = suppliedDetails.detailsPosterURL else { return }
             let requestedItemID = item.id
             let artworkKey = tmdbTitleArtworkCacheKey
 
@@ -1274,14 +1271,7 @@ struct VideoDetailsView: View {
 
             // Artwork is loaded by the async details task. Never perform disk
             // reads from onAppear or a scroll-driven render transaction.
-            if !(isMovieDetailsPage
-                 && item.suppliedTMDBDetails?.detailsPosterURL != nil
-                 && item.customPosterImage == nil) {
-                frame = item.customPosterImage
-                    ?? seriesMemoryArtworkKey.flatMap {
-                        VideoDetailsMemoryCache.seriesArtwork.object(forKey: $0 as NSString)
-                    }
-            }
+            frame = item.customPosterImage
         }
     }
 

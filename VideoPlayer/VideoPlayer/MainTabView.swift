@@ -354,7 +354,10 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
 
     private func apply(_ snapshot: TMDBOnlineCatalogSnapshot) {
         trending = entries(snapshot.trending, snapshot: snapshot)
-        featured = Array(trending.prefix(10))
+        // Do not publish list-card posters to the Hero. A title becomes
+        // featured only after `enrichFeatured` has resolved its dedicated
+        // No Language poster, so the visible artwork never swaps a moment
+        // after the Home screen opens.
         newMovies = entries(snapshot.newMovies, snapshot: snapshot)
         popularMovies = entries(snapshot.popularMovies, snapshot: snapshot)
         airingTV = entries(snapshot.airingTV, snapshot: snapshot)
@@ -423,14 +426,21 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
     }
 
     private func enrichFeatured(from items: [TMDBCatalogItem]) async {
-        var enriched = featured
+        let entriesByID = Dictionary(
+            trending.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var enriched: [UnifiedMediaEntry] = []
         for item in items.prefix(10) {
-            guard let index = enriched.firstIndex(where: { $0.id == "catalog|tmdb|\(item.resolvedMediaType)|\(item.id)" }) else { continue }
+            let entryID = "catalog|tmdb|\(item.resolvedMediaType)|\(item.id)"
+            guard var entry = entriesByID[entryID] else { continue }
             if let details = await TMDBService.shared.detailsOriginalFirst(
                 for: item.displayTitle,
                 preferredMediaType: item.resolvedMediaType
-            ) {
-                enriched[index].details = details
+            ), let noLanguagePosterPath = details.noLanguagePosterPath,
+              !noLanguagePosterPath.isEmpty {
+                entry.details = details
+                enriched.append(entry)
                 featured = enriched
             }
         }
@@ -1205,12 +1215,12 @@ struct HomeLibraryView: View {
         } else {
             let pageWidth = UIScreen.main.bounds.width
             ZStack(alignment: .top) {
-                // Keep the current and prepared neighboring information layers
-                // alive instead of recreating the incoming one at the moment of
-                // a carousel step. This lets its title logo decode before the
-                // first appearance and, critically, gives foreground and pinned
-                // artwork the exact same opacity animation. The old implementation
-                // could show the new poster behind the previous title for frames.
+                // Keep neighboring information layers alive long enough to warm
+                // their title logos. Unlike the artwork, foreground copy must
+                // never cross-fade: two title treatments briefly stacked on top
+                // of each other during a carousel step (e.g. MUTINY + REACHER).
+                // The foreground therefore swaps atomically while the pinned
+                // artwork below it performs the visual fade.
                 ForEach(Array(featuredItems.enumerated()), id: \.element.id) { index, entry in
                     if shouldPrepareHeroArtwork(at: index) {
                         let isVisible = index == currentHeroIndex && isHeroAssetPrepared(entry)
@@ -1222,7 +1232,7 @@ struct HomeLibraryView: View {
                             .accessibilityHidden(!isVisible)
                     }
                 }
-                .animation(.easeInOut(duration: 0.48), value: currentHeroIndex)
+                .animation(nil, value: currentHeroIndex)
 
                 VStack {
                     Spacer()
