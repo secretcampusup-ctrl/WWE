@@ -7,83 +7,6 @@ import CryptoKit
 import Kingfisher
 import KingfisherWebP
 
-// MARK: - Diagnostic Logger
-
-/// In-memory logging system for thumbnail diagnostics
-struct ThumbnailLogEntry: Identifiable {
-    let id = UUID()
-    let timestamp: Date
-    let message: String
-    let level: LogLevel
-    let fileID: String?
-}
-
-enum LogLevel: String, CaseIterable {
-    case debug = "DEBUG"
-    case info = "INFO"
-    case warning = "WARNING"
-    case error = "ERROR"
-}
-
-class ThumbnailDiagnosticLogger {
-    static let shared = ThumbnailDiagnosticLogger()
-    
-    private let maxEntries = 500
-    private var logs: [ThumbnailLogEntry] = []
-    private let lock = NSLock()
-    
-    private init() {}
-    
-    func log(_ message: String, level: LogLevel = .info, fileID: String? = nil) {
-        lock.withLock {
-            let entry = ThumbnailLogEntry(
-                timestamp: Date(),
-                message: message,
-                level: level,
-                fileID: fileID
-            )
-            logs.append(entry)
-            
-            // Keep only last maxEntries
-            if logs.count > maxEntries {
-                logs.removeFirst(logs.count - maxEntries)
-            }
-        }
-    }
-    
-    func getLogs(filter: LogLevel? = nil, searchTerm: String? = nil) -> [ThumbnailLogEntry] {
-        return lock.withLock {
-            logs.filter { entry in
-                if let filter, entry.level != filter {
-                    return false
-                }
-                if let searchTerm, !entry.message.contains(searchTerm) {
-                    return false
-                }
-                return true
-            }
-        }
-    }
-    
-    func clear() {
-        lock.withLock {
-            logs.removeAll()
-        }
-    }
-    
-    func exportLogs() -> String {
-        return lock.withLock {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withFullDate, .withTime, .withFractionalSeconds]
-            
-            return logs.map { entry in
-                let timeStr = formatter.string(from: entry.timestamp)
-                return "[\(entry.level.rawValue)] \(timeStr) \(entry.message)"
-            }.joined(separator: "\n")
-        }
-    }
-}
-
 private struct ThePornDBPersistentMetadataRecord: Codable {
     let source: String
     let title: String?
@@ -766,7 +689,6 @@ enum VideoThumbnailLoader {
         let requestedSize = targetPointSize ?? ThumbnailPipeline.targetPointSize(for: .medium)
         let tier = ThumbnailPipeline.tier(for: requestedSize)
         let sourceURL = ThumbnailPipeline.sizedURL(from: url, tier: tier)
-        let requestKey = stableKey ?? cacheKey(for: sourceURL)
         let resourceURL = sourceURL
         let processor = ProtectedDownsamplingImageProcessor(
             targetSize: requestedSize,
@@ -1032,8 +954,6 @@ enum VideoThumbnailLoader {
 
         // Fixed poster time: 40s (or mid-point when the video is shorter).
         let targetSeconds: Double = duration > 40 ? 40.0 : max(0, duration * 0.5)
-        let lowerBound = targetSeconds
-        let upperBound = targetSeconds
 
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -1041,7 +961,7 @@ enum VideoThumbnailLoader {
         generator.requestedTimeToleranceBefore = CMTime(seconds: 1, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 1, preferredTimescale: 600)
 
-        for seconds in [targetSeconds, lowerBound, 0] {
+        for seconds in [targetSeconds, 0] {
             guard !Task.isCancelled else { return nil }
             if let cg = try? generator.copyCGImage(at: CMTime(seconds: seconds, preferredTimescale: 600), actualTime: nil) {
                 return UIImage(cgImage: cg)
@@ -1177,22 +1097,11 @@ enum VideoThumbnailLoader {
         }
     }
 
-    /// Load series poster by name (for automatic series poster matching)
-    static func loadSeriesPoster(named seriesTitle: String) async -> UIImage? {
-        let shortTitle = String(seriesTitle.prefix(8))
-        logDiagnostic("[PikPakThumbnail] series=\(shortTitle) stage=poster_fetch", level: .info, fileID: shortTitle)
-        
-        // Try to find a matching poster online (placeholder implementation)
-        // In the original, this would search for posters online
-        return nil
-    }
-
     /// Cache poster from AVAsset (for VideoPlaybackEngine)
     static func cachePoster(from asset: AVAsset, for url: URL) async -> UIImage? {
         let image = await generateThumbnail(url: url, maximumPixelSize: CGSize(width: maxPixelSize, height: maxPixelSize))
 
         if let image {
-            let cost = Int(image.size.width * image.size.height * 4)
             let maxSize: CGFloat = maxPixelSize
             let resized = image.size.width > maxSize || image.size.height > maxSize
                 ? resizeImage(image, maxSide: maxSize)
@@ -1270,9 +1179,7 @@ enum VideoThumbnailLoader {
                 if let scene = response.list.first {
                     return await metadata(from: scene, source: .jav)
                 }
-            } catch {
-                logDiagnostic("[ThePornDB] JAV search failed for query=\"\(text)\" error=\(error.localizedDescription)", level: .warning)
-            }
+            } catch {}
         }
 
         // 2) General scenes (also kept as a fallback when a JAV SKU has no match).
@@ -1290,9 +1197,7 @@ enum VideoThumbnailLoader {
             if let scene = response.list.first {
                 return await metadata(from: scene, source: .scene)
             }
-        } catch {
-            logDiagnostic("[ThePornDB] scene search failed for query=\"\(text)\" error=\(error.localizedDescription)", level: .warning)
-        }
+        } catch {}
 
         // 2) No scene matched — fall back to performers, always taking the first result.
         do {
@@ -1314,9 +1219,7 @@ enum VideoThumbnailLoader {
                     )
                 }
             }
-        } catch {
-            logDiagnostic("[ThePornDB] performer fallback failed for query=\"\(text)\" error=\(error.localizedDescription)", level: .warning)
-        }
+        } catch {}
 
         // 3) لا صورة لحد الآن — فلتر 7: أعد البحث في قسم الممثلات بأول كلمتين فقط من العنوان.
         let firstTwoWords = text.split(separator: " ").prefix(2).joined(separator: " ")
@@ -1338,7 +1241,6 @@ enum VideoThumbnailLoader {
                 coverImage: cover
             )
         } catch {
-            logDiagnostic("[ThePornDB] two-word performer fallback failed for query=\"\(firstTwoWords)\" error=\(error.localizedDescription)", level: .warning)
             return nil
         }
     }
@@ -1611,16 +1513,8 @@ enum VideoThumbnailLoader {
             let oldNamespace = cacheNamespace
             cacheNamespace = namespace
 
-            // Remove from memory - NSCache doesn't have .keys, so iterate keys manually
-            let prefix = "\(namespace)|"
-            // Get all keys from cache by iterating
-            var keysToRemove: [NSString] = []
-            // We need to track keys ourselves since NSCache doesn't expose them
-            // For now, we'll just clear all cache for this namespace by using a different approach
-            // We'll track namespace-prefixed keys in a separate set
-
-            // For the current implementation, we'll clear memory cache entirely if namespace is set
-            // since we can't efficiently iterate NSCache keys
+            // NSCache does not expose keys, so clear its memory tier before
+            // removing only this namespace from disk.
             memoryCache.removeAllObjects()
 
             // Remove from disk (delete entire folder for namespace)
@@ -1652,28 +1546,6 @@ enum VideoThumbnailLoader {
             try? FileManager.default.removeItem(at: cacheDirectory)
             try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         }
-    }
-
-    // MARK: - Diagnostic API
-
-    /// Get diagnostic logs
-    static func getDiagnosticLogs(filter: LogLevel? = nil, searchTerm: String? = nil) -> [ThumbnailLogEntry] {
-        ThumbnailDiagnosticLogger.shared.getLogs(filter: filter, searchTerm: searchTerm)
-    }
-
-    /// Clear diagnostic logs
-    static func clearDiagnosticLogs() {
-        ThumbnailDiagnosticLogger.shared.clear()
-    }
-
-    /// Export logs as string
-    static func exportDiagnosticLogs() -> String {
-        ThumbnailDiagnosticLogger.shared.exportLogs()
-    }
-
-    /// Log a diagnostic message
-    static func logDiagnostic(_ message: String, level: LogLevel = .info, fileID: String? = nil) {
-        ThumbnailDiagnosticLogger.shared.log(message, level: level, fileID: fileID)
     }
 
     // MARK: - Prefetch Request

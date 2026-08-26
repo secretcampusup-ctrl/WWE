@@ -109,13 +109,7 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
     func data(for originalRequest: URLRequest, trafficClass: TrafficClass) async throws -> (Data, URLResponse) {
         var request = originalRequest
         request.networkServiceType = trafficClass.serviceType
-        let session: URLSession
-        sessionLock.lock()
-        switch trafficClass {
-        case .video: session = videoSession
-        case .responsiveData: session = responsiveSession
-        }
-        sessionLock.unlock()
+        let session = session(for: trafficClass)
         let box = CancellableTaskBox()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -130,6 +124,15 @@ final class HighPriorityNetworkManager: @unchecked Sendable {
             }
         } onCancel: {
             box.cancel()
+        }
+    }
+
+    private func session(for trafficClass: TrafficClass) -> URLSession {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        switch trafficClass {
+        case .video: return videoSession
+        case .responsiveData: return responsiveSession
         }
     }
 }

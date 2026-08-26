@@ -1866,8 +1866,8 @@ private struct ExperimentalOnlineSourcesView: View {
                         VStack(spacing: 13) {
                             ProgressView().tint(AppPalette.purple)
                             Text(OrionCredentialStore.isReady
-                                 ? "Searching Orion and checking torrent health…"
-                                 : "Searching The Pirate Bay and checking torrent health…")
+                                ? "Searching Orion…"
+                                : "Searching The Pirate Bay…")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -1877,13 +1877,13 @@ private struct ExperimentalOnlineSourcesView: View {
                     } else if sources.isEmpty {
                         statusCard(
                             title: "No matching sources",
-                            subtitle: message ?? "No verified 720p, 1080p, 1440p, or 4K torrent was found.",
+                            subtitle: message ?? "No 720p, 1080p, 1440p, or 4K torrent was found.",
                             icon: "magnifyingglass",
                             tint: .orange
                         )
                     } else {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("VERIFIED · ONE BEST LINK PER QUALITY")
+                            Text("ONE BEST LINK PER QUALITY")
                                 .font(.caption.bold())
                                 .tracking(0.8)
                                 .foregroundStyle(.secondary)
@@ -1977,8 +1977,6 @@ private struct ExperimentalOnlineSourcesView: View {
                         .foregroundStyle(.white)
                         .lineLimit(2)
                     HStack(spacing: 7) {
-                        Label("Verified", systemImage: "checkmark.seal.fill")
-                            .foregroundStyle(.green)
                         Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
                         Text("·")
                         Text(source.sizeLabel)

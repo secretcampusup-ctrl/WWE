@@ -1551,7 +1551,7 @@ private struct OffcloudVideoDetailsHost: View {
                 dismissOnPlay: false
             )
             .fullScreenCover(isPresented: $showingPlayer) {
-                if let playbackURL = vm.nowPlayingURL, let playingFile = vm.nowPlaying {
+                if let playbackURL = vm.nowPlayingURL, vm.nowPlaying != nil {
                     RoutedVideoPlayerView(
                         url: playbackURL,
                         title: file.name,

@@ -314,17 +314,6 @@ struct VideoDetailsView: View {
                     setArtworkFrame(cachedSeriesPoster)
                     return
                 }
-                let seriesTitle = item.suppliedTMDBDetails?.title ?? item.displayTitle
-                if let seriesPoster = await VideoThumbnailLoader.loadSeriesPoster(named: seriesTitle) {
-                    guard !Task.isCancelled, requestedURL == item.url else { return }
-                    VideoThumbnailLoader.cacheImageInBackground(
-                        seriesPoster,
-                        forStableKeys: [seriesKey]
-                            + [legacySeriesKey, item.posterCacheKey].compactMap { $0 }
-                    )
-                    setArtworkFrame(seriesPoster)
-                    return
-                }
             }
 
             // Metadata artwork is already persisted on disk under these stable

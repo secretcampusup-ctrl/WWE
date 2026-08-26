@@ -636,7 +636,7 @@ final class PikPakClient {
         let pass = password ?? parsed.password ?? ""
 
         // 1) Fetch share meta (works logged-out for public shares; better with token)
-        var token: String? = try? await ensureValidToken().accessToken
+        let token: String? = try? await ensureValidToken().accessToken
 
         var components = URLComponents(string: "\(driveBase)/drive/v1/share")!
         components.queryItems = [
@@ -699,7 +699,7 @@ final class PikPakClient {
 
     /// Get a stream URL for a file inside a share (without necessarily restoring).
     func streamURLFromShare(shareId: String, fileId: String, passToken: String) async throws -> URL {
-        var token: String? = try? await ensureValidToken().accessToken
+        let token: String? = try? await ensureValidToken().accessToken
         var components = URLComponents(string: "\(driveBase)/drive/v1/share/file_info")!
         components.queryItems = [
             URLQueryItem(name: "share_id", value: shareId),
