@@ -1746,80 +1746,8 @@ private struct PikPakQualityChoiceSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                AppTheme.bg.ignoresSafeArea()
-                LinearGradient(
-                    colors: [AppPalette.purple.opacity(0.28), .clear, Color.blue.opacity(0.14)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("CHOOSE STREAM QUALITY")
-                            .font(.system(size: 11, weight: .black))
-                            .tracking(1.3)
-                            .foregroundStyle(.white.opacity(0.58))
-                        Text(VideoTitleFormatter.title(from: title))
-                            .font(.system(size: 25, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .lineLimit(2)
-                        Text("Your choice opens the player immediately. PikPak continues preparing the stream inside it.")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.68))
-                    }
-
-                    if isSearching {
-                        VStack(spacing: 18) {
-                            PikPakOrbitLoader(size: 88)
-                            Text("Finding the best available qualities…")
-                                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.78))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 34)
-                    } else if sources.isEmpty {
-                        ContentUnavailableView(
-                            "No stream qualities found",
-                            systemImage: "video.slash",
-                            description: Text(message ?? "Try another title or search provider.")
-                        )
-                        .foregroundStyle(.white.opacity(0.78))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        VStack(spacing: 11) {
-                            ForEach(sources) { source in
-                                Button { onSelect(source) } label: {
-                                    HStack(spacing: 15) {
-                                        Text(source.quality.label)
-                                            .font(.system(size: 18, weight: .black, design: .rounded))
-                                            .foregroundStyle(.black)
-                                            .frame(width: 70, height: 58)
-                                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
-                                        VStack(alignment: .leading, spacing: 5) {
-                                            Text(source.quality == .p2160 ? "Maximum detail" : source.quality == .p1080 ? "Balanced playback" : "Fast start")
-                                                .font(.system(size: 15, weight: .bold))
-                                                .foregroundStyle(.white)
-                                            Label("\(source.seeders) seeders · \(source.sizeLabel)", systemImage: "bolt.fill")
-                                                .font(.caption)
-                                                .foregroundStyle(.white.opacity(0.62))
-                                        }
-                                        Spacer()
-                                        Image(systemName: "arrow.right.circle.fill")
-                                            .font(.title2)
-                                            .foregroundStyle(.white.opacity(0.84))
-                                    }
-                                    .padding(12)
-                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.12), lineWidth: 1))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(20)
+                backgroundLayer
+                contentLayer
             }
             .navigationTitle("PikPak")
             .navigationBarTitleDisplayMode(.inline)
@@ -1829,6 +1757,123 @@ private struct PikPakQualityChoiceSheet: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var backgroundLayer: some View {
+        AppTheme.bg.ignoresSafeArea()
+        LinearGradient(
+            colors: [AppPalette.purple.opacity(0.28), .clear, Color.blue.opacity(0.14)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .ignoresSafeArea()
+    }
+
+    private var contentLayer: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            headerSection
+            statusSection
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+    }
+
+    private var headerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("CHOOSE STREAM QUALITY")
+                .font(.system(size: 11, weight: .black))
+                .tracking(1.3)
+                .foregroundStyle(.white.opacity(0.58))
+            Text(VideoTitleFormatter.title(from: title))
+                .font(.system(size: 25, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            Text("Your choice opens the player immediately. PikPak continues preparing the stream inside it.")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.68))
+        }
+    }
+
+    @ViewBuilder
+    private var statusSection: some View {
+        if isSearching {
+            searchingView
+        } else if sources.isEmpty {
+            emptyView
+        } else {
+            sourcesListView
+        }
+    }
+
+    private var searchingView: some View {
+        VStack(spacing: 18) {
+            PikPakOrbitLoader(size: 88)
+            Text("Finding the best available qualities…")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.78))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 34)
+    }
+
+    private var emptyView: some View {
+        ContentUnavailableView(
+            "No stream qualities found",
+            systemImage: "video.slash",
+            description: Text(message ?? "Try another title or search provider.")
+        )
+        .foregroundStyle(.white.opacity(0.78))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var sourcesListView: some View {
+        VStack(spacing: 11) {
+            ForEach(sources) { source in
+                PikPakSourceRow(source: source, onSelect: onSelect)
+            }
+        }
+    }
+}
+
+private struct PikPakSourceRow: View {
+    let source: OnlineTorrentSource
+    let onSelect: (OnlineTorrentSource) -> Void
+
+    private var subtitleText: String {
+        switch source.quality {
+        case .p2160: return "Maximum detail"
+        case .p1080: return "Balanced playback"
+        default: return "Fast start"
+        }
+    }
+
+    var body: some View {
+        Button { onSelect(source) } label: {
+            HStack(spacing: 15) {
+                Text(source.quality.label)
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .foregroundStyle(.black)
+                    .frame(width: 70, height: 58)
+                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(subtitleText)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                    Label("\(source.seeders) seeders · \(source.sizeLabel)", systemImage: "bolt.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+                Spacer()
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.white.opacity(0.84))
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.12), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 }
 
