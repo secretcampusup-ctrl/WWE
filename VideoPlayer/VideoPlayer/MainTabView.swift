@@ -347,7 +347,7 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
             let cached = await TMDBOnlineCatalogService.shared.cachedSnapshot()
             if !cached.isEmpty {
                 apply(cached)
-                await enrichFeatured(from: cached.newMovies)
+                await enrichFeatured(from: bestMoviesInTheWorld)
             }
         }
         let currentSnapshot = await TMDBOnlineCatalogService.shared.cachedSnapshot()
@@ -359,7 +359,7 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
         do {
             let snapshot = try await TMDBOnlineCatalogService.shared.refresh(force: force)
             apply(snapshot)
-            await enrichFeatured(from: snapshot.newMovies)
+            await enrichFeatured(from: bestMoviesInTheWorld)
         } catch {
             if featured.isEmpty { self.error = "Could not refresh the online catalogue" }
         }
@@ -439,24 +439,29 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
                 source: .catalog(mediaType: mediaType, tmdbID: item.id),
                 streamURL: URL(string: "catalog://tmdb/\(mediaType)/\(item.id)")!,
                 details: details,
-                metadataLookupCompleted: true,
-                adultLookupCompleted: true
+                metadataLookupCompleted: true
             )
         })
     }
 
-    private func enrichFeatured(from items: [TMDBCatalogItem]) async {
-        let entriesByID = Dictionary(
-            newMovies.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
+    /// The best movies in the world, world-class-quality proxy for an IMDB
+    /// Top 100: TMDB's own top-rated ranking (there is no public IMDB list
+    /// API), movies only (no TV), capped at 100 and ordered by rating.
+    /// `topRated` must already be populated by `apply(_:)` before this is read.
+    private var bestMoviesInTheWorld: [UnifiedMediaEntry] {
+        Array(
+            topRated
+                .filter { $0.details?.mediaType == "movie" }
+                .prefix(100)
         )
+    }
+
+    private func enrichFeatured(from items: [UnifiedMediaEntry]) async {
         var enriched: [UnifiedMediaEntry] = []
-        for item in items.prefix(10) {
-            let entryID = "catalog|tmdb|\(item.resolvedMediaType)|\(item.id)"
-            guard var entry = entriesByID[entryID] else { continue }
+        for var entry in items.prefix(10) {
             if let details = await TMDBService.shared.detailsOriginalFirst(
-                for: item.displayTitle,
-                preferredMediaType: item.resolvedMediaType
+                for: entry.title,
+                preferredMediaType: entry.details?.mediaType ?? "movie"
             ), let noLanguagePosterPath = details.noLanguagePosterPath,
               !noLanguagePosterPath.isEmpty {
                 entry.details = details

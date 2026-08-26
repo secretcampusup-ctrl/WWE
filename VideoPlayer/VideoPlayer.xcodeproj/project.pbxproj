@@ -48,11 +48,6 @@
 		AA000037 /* PikPakAutoSyncSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000038 /* PikPakAutoSyncSettingsView.swift */; };
 		AA000035 /* LinkResolver+CleanTitle.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000036 /* LinkResolver+CleanTitle.swift */; };
 
-		AA000040 /* ThePornDBSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000040 /* ThePornDBSettings.swift */; };
-		AA000041 /* ThePornDBModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000041 /* ThePornDBModels.swift */; };
-		AA000042 /* ThePornDBAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000042 /* ThePornDBAPIService.swift */; };
-		AA000043 /* ThePornDBSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000043 /* ThePornDBSearchView.swift */; };
-		AA000044 /* ThePornDBSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000044 /* ThePornDBSettingsView.swift */; };
 		AA000045 /* SplashScreenView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000045 /* SplashScreenView.swift */; };
 		AA000047 /* TMDBService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000047 /* TMDBService.swift */; };
 		AA000048 /* TMDBSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000048 /* TMDBSettingsView.swift */; };
@@ -103,11 +98,6 @@
 		BB000038 /* PikPakAutoSyncSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PikPakAutoSyncSettingsView.swift; sourceTree = "<group>"; };
 		BB000036 /* LinkResolver+CleanTitle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LinkResolver+CleanTitle.swift"; sourceTree = "<group>"; };
 
-		BB000040 /* ThePornDBSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThePornDBSettings.swift; sourceTree = "<group>"; };
-		BB000041 /* ThePornDBModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThePornDBModels.swift; sourceTree = "<group>"; };
-		BB000042 /* ThePornDBAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThePornDBAPIService.swift; sourceTree = "<group>"; };
-		BB000043 /* ThePornDBSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThePornDBSearchView.swift; sourceTree = "<group>"; };
-		BB000044 /* ThePornDBSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThePornDBSettingsView.swift; sourceTree = "<group>"; };
 		BB000045 /* SplashScreenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashScreenView.swift; sourceTree = "<group>"; };
 		BB000047 /* TMDBService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBService.swift; sourceTree = "<group>"; };
 		BB000048 /* TMDBSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBSettingsView.swift; sourceTree = "<group>"; };
@@ -173,11 +163,6 @@
 				BB000031 /* PikPakWebDAVView.swift */,
 				BB000037 /* PikPakAutoSyncManager.swift */,
 				BB000038 /* PikPakAutoSyncSettingsView.swift */,
-				BB000040 /* ThePornDBSettings.swift */,
-				BB000041 /* ThePornDBModels.swift */,
-				BB000042 /* ThePornDBAPIService.swift */,
-				BB000043 /* ThePornDBSearchView.swift */,
-				BB000044 /* ThePornDBSettingsView.swift */,
 				BB000047 /* TMDBService.swift */,
 				BB000048 /* TMDBSettingsView.swift */,
 				BB000045 /* SplashScreenView.swift */,
@@ -300,11 +285,6 @@
 				AA000030 /* PikPakWebDAVView.swift in Sources */,
 				AA000036 /* PikPakAutoSyncManager.swift in Sources */,
 				AA000037 /* PikPakAutoSyncSettingsView.swift in Sources */,
-				AA000040 /* ThePornDBSettings.swift in Sources */,
-				AA000041 /* ThePornDBModels.swift in Sources */,
-				AA000042 /* ThePornDBAPIService.swift in Sources */,
-				AA000043 /* ThePornDBSearchView.swift in Sources */,
-				AA000044 /* ThePornDBSettingsView.swift in Sources */,
 				AA000035 /* LinkResolver+CleanTitle.swift in Sources */,
 				AA000045 /* SplashScreenView.swift in Sources */,
 				AA000047 /* TMDBService.swift in Sources */,

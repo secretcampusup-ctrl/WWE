@@ -62,7 +62,6 @@ enum SecureCredentialStore {
 
 enum AppCredentialKeys {
     static let tmdb = "tmdb-read-access-token"
-    static let thePornDB = "theporndb-api-key"
     static let pikpakAccount = "pikpak-account"
     static let orionUserAPIKey = "orion-user-api-key"
     static let orionAppAPIKey = "orion-app-api-key"

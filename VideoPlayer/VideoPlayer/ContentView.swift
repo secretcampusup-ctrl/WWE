@@ -688,7 +688,6 @@ struct MoviePosterCard: View {
     @State private var selectedThumbnail: PhotosPickerItem?
     @State private var isChoosingThumbnail = false
     @State private var isSearchingForCover = false
-    @State private var isSearchingThePornDB = false
     @State private var isActivating = false
 
     var body: some View {
@@ -802,11 +801,6 @@ struct MoviePosterCard: View {
                 } label: {
                     Label("Search Cover Images", systemImage: "magnifyingglass")
                 }
-                Button {
-                    isSearchingThePornDB = true
-                } label: {
-                    Label("Search ThePornDB", systemImage: "star.fill")
-                }
             }
             if link.thumbnailFileName != nil, let onClearThumbnail {
                 Button(role: .destructive) { onClearThumbnail() } label: {
@@ -822,12 +816,6 @@ struct MoviePosterCard: View {
             YandexImageSearchView(initialQuery: link.displayTitle) { image in
                 onSetThumbnail?(image)
                 isSearchingForCover = false
-            }
-        }
-        .sheet(isPresented: $isSearchingThePornDB) {
-            ThePornDBSearchView(initialQuery: link.displayTitle) { image in
-                onSetThumbnail?(image)
-                isSearchingThePornDB = false
             }
         }
         .onChange(of: selectedThumbnail) { item in

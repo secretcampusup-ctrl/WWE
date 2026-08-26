@@ -2202,9 +2202,8 @@ private enum ExternalSubtitleParser {
 private struct PlayerLoadingReadout: View {
     let isLoading: Bool
     let bytesPerSecond: Double
-    @State private var percent = 3
     @State private var isVisible = false
-    @State private var countingTask: Task<Void, Never>?
+    @State private var isAnimating = false
 
     private var speedText: String {
         let speed = max(0, bytesPerSecond)
@@ -2214,22 +2213,32 @@ private struct PlayerLoadingReadout: View {
     }
 
     var body: some View {
-        HStack(spacing: 14) {
-            Text(speedText)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
-                .monospacedDigit()
+        HStack(spacing: 11) {
+            ZStack {
+                Circle()
+                    .stroke(Color.white.opacity(0.17), lineWidth: 2.5)
+                Circle()
+                    .trim(from: 0.09, to: 0.72)
+                    .stroke(AppPalette.gradient, style: StrokeStyle(lineWidth: 2.8, lineCap: .round))
+                    .rotationEffect(.degrees(isAnimating ? 360 : 0))
+            }
+            .frame(width: 24, height: 24)
 
-            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                .fill(AppPalette.gradient)
-                .frame(width: 7, height: 7)
-                .rotationEffect(.degrees(45))
-                .shadow(color: AppPalette.accent.opacity(0.75), radius: 5)
-
-            Text("\(percent)%")
-                .font(.system(size: 17, weight: .heavy, design: .rounded))
-                .monospacedDigit()
+            VStack(alignment: .leading, spacing: 1) {
+                Text("BUFFERING")
+                    .font(.system(size: 10, weight: .black, design: .rounded))
+                    .tracking(0.9)
+                Text(speedText)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.75))
+            }
         }
-        .foregroundColor(.white)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background(Color.black.opacity(0.52), in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.8))
         .shadow(color: .black.opacity(0.95), radius: 4, y: 2)
         .shadow(color: .black.opacity(0.72), radius: 12, y: 5)
         .opacity(isVisible ? 1 : 0)
@@ -2238,28 +2247,18 @@ private struct PlayerLoadingReadout: View {
         .animation(.easeInOut(duration: 0.2), value: isVisible)
         .onAppear { updateLoadingState(isLoading) }
         .onChange(of: isLoading) { updateLoadingState($0) }
-        .onDisappear { countingTask?.cancel() }
+        .onAppear {
+            withAnimation(.linear(duration: 1.05).repeatForever(autoreverses: false)) {
+                isAnimating = true
+            }
+        }
     }
 
     private func updateLoadingState(_ loading: Bool) {
-        countingTask?.cancel()
         if loading {
-            percent = 3
             isVisible = true
-            countingTask = Task { @MainActor in
-                while !Task.isCancelled, percent < 96 {
-                    try? await Task.sleep(nanoseconds: 180_000_000)
-                    guard !Task.isCancelled else { return }
-                    percent = min(96, percent + max(1, (100 - percent) / 10))
-                }
-            }
         } else if isVisible {
-            percent = 100
-            countingTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 320_000_000)
-                guard !Task.isCancelled else { return }
-                isVisible = false
-            }
+            isVisible = false
         }
     }
 }

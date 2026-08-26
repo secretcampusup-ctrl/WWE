@@ -22,8 +22,6 @@ struct PikPakWebDAVView: View {
     @State private var showingAutoSync = false
     @State private var searchCoverKey: String?
     @State private var searchCoverTitle = ""
-    @State private var thePornDBKey: String?
-    @State private var thePornDBTitle = ""
 
     // 2 per row — matches the Offcloud grid exactly.
     private let columns = (0..<3).map { _ in GridItem(.flexible(), spacing: 10, alignment: .top) }
@@ -131,15 +129,6 @@ struct PikPakWebDAVView: View {
             YandexImageSearchView(initialQuery: searchCoverTitle) { image in
                 if let key = searchCoverKey { cachePikPakCover(image, key: key) }
                 searchCoverKey = nil
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { thePornDBKey != nil },
-            set: { if !$0 { thePornDBKey = nil } }
-        )) {
-            ThePornDBSearchView(initialQuery: thePornDBTitle) { image in
-                if let key = thePornDBKey { cachePikPakCover(image, key: key) }
-                thePornDBKey = nil
             }
         }
         // Folder changes are immediate: no slide, fade or list transition.
@@ -349,10 +338,6 @@ struct PikPakWebDAVView: View {
                                         searchCoverTitle = file.displayName
                                         searchCoverKey = coverKey(for: file, server: server)
                                     },
-                                    onSearchThePornDB: {
-                                        thePornDBTitle = file.displayName
-                                        thePornDBKey = coverKey(for: file, server: server)
-                                    },
                                     onRemoveCover: {
                                         PikPakFolderCoverStore.remove(for: coverKey(for: file, server: server))
                                         VideoThumbnailLoader.removeCachedImage(forStableKey: coverKey(for: file, server: server))
@@ -546,8 +531,7 @@ struct PikPakWebDAVView: View {
         server.id.uuidString + "|" + (file.isDirectory ? "folder" : "file") + "|" + file.path + "|" + file.name
     }
 
-    /// Saves a manually picked cover (Yandex search/paste or ThePornDB search)
-    /// so it persists and overrides the automatic ThePornDB thumbnail.
+    /// Saves a manually picked cover so it persists across folder refreshes.
     private func cachePikPakCover(_ image: UIImage, key: String) {
         PikPakFolderCoverStore.save(image, for: key)
         folderCoverVersion &+= 1
@@ -661,21 +645,6 @@ actor PikPakPersistentPosterLoader {
         tasks[taskKey] = nil
         return result
     }
-    func cover(for key: String, query: String) async -> UIImage? {
-        if let existing = tasks[key] { return await existing.value }
-        let task: Task<UIImage?, Never> = Task.detached(priority: .utility) {
-            await ThumbnailLoadGate.shared.acquire()
-            defer { Task { await ThumbnailLoadGate.shared.release() } }
-            guard let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query),
-                  let cover = metadata.coverImage else { return nil }
-            await PikPakFolderCoverStore.saveAutomaticCoverAsync(cover, for: key)
-            return cover
-        }
-        tasks[key] = task
-        let result = await task.value
-        tasks[key] = nil
-        return result
-    }
 }
 
 private struct PikPakLocation: Identifiable {
@@ -747,7 +716,6 @@ private struct PikPakFilePoster: View {
     let posterRefreshVersion: Int
     let usesMainFolderArtwork: Bool
     var onSearchCover: (() -> Void)? = nil
-    var onSearchThePornDB: (() -> Void)? = nil
     var onRemoveCover: (() -> Void)? = nil
     let action: () -> Void
     @ObservedObject private var downloadManager = VideoDownloadManager.shared
@@ -760,7 +728,6 @@ private struct PikPakFilePoster: View {
         posterRefreshVersion: Int,
         usesMainFolderArtwork: Bool,
         onSearchCover: (() -> Void)? = nil,
-        onSearchThePornDB: (() -> Void)? = nil,
         onRemoveCover: (() -> Void)? = nil,
         action: @escaping () -> Void
     ) {
@@ -769,7 +736,6 @@ private struct PikPakFilePoster: View {
         self.posterRefreshVersion = posterRefreshVersion
         self.usesMainFolderArtwork = usesMainFolderArtwork
         self.onSearchCover = onSearchCover
-        self.onSearchThePornDB = onSearchThePornDB
         self.onRemoveCover = onRemoveCover
         self.action = action
         _poster = State(initialValue: nil)
@@ -894,11 +860,6 @@ private struct PikPakFilePoster: View {
                 return
             }
 
-            // Non-TMDB videos retain the existing metadata provider as fallback.
-            if !file.isDirectory, !query.isEmpty, ThePornDBSettings.hasValidAPIKey,
-               let cover = await PikPakPersistentPosterLoader.shared.cover(for: stableCacheKey, query: query) {
-                poster = cover
-            }
             isLoadingPoster = false
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
@@ -928,11 +889,6 @@ private struct PikPakFilePoster: View {
         if let onSearchCover {
             Button(action: onSearchCover) {
                 Label("Search or Paste Image URL", systemImage: "magnifyingglass")
-            }
-        }
-        if let onSearchThePornDB {
-            Button(action: onSearchThePornDB) {
-                Label("Search ThePornDB", systemImage: "star.fill")
             }
         }
         if let onRemoveCover {

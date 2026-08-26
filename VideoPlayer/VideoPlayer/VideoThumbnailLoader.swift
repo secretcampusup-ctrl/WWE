@@ -7,84 +7,6 @@ import CryptoKit
 import Kingfisher
 import KingfisherWebP
 
-private struct ThePornDBPersistentMetadataRecord: Codable {
-    let source: String
-    let title: String?
-    let performers: [String]
-    let tags: [String]
-    let date: String?
-    let siteName: String?
-}
-
-/// Stores textual ThePornDB results independently from the in-memory Details
-/// view. Covers use the shared persistent artwork store, so reopening the app
-/// does not repeat either request.
-private actor ThePornDBPersistentMetadataStore {
-    static let shared = ThePornDBPersistentMetadataStore()
-
-    private var records: [String: ThePornDBPersistentMetadataRecord]
-    private let fileURL: URL
-
-    init() {
-        let fileManager = FileManager.default
-        let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PersistentMetadata/ThePornDB", isDirectory: true)
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        var resourceValues = URLResourceValues()
-        resourceValues.isExcludedFromBackup = true
-        var mutableDirectory = directory
-        try? mutableDirectory.setResourceValues(resourceValues)
-        fileURL = directory.appendingPathComponent("metadata-v1.json")
-        if let data = try? Data(contentsOf: fileURL),
-           let decoded = try? JSONDecoder().decode([String: ThePornDBPersistentMetadataRecord].self, from: data) {
-            records = decoded
-        } else {
-            records = [:]
-        }
-    }
-
-    nonisolated static func normalizedKey(for query: String) -> String {
-        query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased()
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    nonisolated static func posterKey(for query: String) -> String {
-        "theporndb-metadata|\(normalizedKey(for: query))"
-    }
-
-    func metadata(for query: String) -> VideoThumbnailLoader.ThePornDBMetadata? {
-        let key = Self.normalizedKey(for: query)
-        guard let record = records[key],
-              let source = VideoThumbnailLoader.ThePornDBMetadata.Source(rawValue: record.source) else { return nil }
-        return VideoThumbnailLoader.ThePornDBMetadata(
-            source: source,
-            title: record.title,
-            performers: record.performers,
-            tags: record.tags,
-            date: record.date,
-            siteName: record.siteName,
-            coverImage: VideoThumbnailLoader.cachedImage(forStableKey: Self.posterKey(for: query))
-        )
-    }
-
-    func save(_ metadata: VideoThumbnailLoader.ThePornDBMetadata, for query: String) {
-        let key = Self.normalizedKey(for: query)
-        guard !key.isEmpty else { return }
-        records[key] = ThePornDBPersistentMetadataRecord(
-            source: metadata.source.rawValue,
-            title: metadata.title,
-            performers: metadata.performers,
-            tags: metadata.tags,
-            date: metadata.date,
-            siteName: metadata.siteName
-        )
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-    }
-}
-
 extension NSLock {
     func withLock<T>(_ body: () -> T) -> T {
         lock()
@@ -118,7 +40,7 @@ enum ThumbnailSizeTier: String {
 /// at the same instant, no matter which call site triggered them —
 /// `schedulePrefetchPosters` below, or a grid cell's own `.task` (e.g.
 /// `PikPakFilePoster` in PikPakWebDAVView.swift). Without this, a screen with
-/// many videos can fire dozens of simultaneous ThePornDB/network requests the
+/// many videos can fire dozens of simultaneous network requests the
 /// moment it appears, which is what was causing the app to get killed for
 /// memory pressure. Requests still queue and run — nothing is dropped —
 /// they just run a few at a time instead of all at once.
@@ -301,13 +223,11 @@ enum VideoThumbnailLoader {
     // a screen appeared, and downloading remote poster URLs on appear.
     //
     // This does NOT affect:
-    //   - Manual actions the user explicitly triggers (Yandex cover search, ThePornDB
-    //     search screen, picking a custom poster from Photos, "Download All Thumbnails",
+    //   - Manual actions the user explicitly triggers (Yandex cover search,
+    //     picking a custom poster from Photos, "Download All Thumbnails",
     //     "Generate IMG from Video").
     //   - Reading locally cached images already on disk.
     //   - Generating a poster from a video that's already playing (no extra network use).
-    //   - Automatic ThePornDB metadata lookup (see `fetchThePornDBMetadata`), which is a
-    //     deliberate, separate exception and always runs regardless of this switch.
     //
     // Set to `false` so opening the app / browsing lists never starts a silent download.
     static let isAutomaticDownloadEnabled = false
@@ -1128,129 +1048,6 @@ enum VideoThumbnailLoader {
         return nil
     }
 
-    /// Combined metadata pulled from ThePornDB for a video: whichever of a scene or a
-    /// performer matched first, plus the cover image already downloaded.
-    struct ThePornDBMetadata {
-        enum Source: String { case scene, jav, performer }
-        let source: Source
-        let title: String?
-        let performers: [String]
-        let tags: [String]
-        let date: String?
-        let siteName: String?
-        let coverImage: UIImage?
-    }
-
-    /// Automatic ThePornDB metadata lookup — this is intentionally NOT gated by
-    /// `isAutomaticDownloadEnabled`. Every other automatic network fetch in this file
-    /// stays off by default; ThePornDB enrichment is the one deliberate exception and
-    /// runs everywhere the app shows a video (details screen, folder covers, etc).
-    ///
-    /// يجلب بيانات (غلاف + عنوان + ممثلين + تاغز + تاريخ) من ThePornDB اعتماداً على
-    /// النص المفلتر (العنوان النظيف للفيديو). يبحث أولاً في المشاهد (scenes)، وإذا ما
-    /// كانت هناك نتائج يتحول للبحث في الممثلين (performers) — ويختار أول نتيجة دائماً
-    /// في الحالتين.
-    static func fetchThePornDBMetadata(for query: String) async -> ThePornDBMetadata? {
-        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, ThePornDBSettings.hasValidAPIKey else { return nil }
-
-        if let cached = await ThePornDBPersistentMetadataStore.shared.metadata(for: text) {
-            return cached
-        }
-
-        guard let fetched = await fetchThePornDBMetadataFromNetwork(for: text) else { return nil }
-        if let cover = fetched.coverImage {
-            cacheImageInBackground(cover, forStableKey: ThePornDBPersistentMetadataStore.posterKey(for: text))
-        }
-        await ThePornDBPersistentMetadataStore.shared.save(fetched, for: text)
-        return fetched
-    }
-
-    private static func fetchThePornDBMetadataFromNetwork(for text: String) async -> ThePornDBMetadata? {
-
-        // 1) Catalogue codes belong to ThePornDB's dedicated JAV endpoint. Sending
-        // them only to /scenes is why valid codes such as JUR-174 returned nothing.
-        if VideoTitleFormatter.catalogIdentifier(from: text) != nil {
-            do {
-                let response = try await ThePornDBAPIService.shared.searchJav(
-                    query: text,
-                    limit: ThePornDBSettings.SceneSearch.defaultLimit
-                )
-                if let scene = response.list.first {
-                    return await metadata(from: scene, source: .jav)
-                }
-            } catch {}
-        }
-
-        // 2) General scenes (also kept as a fallback when a JAV SKU has no match).
-        do {
-            let limit = ThePornDBSettings.SceneSearch.defaultLimit
-            var year: Int?
-            if ThePornDBSettings.SceneSearch.filterByYear {
-                year = ThePornDBSettings.SceneSearch.year
-            }
-            let response = try await ThePornDBAPIService.shared.searchScenes(
-                query: text,
-                limit: limit,
-                year: year
-            )
-            if let scene = response.list.first {
-                return await metadata(from: scene, source: .scene)
-            }
-        } catch {}
-
-        // 2) No scene matched — fall back to performers, always taking the first result.
-        do {
-            let response = try await ThePornDBAPIService.shared.searchPerformers(query: text, limit: 1)
-            if let performer = response.list.first {
-                var cover: UIImage?
-                if let imageURL = performer.bestImage {
-                    cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
-                }
-                if cover != nil {
-                    return ThePornDBMetadata(
-                        source: .performer,
-                        title: performer.name,
-                        performers: [performer.name].compactMap { $0 },
-                        tags: performer.extras?.aliases ?? [],
-                        date: performer.extras?.birthday,
-                        siteName: performer.extras?.nationality,
-                        coverImage: cover
-                    )
-                }
-            }
-        } catch {}
-
-        // 3) لا صورة لحد الآن — فلتر 7: أعد البحث في قسم الممثلات بأول كلمتين فقط من العنوان.
-        let firstTwoWords = text.split(separator: " ").prefix(2).joined(separator: " ")
-        guard !firstTwoWords.isEmpty, firstTwoWords != text else { return nil }
-        do {
-            let response = try await ThePornDBAPIService.shared.searchPerformers(query: firstTwoWords, limit: 1)
-            guard let performer = response.list.first else { return nil }
-            var cover: UIImage?
-            if let imageURL = performer.bestImage {
-                cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
-            }
-            return ThePornDBMetadata(
-                source: .performer,
-                title: performer.name,
-                performers: [performer.name].compactMap { $0 },
-                tags: performer.extras?.aliases ?? [],
-                date: performer.extras?.birthday,
-                siteName: performer.extras?.nationality,
-                coverImage: cover
-            )
-        } catch {
-            return nil
-        }
-    }
-
-    /// Cover-only convenience wrapper around `fetchThePornDBMetadata`, kept for call
-    /// sites that only need the image (e.g. folder covers).
-    static func downloadThePornDBCoverImage(for query: String) async -> UIImage? {
-        await fetchThePornDBMetadata(for: query)?.coverImage
-    }
-
     // MARK: - Prefetch
 
 
@@ -1266,8 +1063,7 @@ enum VideoThumbnailLoader {
                 remotePosterURL: link.remotePosterURL.flatMap(URL.init(string:)),
                 stableKey: link.favoriteIdentity ?? "saved|\(link.id.uuidString)",
                 headers: [:],
-                fileExtension: link.fileExtension,
-                searchQuery: VideoTitleFormatter.title(from: link.title)
+                fileExtension: link.fileExtension
             )
         }
         schedulePrefetchPosters(requests)
@@ -1325,12 +1121,6 @@ enum VideoThumbnailLoader {
                 stableKey: request.stableKey,
                 targetPointSize: target
             )
-        }
-
-        // خطوة أخيرة: لو فشلت الصورة البعيدة واستخراج إطار الفيديو، جرّب
-        // جلب غلاف تلقائيًا من ThePornDB باستخدام عنوان الرابط.
-        if image == nil, let query = request.searchQuery, !query.isEmpty {
-            image = await downloadThePornDBCoverImage(for: query)
         }
 
         if let image, cachedImage(forStableKey: request.stableKey) == nil {
@@ -1451,25 +1241,6 @@ enum VideoThumbnailLoader {
         }
     }
 
-    private static func metadata(
-        from scene: ThePornDBScene,
-        source: ThePornDBMetadata.Source
-    ) async -> ThePornDBMetadata {
-        var cover: UIImage?
-        if let imageURL = scene.bestImage {
-            cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
-        }
-        return ThePornDBMetadata(
-            source: source,
-            title: scene.title,
-            performers: (scene.performers ?? []).compactMap { $0.name },
-            tags: scene.tagNames,
-            date: scene.date,
-            siteName: scene.site,
-            coverImage: cover
-        )
-    }
-
     static func deleteCustomPoster(fileName: String) {
         let url = customDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: url)
@@ -1557,24 +1328,19 @@ enum VideoThumbnailLoader {
         let stableKey: String
         let headers: [String: String]
         let fileExtension: String
-        /// عنوان نصي اختياري يُستخدم كخطوة أخيرة لجلب غلاف تلقائيًا من ThePornDB
-        /// إن فشلت الصورة البعيدة واستخراج إطار الفيديو معًا.
-        let searchQuery: String?
 
         init(
             url: URL,
             remotePosterURL: URL? = nil,
             stableKey: String,
             headers: [String: String],
-            fileExtension: String,
-            searchQuery: String? = nil
+            fileExtension: String
         ) {
             self.url = url
             self.remotePosterURL = remotePosterURL
             self.stableKey = stableKey
             self.headers = headers
             self.fileExtension = fileExtension
-            self.searchQuery = searchQuery
         }
     }
 }
@@ -1836,25 +1602,5 @@ struct PosterThumbnailView: View {
             return
         }
 
-        // 4) Last resort, and the one automatic network call that's always allowed:
-        // look the (filtered) title up on ThePornDB — scenes first, performers next.
-        // Gated: this runs from every grid/list cell across the app (Offcloud,
-        // Recent, Media, PikPak) via this same shared view, so without a shared
-        // cap a screen with many un-cached items fires one request per cell at
-        // once — that's what was spiking memory and getting the app killed,
-        // including just opening a tab with a long history.
-        guard !title.isEmpty else { return }
-        let query = VideoTitleFormatter.title(from: title)
-        await ThumbnailLoadGate.shared.acquire()
-        defer { Task { await ThumbnailLoadGate.shared.release() } }
-        guard !Task.isCancelled else { return }
-        if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query),
-           let cover = metadata.coverImage {
-            image = cover
-            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: canonicalKey)
-            if let resolvedStableCacheKey {
-                VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: resolvedStableCacheKey)
-            }
-        }
     }
 }

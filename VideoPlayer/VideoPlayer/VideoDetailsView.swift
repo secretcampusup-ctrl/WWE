@@ -40,7 +40,6 @@ struct VideoDetailsItem: Identifiable {
     /// Episode URLs and poster keys may differ, but header artwork must not.
     var seriesIdentity: String? = nil
     var suppliedTMDBDetails: TMDBTitleDetails? = nil
-    var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? = nil
     var manualMetadataProvider: String? = nil
 
     var fileSizeLabel: String {
@@ -137,7 +136,6 @@ struct VideoDetailsItem: Identifiable {
 private enum VideoDetailsMemoryCache {
     static var details: [String: TMDBTitleDetails] = [:]
     static var episodes: [String: TMDBEpisodeDetails] = [:]
-    static var adultMetadata: [String: VideoThumbnailLoader.ThePornDBMetadata] = [:]
     static let seriesArtwork: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 12
@@ -166,7 +164,6 @@ struct VideoDetailsView: View {
     @State private var showDeleteConfirmation = false
     @State private var showDeleteUnavailable = false
     @State private var showPlaylistPicker = false
-    @State private var thePornDBMetadata: VideoThumbnailLoader.ThePornDBMetadata?
     @State private var tmdbDetails: TMDBTitleDetails?
     @State private var tmdbEpisode: TMDBEpisodeDetails?
     @State private var isPreparingPlayback = false
@@ -241,8 +238,6 @@ struct VideoDetailsView: View {
                         videoInformationCard
                         if let tmdbDetails {
                             tmdbInformationCard(tmdbDetails)
-                        } else if ThePornDBSettings.isEnabled, let thePornDBMetadata {
-                            thePornDBInfoCard(thePornDBMetadata)
                         }
                         if !suggestions.isEmpty {
                             unwatchedSuggestionsSection
@@ -276,10 +271,6 @@ struct VideoDetailsView: View {
                 setArtworkFrame(custom)
                 return
             }
-
-            // TMDB artwork is loaded only from its No Language poster below.
-            // Do not flash a grid image or a generated video frame first.
-            guard item.manualMetadataProvider == "theporndb" else { return }
 
             // A catalog movie/show already knows the exact portrait artwork that
             // Details must use. Do not briefly show the grid poster, a generated
@@ -362,8 +353,6 @@ struct VideoDetailsView: View {
                 guard !Task.isCancelled, requestedURL == item.url else { return }
                 setArtworkFrame(highResolution)
             }
-            // Note: the ThePornDB cover/metadata fallback runs in its own `.task`
-            // below (always on), so it isn't duplicated here.
         }
         .onAppear {
             prepareForCurrentItem()
@@ -387,7 +376,6 @@ struct VideoDetailsView: View {
             withAnimation(.easeOut(duration: 0.18)) { isPreparingPlayback = false }
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
-            guard item.manualMetadataProvider == "theporndb" else { return }
             guard let key = notification.object as? String,
                   key == item.posterCacheKey else { return }
             Task {
@@ -396,20 +384,12 @@ struct VideoDetailsView: View {
                 }
             }
         }
-        // ThePornDB metadata (cover + title/performers/tags/date) is the one automatic
-        // lookup that's always on, independent of the poster-frame logic above — see
-        // VideoThumbnailLoader.fetchThePornDBMetadata.
         .task(id: metadataLoadingIdentity) {
             let requestedItemID = item.id
             let metadataKey = stableMetadataCacheKey
-            tmdbDetails = item.manualMetadataProvider == "theporndb"
-                ? nil
-                : (item.suppliedTMDBDetails ?? VideoDetailsMemoryCache.details[metadataKey])
+            tmdbDetails = item.suppliedTMDBDetails ?? VideoDetailsMemoryCache.details[metadataKey]
             tmdbEpisode = item.relatedEpisodes.isEmpty
                 ? VideoDetailsMemoryCache.episodes[metadataKey]
-                : nil
-            thePornDBMetadata = ThePornDBSettings.isEnabled && item.manualMetadataProvider != "tmdb"
-                ? (item.suppliedAdultMetadata ?? VideoDetailsMemoryCache.adultMetadata[metadataKey])
                 : nil
 
             let episodeArtworkKey = "tmdb-episode|\(metadataKey)"
@@ -437,7 +417,7 @@ struct VideoDetailsView: View {
             }
             // Older snapshots may only contain a language-specific poster.
             // Refresh those records before drawing any Details artwork.
-            if tmdbDetails?.noLanguagePosterPath == nil, item.manualMetadataProvider != "theporndb" {
+            if tmdbDetails?.noLanguagePosterPath == nil {
                 let loadedDetails = await TMDBService.shared.details(for: item.title)
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 if let loadedDetails { tmdbDetails = loadedDetails }
@@ -470,32 +450,9 @@ struct VideoDetailsView: View {
                 }
             }
             guard tmdbDetails == nil else { return }
-            if ThePornDBSettings.isEnabled, thePornDBMetadata == nil {
-                thePornDBMetadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: item.displayTitle)
-            }
-            if ThePornDBSettings.isEnabled, let thePornDBMetadata {
-                VideoDetailsMemoryCache.adultMetadata[metadataKey] = thePornDBMetadata
-            }
-            if ThePornDBSettings.isEnabled, let cover = thePornDBMetadata?.coverImage {
-                if frame == nil || item.suppliedAdultMetadata != nil || item.manualMetadataProvider == "theporndb" {
-                    setArtworkFrame(cover)
-                }
-                VideoThumbnailLoader.cacheImageInBackground(
-                    cover,
-                    forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: item.title)
-                )
-                if let key = item.posterCacheKey {
-                    VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: key)
-                    if key.hasPrefix("unified|") {
-                        let suffix = String(key.dropFirst("unified|".count))
-                        VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: "unified-adult|\(suffix)")
-                    }
-                }
-            }
         }
         .task(id: suppliedTMDBRefreshIdentity) {
-            guard item.manualMetadataProvider != "theporndb",
-                  let suppliedDetails = item.suppliedTMDBDetails else { return }
+            guard let suppliedDetails = item.suppliedTMDBDetails else { return }
 
             // Metadata enrichment must update the existing screen in place. It
             // must not recreate the NavigationStack or reset the scroll/header.
@@ -628,15 +585,6 @@ struct VideoDetailsView: View {
                             movieCastAndCrew(details)
                         }
 
-                        if resolvedMovieDetails == nil,
-                           ThePornDBSettings.isEnabled,
-                           let thePornDBMetadata {
-                            if !thePornDBMetadata.performers.isEmpty {
-                                adultCastAndCrew(thePornDBMetadata)
-                            }
-                            thePornDBInfoCard(thePornDBMetadata)
-                        }
-
                         if !suggestions.isEmpty {
                             unwatchedSuggestionsSection
                         }
@@ -694,7 +642,7 @@ struct VideoDetailsView: View {
     }
 
     private var fallbackMovieTitle: some View {
-        Text((resolvedMovieDetails?.title ?? thePornDBMetadata?.title ?? item.displayTitle).uppercased())
+        Text((resolvedMovieDetails?.title ?? item.displayTitle).uppercased())
             .font(.system(size: 38, weight: .black, design: .rounded))
             .italic()
             .tracking(-1.6)
@@ -706,13 +654,13 @@ struct VideoDetailsView: View {
 
     private var movieDataRow: some View {
         HStack(spacing: 8) {
-            Text(adultMovieDateLabel ?? movieReleaseDateLabel)
+            Text(movieReleaseDateLabel)
             movieDataDivider
-            Text(adultMovieSiteLabel ?? resolvedMovieDetails?.productionCountries?.first ?? "-")
+            Text(resolvedMovieDetails?.productionCountries?.first ?? "-")
             movieDataDivider
-            Text(adultMovieTagsLabel ?? resolvedMovieDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
+            Text(resolvedMovieDetails?.genres.prefix(2).map(\.name).joined(separator: ", ") ?? "-")
             movieDataDivider
-            Text(resolvedMovieDetails == nil && thePornDBMetadata != nil ? "[TPDB]" : "[\(movieCertificationLabel)]")
+            Text("[\(movieCertificationLabel)]")
         }
         .font(.system(size: 10.5, weight: .semibold, design: .rounded))
         .foregroundStyle(.white.opacity(0.88))
@@ -740,22 +688,6 @@ struct VideoDetailsView: View {
     private var movieCertificationLabel: String {
         guard let value = resolvedMovieDetails?.certification, !value.isEmpty else { return "NR" }
         return value
-    }
-
-    private var adultMovieDateLabel: String? {
-        guard resolvedMovieDetails == nil else { return nil }
-        return thePornDBMetadata?.date
-    }
-
-    private var adultMovieSiteLabel: String? {
-        guard resolvedMovieDetails == nil else { return nil }
-        return thePornDBMetadata?.siteName
-    }
-
-    private var adultMovieTagsLabel: String? {
-        guard resolvedMovieDetails == nil else { return nil }
-        let value = thePornDBMetadata?.tags.prefix(2).joined(separator: ", ") ?? ""
-        return value.isEmpty ? nil : value
     }
 
     private var moviePlayButton: some View {
@@ -875,23 +807,6 @@ struct VideoDetailsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func adultCastAndCrew(_ metadata: VideoThumbnailLoader.ThePornDBMetadata) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Cast & Crew")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(.white)
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: 14) {
-                    ForEach(Array(metadata.performers.prefix(12).enumerated()), id: \.offset) { _, name in
-                        moviePersonCard(name: name, role: "Performer", imageURL: nil)
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     private func moviePersonCard(name: String, role: String, imageURL: URL?) -> some View {
         VStack(spacing: 5) {
             CachedTMDBImage(url: imageURL, contentMode: .fill, placeholderSystemName: "person.fill")
@@ -990,15 +905,11 @@ struct VideoDetailsView: View {
     }
 
     private var displayedFrame: UIImage? {
-        frame ?? suppliedHeroFrame ?? item.customPosterImage ?? thePornDBMetadata?.coverImage
+        frame ?? suppliedHeroFrame ?? item.customPosterImage
     }
 
     private var movieBackdropFrame: UIImage? {
         guard isMovieDetailsPage else { return nil }
-        if resolvedMovieDetails == nil,
-           let adultCover = thePornDBMetadata?.coverImage {
-            return adultCover
-        }
         return frame ?? suppliedHeroFrame
     }
 
@@ -1261,14 +1172,9 @@ struct VideoDetailsView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             let metadataKey = stableMetadataCacheKey
-            tmdbDetails = item.manualMetadataProvider == "theporndb"
-                ? nil
-                : (item.suppliedTMDBDetails ?? VideoDetailsMemoryCache.details[metadataKey])
+            tmdbDetails = item.suppliedTMDBDetails ?? VideoDetailsMemoryCache.details[metadataKey]
             tmdbEpisode = item.relatedEpisodes.isEmpty
                 ? VideoDetailsMemoryCache.episodes[metadataKey]
-                : nil
-            thePornDBMetadata = ThePornDBSettings.isEnabled && item.manualMetadataProvider != "tmdb"
-                ? (item.suppliedAdultMetadata ?? VideoDetailsMemoryCache.adultMetadata[metadataKey])
                 : nil
 
             // Artwork is loaded by the async details task. Never perform disk
@@ -1457,62 +1363,6 @@ struct VideoDetailsView: View {
             if details.isSeries, !details.seasons.isEmpty { Text("Seasons & Episodes").font(.headline); ForEach(details.seasons) { season in HStack { Image(systemName: "rectangle.stack.fill").foregroundColor(AppTheme.accent); Text(season.name).font(.subheadline.bold()); Spacer(); Text("\(season.episodeCount) episodes").font(.caption).foregroundColor(.secondary) }.padding(10).background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12)) } }
         }.padding(16).background(AppTheme.card, in: RoundedRectangle(cornerRadius: 18))
     }
-    /// بطاقة معلومات ThePornDB: العنوان، الممثلين، التاغز، والتاريخ — تظهر فقط إذا
-    /// نجح البحث التلقائي (مشاهد أولاً، وإلا ممثلين).
-    private func thePornDBInfoCard(_ metadata: VideoThumbnailLoader.ThePornDBMetadata) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.6))
-                Text({
-                    switch metadata.source {
-                    case .scene: return "ThePornDB · Scene"
-                    case .jav: return "ThePornDB · JAV"
-                    case .performer: return "ThePornDB · Performer"
-                    }
-                }())
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.6))
-            }
-
-            if let title = metadata.title, !title.isEmpty {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-            }
-
-            if !metadata.performers.isEmpty {
-                thePornDBInfoRow(label: "Performers", value: metadata.performers.joined(separator: ", "))
-            }
-            if !metadata.tags.isEmpty {
-                thePornDBInfoRow(label: "Tags", value: metadata.tags.joined(separator: ", "))
-            }
-            if let date = metadata.date, !date.isEmpty {
-                thePornDBInfoRow(label: "Date", value: date)
-            }
-            if let site = metadata.siteName, !site.isEmpty {
-                thePornDBInfoRow(label: "Site", value: site)
-            }
-        }
-        .padding(.vertical, 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func thePornDBInfoRow(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.42))
-            Text(value)
-                .font(.system(size: 13, weight: .regular))
-                .foregroundColor(.white.opacity(0.85))
-                .textSelection(.enabled)
-        }
-    }
-
     private var metricDivider: some View {
         Rectangle()
             .fill(Color.white.opacity(0.08))

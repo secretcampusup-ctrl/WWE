@@ -1939,4 +1939,14 @@ extension AppViewModel {
         onlinePlaybackPreparationTask = nil
         onlinePlaybackTransfer = nil
     }
+
+    /// Stops a preparation screen the user dismissed. A cloud task may already
+    /// exist remotely, but no hidden resolver or player remains active here.
+    func cancelOnlinePlaybackPreparation() {
+        onlinePlaybackPreparationTask?.cancel()
+        onlinePlaybackPreparationTask = nil
+        preparedOnlinePlayback = nil
+        preparedOnlinePlaybackHistoryItem = nil
+        onlinePlaybackTransfer = nil
+    }
 }

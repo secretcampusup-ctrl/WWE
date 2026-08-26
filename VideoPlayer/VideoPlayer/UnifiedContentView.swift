@@ -37,19 +37,13 @@ struct UnifiedMediaEntry: Identifiable, Codable {
     let source: UnifiedSource
     let streamURL: URL
     var details: TMDBTitleDetails?
-    var adultScene: ThePornDBScene?
     var manualMetadataProvider: String?
     /// False means the file was published immediately and its TMDB lookup is
     /// still queued in the background. Nil is reserved for legacy snapshots.
     var metadataLookupCompleted: Bool? = nil
-    /// Nil means an older snapshot or not searched yet. True prevents an
-    /// unmatched filename from generating the same API request every launch.
-    var adultLookupCompleted: Bool?
     var episodes: [UnifiedEpisode] = []
     var posterURL: URL? {
-        if let url = details?.posterURL { return url }
-        if let raw = adultScene?.bestImage { return URL(string: raw) }
-        return nil
+        details?.posterURL
     }
 }
 
@@ -86,8 +80,7 @@ func restoredCatalogEntry(from link: SavedVideoLink) -> UnifiedMediaEntry? {
         source: .catalog(mediaType: parts[2], tmdbID: tmdbID),
         streamURL: url,
         details: nil,
-        metadataLookupCompleted: true,
-        adultLookupCompleted: true
+        metadataLookupCompleted: true
     )
 }
 
@@ -131,7 +124,6 @@ final class UnifiedContentModel: ObservableObject {
     private var loaded = false
     private var lastSourceSignature = ""
     private var lastMetadataSignature = ""
-    private var adultEnrichmentTask: Task<Void, Never>?
     private var metadataEnrichmentTask: Task<Void, Never>?
     private var episodeEnrichmentTask: Task<Void, Never>?
     private var detailsArtworkTask: Task<Void, Never>?
@@ -184,10 +176,6 @@ final class UnifiedContentModel: ObservableObject {
             return
         }
         if force {
-            // A refresh replaces the previous scan. Never let an older adult
-            // enrichment pass continue mutating the same array in parallel.
-            adultEnrichmentTask?.cancel()
-            adultEnrichmentTask = nil
             metadataEnrichmentTask?.cancel()
             metadataEnrichmentTask = nil
             metadataGeneration &+= 1
@@ -210,7 +198,7 @@ final class UnifiedContentModel: ObservableObject {
         if loaded && !force && metadataEnrichmentTask != nil { return }
         if loaded && !force && !hasInterruptedMetadataQueue {
             if metadataEnrichmentTask == nil {
-                if !startEpisodeEnrichmentIfNeeded() { _ = startAdultEnrichmentIfNeeded() }
+                _ = startEpisodeEnrichmentIfNeeded()
                 startDetailsArtworkPrefetchIfNeeded()
             }
             return
@@ -317,10 +305,8 @@ final class UnifiedContentModel: ObservableObject {
                             source: episode.source,
                             streamURL: episode.url,
                             details: entry.details,
-                            adultScene: entry.adultScene,
                             manualMetadataProvider: entry.manualMetadataProvider,
-                            metadataLookupCompleted: entry.metadataLookupCompleted,
-                            adultLookupCompleted: entry.adultLookupCompleted
+                            metadataLookupCompleted: entry.metadataLookupCompleted
                         )
                     }
                 }
@@ -420,9 +406,6 @@ final class UnifiedContentModel: ObservableObject {
         metadataSignature: String,
         previousMetadataSignature: String
     ) async {
-        // Keep completed adult matches while refreshing provider file lists.
-        // Otherwise every refresh would discard posters and repeat the same API
-        // requests while the TMDB queue runs in the background.
         var movieItems: [UnifiedMediaEntry] = []
         var showEpisodes: [String: [(UnifiedMediaEntry, UnifiedEpisode)]] = [:]
         var unknownItems: [UnifiedMediaEntry] = []
@@ -446,7 +429,6 @@ final class UnifiedContentModel: ObservableObject {
             }
             if let previous = preservedEntry, previous.manualMetadataProvider != nil {
                 entry.details = previous.details
-                entry.adultScene = previous.adultScene
                 entry.manualMetadataProvider = previous.manualMetadataProvider
                 entry.metadataLookupCompleted = true
                 entry.title = previous.title
@@ -471,19 +453,6 @@ final class UnifiedContentModel: ObservableObject {
             } else if entry.details != nil {
                 movieItems.append(entry)
             } else {
-                if let previous = preservedEntry {
-                    let retryPreservedIdentifier = previous.manualMetadataProvider == nil
-                        && metadataSignature != previousMetadataSignature
-                        && VideoTitleFormatter.catalogIdentifier(from: entry.rawTitle) != nil
-                    if retryPreservedIdentifier {
-                        entry.adultScene = nil
-                        entry.adultLookupCompleted = false
-                    } else {
-                        entry.adultScene = previous.adultScene
-                        entry.adultLookupCompleted = previous.adultLookupCompleted
-                        if previous.adultScene != nil { entry.title = previous.title }
-                    }
-                }
                 unknownItems.append(entry)
             }
             if index.isMultiple(of: 32) { await Task.yield() }
@@ -525,7 +494,7 @@ final class UnifiedContentModel: ObservableObject {
         metadataEnrichmentTask?.cancel()
         guard !representatives.isEmpty else {
             metadataEnrichmentTask = nil
-            if !startEpisodeEnrichmentIfNeeded() { _ = startAdultEnrichmentIfNeeded() }
+            _ = startEpisodeEnrichmentIfNeeded()
             startDetailsArtworkPrefetchIfNeeded()
             return
         }
@@ -583,7 +552,7 @@ final class UnifiedContentModel: ObservableObject {
             }
             guard !Task.isCancelled, self.metadataGeneration == generation else { return }
             self.metadataEnrichmentTask = nil
-            if !self.startEpisodeEnrichmentIfNeeded() { _ = self.startAdultEnrichmentIfNeeded() }
+            _ = self.startEpisodeEnrichmentIfNeeded()
             self.startDetailsArtworkPrefetchIfNeeded()
         }
     }
@@ -659,92 +628,14 @@ final class UnifiedContentModel: ObservableObject {
         return entry.rawTitle
     }
 
-    private func enrichUnknownWithAdultMetadata() async {
-        var items = unknown
-        var changedSincePublish = 0
-        // Process up to 200 still-pending entries per pass. Filtering the indices
-        // first ensures libraries larger than 200 continue on later launches.
-        let pendingIndices = Array(items.indices.filter {
-            items[$0].metadataLookupCompleted != false
-                && items[$0].adultLookupCompleted != true
-        }.prefix(200))
-        for index in pendingIndices {
-            guard !Task.isCancelled else { return }
-            // Match VideoDetailsView exactly. The former TMDB release-name
-            // cleaner produced a different query for adult filenames, which is
-            // why opening Details found a cover while Content refresh did not.
-            let query = VideoTitleFormatter.title(from: items[index].title)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty else {
-                items[index].adultLookupCompleted = true
-                changedSincePublish += 1
-                continue
-            }
-            let isJavCode = VideoTitleFormatter.catalogIdentifier(from: query) != nil
-            let response = isJavCode
-                ? try? await ThePornDBAPIService.shared.searchJav(query: query, limit: 5)
-                : try? await ThePornDBAPIService.shared.searchScenes(query: query, limit: 5)
-            if let response {
-                guard !Task.isCancelled else { return }
-                items[index].adultLookupCompleted = true
-                changedSincePublish += 1
-                if let scene = bestAdultMatch(response.list, query: query) ?? response.list.first {
-                    items[index].adultScene = scene
-                    items[index].title = scene.title ?? items[index].title
-                    let posterKey = "unified|\(items[index].id)"
-                    let adultPosterKey = "unified-adult|\(items[index].id)"
-                    let existingPoster = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultPosterKey)
-                    if existingPoster == nil, let imageURL = scene.bestImage {
-                        await ThumbnailLoadGate.shared.acquire()
-                        let cover = try? await ThePornDBAPIService.shared.downloadImage(from: imageURL)
-                        await ThumbnailLoadGate.shared.release()
-                        guard !Task.isCancelled else { return }
-                        if let cover {
-                            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKeys: [
-                                adultPosterKey,
-                                posterKey,
-                                VideoThumbnailLoader.canonicalPosterCacheKey(for: items[index].rawTitle)
-                            ])
-                        }
-                    }
-                } else if let metadata = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query) {
-                    guard !Task.isCancelled else { return }
-                    // No scene: use the shared performer fallback. Cache its image
-                    // under the same stable key consumed by the Unknown poster grid.
-                    items[index].title = metadata.title ?? items[index].title
-                    if let cover = metadata.coverImage {
-                        VideoThumbnailLoader.cacheImageInBackground(cover, forStableKeys: [
-                            "unified-adult|\(items[index].id)",
-                            "unified|\(items[index].id)"
-                        ])
-                    }
-                }
-                // Publishing a 500+ item array for every metadata response makes
-                // SwiftUI re-diff the visible grids while the user is scrolling.
-                // Commit a bounded batch instead, then yield a frame.
-                if changedSincePublish >= 24 {
-                    unknown = items
-                    persistSnapshot()
-                    changedSincePublish = 0
-                    await Task.yield()
-                }
-            }
-            try? await Task.sleep(nanoseconds: 80_000_000)
-        }
-        unknown = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        persistSnapshot()
-    }
-
     private static func currentMetadataSignature() -> String {
         "tmdb:" + stableSignature(TMDBSettings.readAccessToken)
-            + "|tpdb:" + stableSignature(ThePornDBSettings.apiKey)
-            + "|matcher:release-v2-adult-v3-jav-details-poster-v1"
+            + "|matcher:release-v2"
     }
 
     func applyManualTMDB(_ details: TMDBTitleDetails, to entry: UnifiedMediaEntry) {
         guard var value = takeEntry(id: entry.id) else { return }
         value.details = details
-        value.adultScene = nil
         value.title = details.title
         value.manualMetadataProvider = "tmdb"
         value.metadataLookupCompleted = true
@@ -777,25 +668,6 @@ final class UnifiedContentModel: ObservableObject {
         }
     }
 
-    func applyManualAdult(_ scene: ThePornDBScene, image: UIImage, to entry: UnifiedMediaEntry) {
-        guard var value = takeEntry(id: entry.id) else { return }
-        value.details = nil
-        value.adultScene = scene
-        value.title = scene.title ?? value.title
-        value.adultLookupCompleted = true
-        value.manualMetadataProvider = "theporndb"
-        value.metadataLookupCompleted = true
-        value.episodes = []
-        unknown.append(value)
-        unknown.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        persistSnapshot()
-        VideoThumbnailLoader.cacheImageInBackground(image, forStableKeys: [
-            "unified-manual|\(entry.id)",
-            "unified-adult|\(entry.id)",
-            "unified|\(entry.id)"
-        ])
-    }
-
     func applyManualCover(_ image: UIImage, to entry: UnifiedMediaEntry) {
         VideoThumbnailLoader.cacheImageInBackground(image, forStableKeys: [
             "unified-manual|\(entry.id)", "unified|\(entry.id)"
@@ -807,23 +679,6 @@ final class UnifiedContentModel: ObservableObject {
         if let index = shows.firstIndex(where: { $0.id == id }) { return shows.remove(at: index) }
         if let index = unknown.firstIndex(where: { $0.id == id }) { return unknown.remove(at: index) }
         return nil
-    }
-
-    @discardableResult
-    private func startAdultEnrichmentIfNeeded() -> Bool {
-        guard ThePornDBSettings.hasValidAPIKey,
-              unknown.contains(where: {
-                  $0.metadataLookupCompleted != false && $0.adultLookupCompleted != true
-              }),
-              adultEnrichmentTask == nil else { return adultEnrichmentTask != nil }
-        adultEnrichmentTask = Task { [weak self] in
-            guard let self else { return }
-            await self.enrichUnknownWithAdultMetadata()
-            guard !Task.isCancelled else { return }
-            self.adultEnrichmentTask = nil
-            self.startDetailsArtworkPrefetchIfNeeded()
-        }
-        return true
     }
 
     /// Warms episode names, descriptions, and still artwork very gently. Only
@@ -840,7 +695,6 @@ final class UnifiedContentModel: ObservableObject {
             var pending = await self.episodeMetadataBatches()
             guard !pending.isEmpty, !Task.isCancelled else {
                 self.episodeEnrichmentTask = nil
-                _ = self.startAdultEnrichmentIfNeeded()
                 return
             }
             while !pending.isEmpty, !Task.isCancelled {
@@ -854,9 +708,7 @@ final class UnifiedContentModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             self.episodeEnrichmentTask = nil
-            if !self.startAdultEnrichmentIfNeeded() {
-                self.startDetailsArtworkPrefetchIfNeeded()
-            }
+            self.startDetailsArtworkPrefetchIfNeeded()
         }
         return true
     }
@@ -1004,21 +856,6 @@ final class UnifiedContentModel: ObservableObject {
         }
     }
 
-    private func bestAdultMatch(_ scenes: [ThePornDBScene], query: String) -> ThePornDBScene? {
-        let queryTokens = metadataTokens(query)
-        guard !queryTokens.isEmpty else { return nil }
-        return scenes.map { scene -> (ThePornDBScene, Double) in
-            let tokens = metadataTokens(scene.title ?? "")
-            let overlap = queryTokens.intersection(tokens).count
-            return (scene, Double(overlap) / Double(max(1, min(queryTokens.count, tokens.count))))
-        }.filter { $0.1 >= 0.5 }.max { $0.1 < $1.1 }?.0
-    }
-
-    private func metadataTokens(_ value: String) -> Set<String> {
-        Set(value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count > 2 && Int($0) == nil })
-    }
-
     private func deduplicatedMovies(_ entries: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {
         var seen = Set<String>()
         return entries.filter { entry in
@@ -1029,7 +866,7 @@ final class UnifiedContentModel: ObservableObject {
 }
 
 private enum UnifiedManualSearchKind {
-    case tmdb, adult, cover
+    case tmdb, cover
 }
 
 private struct UnifiedManualSearchRequest: Identifiable {
@@ -1174,11 +1011,6 @@ struct UnifiedContentView: View {
                 Label("Search Movie / TV Metadata", systemImage: "film.stack")
             }
             Button {
-                manualSearch = UnifiedManualSearchRequest(entry: entry, kind: .adult)
-            } label: {
-                Label("Search Adult Metadata", systemImage: "person.crop.rectangle.stack")
-            }
-            Button {
                 manualSearch = UnifiedManualSearchRequest(entry: entry, kind: .cover)
             } label: {
                 Label("Search Cover Only", systemImage: "photo.on.rectangle.angled")
@@ -1192,18 +1024,6 @@ struct UnifiedContentView: View {
         case .tmdb:
             UnifiedTMDBManualSearchView(initialQuery: VideoTitleFormatter.title(from: request.entry.title)) { details in
                 model.applyManualTMDB(details, to: request.entry)
-                manualSearch = nil
-            }
-        case .adult:
-            ThePornDBSearchView(
-                initialQuery: VideoTitleFormatter.title(from: request.entry.title),
-                initialMode: .scenes,
-                onPickScene: { scene, image in
-                    model.applyManualAdult(scene, image: image, to: request.entry)
-                    manualSearch = nil
-                }
-            ) { image in
-                model.applyManualCover(image, to: request.entry)
                 manualSearch = nil
             }
         case .cover:
@@ -1268,16 +1088,19 @@ struct UnifiedContentView: View {
     }
 }
 
-/// Unknown posters can arrive either from the background ThePornDB refresh or
-/// from VideoDetailsView. This view observes the shared stable-poster event so
-/// the visible grid updates immediately without requiring a tab/page reload.
+/// Manual covers update the visible grid through the shared stable-poster event.
 struct UnifiedPosterArtwork: View {
     let entry: UnifiedMediaEntry
     let section: UnifiedMediaSection
     @State private var cachedImage: UIImage?
+    @State private var resolvedPosterURL: URL?
+    /// Gates the first render so we commit to exactly one poster source.
+    /// Without this, the manual-cache lookup below resolves a moment after
+    /// KFImage has already started showing the network image, and swapping
+    /// branches mid-appearance is what produced the zoom/pop-in flicker.
+    @State private var hasCheckedCache = false
 
     private var cacheKey: String { "unified|\(entry.id)" }
-    private var adultCacheKey: String { "unified-adult|\(entry.id)" }
     private var manualCacheKey: String { "unified-manual|\(entry.id)" }
 
     init(entry: UnifiedMediaEntry, section: UnifiedMediaSection) {
@@ -1288,11 +1111,13 @@ struct UnifiedPosterArtwork: View {
 
     var body: some View {
         Group {
-            if let cachedImage {
+            if !hasCheckedCache {
+                ProgressView().tint(AppPalette.accent)
+            } else if let cachedImage {
                 Image(uiImage: cachedImage)
                     .resizable()
                     .scaledToFill()
-            } else if let url = entry.posterURL {
+            } else if let url = resolvedPosterURL {
                 KFImage(url)
                     .placeholder { ProgressView().tint(AppPalette.accent) }
                     .cacheOriginalImage()
@@ -1311,73 +1136,49 @@ struct UnifiedPosterArtwork: View {
             }
         }
         .task(id: "\(section.rawValue)|\(manualCacheKey)") {
-            if section == .unknown { await loadVisiblePosterIfNeeded() }
-            else {
-                cachedImage = await cachedPoster(includeAdult: false)
+            if let manual = await cachedPoster() {
+                cachedImage = manual
+                hasCheckedCache = true
+                return
             }
+            resolvedPosterURL = await noLanguagePosterURL()
+            hasCheckedCache = true
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let updatedKey = notification.object as? String,
-                  updatedKey == manualCacheKey || updatedKey == adultCacheKey || updatedKey == cacheKey else { return }
+                  updatedKey == manualCacheKey || updatedKey == cacheKey else { return }
             Task {
-                cachedImage = await cachedPoster(includeAdult: section == .unknown)
+                cachedImage = await cachedPoster()
             }
         }
     }
 
-    private func cachedPoster(includeAdult: Bool) async -> UIImage? {
+    /// TMDB's list/discover endpoints only return the localized poster (often
+    /// with burned-in title text), so `entry.details` from the catalog builder
+    /// never carries a no-language poster. Resolve it once per title here —
+    /// via the entry's known TMDB id when available, so no title search is
+    /// needed — and fall back to the localized poster only if no
+    /// language-free rendition exists for that title.
+    private func noLanguagePosterURL() async -> URL? {
+        if let existing = entry.details?.detailsPosterURL {
+            return existing
+        }
+        if case let .catalog(mediaType, tmdbID) = entry.source {
+            let details = await TMDBService.shared.details(
+                mediaType: mediaType,
+                tmdbID: tmdbID,
+                fallbackTitle: entry.title
+            )
+            return details?.detailsPosterURL ?? entry.posterURL
+        }
+        return entry.posterURL
+    }
+
+    private func cachedPoster() async -> UIImage? {
         if let manual = await VideoThumbnailLoader.cachedImageAsync(forStableKey: manualCacheKey) {
             return manual
         }
-        if includeAdult,
-           let adult = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultCacheKey) {
-            return adult
-        }
-        // `unified|…` was previously shared with the wide details backdrop.
-        // Grid cards must use only a manual/adult cover or the vertical API poster.
         return nil
-    }
-
-    private func loadVisiblePosterIfNeeded() async {
-        if let existing = await cachedPoster(includeAdult: true) {
-            cachedImage = existing
-            return
-        }
-
-        // A completed lookup is final. Scrolling or refreshing must not turn an
-        // old unmatched item into another provider request.
-        guard entry.adultLookupCompleted != true else { return }
-
-        let query = VideoTitleFormatter.title(from: entry.title)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, ThePornDBSettings.hasValidAPIKey else {
-            return
-        }
-
-        // LazyVGrid creates this task only for visible/near-visible cards. The
-        // shared gate bounds all screens together and the second cache check
-        // avoids work if the model refresh completed while this card waited.
-        await ThumbnailLoadGate.shared.acquire()
-        if let existing = await VideoThumbnailLoader.cachedImageAsync(forStableKey: adultCacheKey) {
-            await ThumbnailLoadGate.shared.release()
-            cachedImage = existing
-            return
-        }
-        let cover = await VideoThumbnailLoader.fetchThePornDBMetadata(for: query)?.coverImage
-        await ThumbnailLoadGate.shared.release()
-
-        guard !Task.isCancelled else { return }
-        if let cover {
-            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: adultCacheKey)
-            VideoThumbnailLoader.cacheImageInBackground(cover, forStableKey: cacheKey)
-            VideoThumbnailLoader.cacheImageInBackground(
-                cover,
-                forStableKey: VideoThumbnailLoader.canonicalPosterCacheKey(for: entry.title)
-            )
-            cachedImage = cover
-        } else {
-            cachedImage = nil
-        }
     }
 }
 
@@ -1524,6 +1325,11 @@ struct UnifiedMediaDetailsHost: View {
     /// ID lets us ignore stale updates after changing episode or leaving.
     @State private var automaticPikPakTransferID: String?
     @State private var isSearchingAutomaticPikPakSource = false
+    @State private var showPikPakQualityChooser = false
+    @State private var pikPakQualityCandidates: [OnlineTorrentSource] = []
+    @State private var pikPakQualityLookupMessage: String?
+    @State private var presentPikPakPlayerAfterChooserDismiss = false
+    @State private var pikPakPreparationError: String?
 
     init(
         vm: AppViewModel,
@@ -1597,11 +1403,42 @@ struct UnifiedMediaDetailsHost: View {
             }
         }
         .fullScreenCover(isPresented: $showPlayer) {
-            ResolvedPlayerScreen(
-                vm: vm,
-                episodeOptions: playerEpisodeOptions,
-                onSelectEpisode: switchPlayerEpisode
+            if shouldShowPikPakPreparationPlayer {
+                PikPakPreparationPlayerScreen(
+                    title: currentDetailsItem.title,
+                    message: activePikPakTransfer?.message,
+                    errorMessage: pikPakPreparationError,
+                    onClose: {
+                        showPlayer = false
+                        pikPakPreparationError = nil
+                        automaticPikPakTransferID = nil
+                        vm.cancelOnlinePlaybackPreparation()
+                    }
+                )
+            } else {
+                ResolvedPlayerScreen(
+                    vm: vm,
+                    episodeOptions: playerEpisodeOptions,
+                    onSelectEpisode: switchPlayerEpisode
+                )
+            }
+        }
+        .sheet(
+            isPresented: $showPikPakQualityChooser,
+            onDismiss: {
+                guard presentPikPakPlayerAfterChooserDismiss else { return }
+                presentPikPakPlayerAfterChooserDismiss = false
+                showPlayer = true
+            }
+        ) {
+            PikPakQualityChoiceSheet(
+                title: currentDetailsItem.title,
+                isSearching: isSearchingAutomaticPikPakSource,
+                sources: pikPakQualityCandidates,
+                message: pikPakQualityLookupMessage,
+                onSelect: selectPikPakQuality
             )
+            .preferredColorScheme(.dark)
         }
         .fullScreenCover(
             isPresented: $showOnlineSources,
@@ -1638,6 +1475,16 @@ struct UnifiedMediaDetailsHost: View {
         activeEntry.episodes.map {
             VideoEpisodeItem(id: $0.id, title: $0.title, season: $0.season, episode: $0.episode)
         }
+    }
+
+    private var activePikPakTransfer: OnlinePlaybackTransfer? {
+        guard let automaticPikPakTransferID,
+              vm.onlinePlaybackTransfer?.id == automaticPikPakTransferID else { return nil }
+        return vm.onlinePlaybackTransfer
+    }
+
+    private var shouldShowPikPakPreparationPlayer: Bool {
+        vm.nowPlayingURL == nil && (automaticPikPakTransferID != nil || pikPakPreparationError != nil)
     }
 
     private static func catalogEpisodes(
@@ -1698,7 +1545,6 @@ struct UnifiedMediaDetailsHost: View {
                 source: activeEntry.sourceLabel, relatedEpisodes: relatedEpisodes,
                 seriesIdentity: "unified|\(activeEntry.id)",
                 suppliedTMDBDetails: activeEntry.details,
-                suppliedAdultMetadata: suppliedAdultMetadata,
                 manualMetadataProvider: activeEntry.manualMetadataProvider
             )
         }
@@ -1710,7 +1556,6 @@ struct UnifiedMediaDetailsHost: View {
             source: activeEntry.sourceLabel, relatedEpisodes: relatedEpisodes,
             seriesIdentity: "unified|\(activeEntry.id)",
             suppliedTMDBDetails: activeEntry.details,
-            suppliedAdultMetadata: suppliedAdultMetadata,
             manualMetadataProvider: activeEntry.manualMetadataProvider
         )
     }
@@ -1720,27 +1565,9 @@ struct UnifiedMediaDetailsHost: View {
         return WebDAVClient(server: server).streamHeaders()
     }
 
-    private var suppliedAdultMetadata: VideoThumbnailLoader.ThePornDBMetadata? {
-        guard let scene = activeEntry.adultScene else { return nil }
-        return VideoThumbnailLoader.ThePornDBMetadata(
-            source: .scene,
-            title: scene.title,
-            performers: (scene.performers ?? []).compactMap(\.name),
-            tags: scene.tagNames,
-            date: scene.date,
-            siteName: scene.site,
-            // VideoDetailsView resolves the same stable poster keys
-            // asynchronously. Never decode disk images while constructing a
-            // navigation destination.
-            coverImage: nil
-        )
-    }
-
     private func playCurrent() {
-        // Keep the exact unified-library identity attached to playback. Adult/JAV
-        // metadata can change the displayed title while the details screen is open,
-        // so relying on title/source reconstruction made some Others entries miss
-        // Resume Playback even though their progress tick was received.
+        // Keep the exact unified-library identity attached to playback so resume
+        // history remains stable while the details screen is open.
         vm.preparePlaybackHistory(for: currentDetailsItem)
         let source = selectedEpisode?.source ?? activeEntry.source
         switch source {
@@ -1763,6 +1590,10 @@ struct UnifiedMediaDetailsHost: View {
             return
         case .catalog:
             if OnlinePlaybackProviderPreference.selected == .pikpak {
+                pikPakQualityCandidates = []
+                pikPakQualityLookupMessage = nil
+                pikPakPreparationError = nil
+                showPikPakQualityChooser = true
                 Task { @MainActor in
                     await prepareAutomaticPikPakPlayback()
                 }
@@ -1774,9 +1605,10 @@ struct UnifiedMediaDetailsHost: View {
         showPlayer = true
     }
 
-    /// PikPak is the one-tap route: search all configured source providers,
-    /// choose the highest advertised resolution (then seeders), and send it to
-    /// PikPak without presenting the manual source picker.
+    /// Find three useful resolution choices before handing a magnet to PikPak.
+    /// The player itself is presented as soon as the user chooses one; cloud
+    /// preparation then continues inside the player instead of behind a blank
+    /// details page.
     @MainActor
     private func prepareAutomaticPikPakPlayback() async {
         guard automaticPikPakTransferID == nil, !isSearchingAutomaticPikPakSource else { return }
@@ -1799,19 +1631,45 @@ struct UnifiedMediaDetailsHost: View {
         )
         do {
             let sources = try await OnlineSourceSearchService.shared.search(context)
-            guard let best = sources.max(by: { lhs, rhs in
-                if lhs.quality != rhs.quality { return lhs.quality < rhs.quality }
-                if lhs.seeders != rhs.seeders { return lhs.seeders < rhs.seeders }
-                return lhs.sizeBytes < rhs.sizeBytes
-            }) else {
-                vm.errorMessage = "No supported torrent source was found for this title."
+            let choices = pikPakQualityChoices(from: sources)
+            guard !choices.isEmpty else {
+                pikPakQualityLookupMessage = "No supported torrent quality was found for this title."
                 return
             }
-            automaticPikPakTransferID = best.id
-            vm.prepareOnlineSource(best, historyItem: currentDetailsItem)
+            pikPakQualityCandidates = choices
         } catch {
-            vm.errorMessage = error.localizedDescription
+            pikPakQualityLookupMessage = error.localizedDescription
         }
+    }
+
+    private func pikPakQualityChoices(from sources: [OnlineTorrentSource]) -> [OnlineTorrentSource] {
+        let bestByQuality = Dictionary(grouping: sources, by: \.quality).compactMap { _, values in
+            values.max { lhs, rhs in
+                if lhs.seeders != rhs.seeders { return lhs.seeders < rhs.seeders }
+                return lhs.sizeBytes < rhs.sizeBytes
+            }
+        }
+        var selected: [OnlineTorrentSource] = []
+        let preferredQualities: [OnlineStreamQuality] = [.p720, .p1080, .p2160]
+        for quality in preferredQualities {
+            if let source = bestByQuality.first(where: { $0.quality == quality }) {
+                selected.append(source)
+            }
+        }
+        for source in bestByQuality.sorted(by: { $0.quality > $1.quality }) where selected.count < 3 {
+            guard !selected.contains(where: { $0.id == source.id }) else { continue }
+            selected.append(source)
+        }
+        return selected.sorted { $0.quality < $1.quality }
+    }
+
+    @MainActor
+    private func selectPikPakQuality(_ source: OnlineTorrentSource) {
+        guard automaticPikPakTransferID == nil else { return }
+        automaticPikPakTransferID = source.id
+        vm.prepareOnlineSource(source, historyItem: currentDetailsItem)
+        presentPikPakPlayerAfterChooserDismiss = true
+        showPikPakQualityChooser = false
     }
 
     @MainActor
@@ -1823,15 +1681,14 @@ struct UnifiedMediaDetailsHost: View {
             break
         case .ready:
             automaticPikPakTransferID = nil
+            pikPakPreparationError = nil
             guard vm.playPreparedOnlineSource() else {
-                vm.errorMessage = "The stream was prepared, but the player did not receive its URL."
+                pikPakPreparationError = "The stream was prepared, but the player did not receive its URL."
                 return
             }
-            showPlayer = true
         case .failed:
             automaticPikPakTransferID = nil
-            vm.errorMessage = transfer.message
-            vm.clearFinishedOnlineTransfer()
+            pikPakPreparationError = transfer.message
         }
     }
 
@@ -1875,6 +1732,185 @@ struct UnifiedMediaDetailsHost: View {
         guard let next = categoryEntries.first(where: { $0.id == id }) else { return }
         activeEntry = next
         selection.id = next.episodes.first?.id
+    }
+}
+
+private struct PikPakQualityChoiceSheet: View {
+    let title: String
+    let isSearching: Bool
+    let sources: [OnlineTorrentSource]
+    let message: String?
+    let onSelect: (OnlineTorrentSource) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                AppTheme.bg.ignoresSafeArea()
+                LinearGradient(
+                    colors: [AppPalette.purple.opacity(0.28), .clear, Color.blue.opacity(0.14)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("CHOOSE STREAM QUALITY")
+                            .font(.system(size: 11, weight: .black))
+                            .tracking(1.3)
+                            .foregroundStyle(.white.opacity(0.58))
+                        Text(VideoTitleFormatter.title(from: title))
+                            .font(.system(size: 25, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                        Text("Your choice opens the player immediately. PikPak continues preparing the stream inside it.")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+
+                    if isSearching {
+                        VStack(spacing: 18) {
+                            PikPakOrbitLoader(size: 88)
+                            Text("Finding the best available qualities…")
+                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.78))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 34)
+                    } else if sources.isEmpty {
+                        ContentUnavailableView(
+                            "No stream qualities found",
+                            systemImage: "video.slash",
+                            description: Text(message ?? "Try another title or search provider.")
+                        )
+                        .foregroundStyle(.white.opacity(0.78))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        VStack(spacing: 11) {
+                            ForEach(sources) { source in
+                                Button { onSelect(source) } label: {
+                                    HStack(spacing: 15) {
+                                        Text(source.quality.label)
+                                            .font(.system(size: 18, weight: .black, design: .rounded))
+                                            .foregroundStyle(.black)
+                                            .frame(width: 70, height: 58)
+                                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                                        VStack(alignment: .leading, spacing: 5) {
+                                            Text(source.quality == .p2160 ? "Maximum detail" : source.quality == .p1080 ? "Balanced playback" : "Fast start")
+                                                .font(.system(size: 15, weight: .bold))
+                                                .foregroundStyle(.white)
+                                            Label("\(source.seeders) seeders · \(source.sizeLabel)", systemImage: "bolt.fill")
+                                                .font(.caption)
+                                                .foregroundStyle(.white.opacity(0.62))
+                                        }
+                                        Spacer()
+                                        Image(systemName: "arrow.right.circle.fill")
+                                            .font(.title2)
+                                            .foregroundStyle(.white.opacity(0.84))
+                                    }
+                                    .padding(12)
+                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(20)
+            }
+            .navigationTitle("PikPak")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+private struct PikPakPreparationPlayerScreen: View {
+    let title: String
+    let message: String?
+    let errorMessage: String?
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            RadialGradient(
+                colors: [AppPalette.purple.opacity(0.42), Color.blue.opacity(0.13), .clear],
+                center: .center,
+                startRadius: 8,
+                endRadius: 330
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 22) {
+                Spacer()
+                PikPakOrbitLoader(size: 132)
+                VStack(spacing: 9) {
+                    Text(errorMessage == nil ? "Preparing your stream" : "Couldn’t prepare the stream")
+                        .font(.system(size: 23, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text(VideoTitleFormatter.title(from: title))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.64))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                    Text(errorMessage ?? message ?? "PikPak is connecting to the selected quality. You can stay here while it finishes.")
+                        .font(.footnote)
+                        .foregroundStyle(errorMessage == nil ? .white.opacity(0.56) : .orange.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                Spacer()
+                Button(errorMessage == nil ? "Cancel" : "Back") { onClose() }
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 35)
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+private struct PikPakOrbitLoader: View {
+    var size: CGFloat
+    @State private var isAnimating = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.08), lineWidth: max(3, size * 0.035))
+            Circle()
+                .trim(from: 0.08, to: 0.73)
+                .stroke(AppPalette.gradient, style: StrokeStyle(lineWidth: max(4, size * 0.05), lineCap: .round))
+                .rotationEffect(.degrees(isAnimating ? 360 : 0))
+            Circle()
+                .trim(from: 0.12, to: 0.35)
+                .stroke(Color.white.opacity(0.76), style: StrokeStyle(lineWidth: max(2, size * 0.022), lineCap: .round))
+                .rotationEffect(.degrees(isAnimating ? -420 : 0))
+            Image(systemName: "play.fill")
+                .font(.system(size: size * 0.27, weight: .black))
+                .foregroundStyle(.white)
+                .offset(x: size * 0.035)
+                .scaleEffect(isAnimating ? 1.08 : 0.92)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: AppPalette.purple.opacity(0.6), radius: 22)
+        .onAppear {
+            withAnimation(.linear(duration: 2.15).repeatForever(autoreverses: false)) {
+                isAnimating = true
+            }
+        }
     }
 }
 

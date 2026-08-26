@@ -538,8 +538,6 @@ struct OffcloudView: View {
     @State private var offcloudSearchText = ""
     @State private var searchCoverKey: String?
     @State private var searchCoverTitle = ""
-    @State private var thePornDBKey: String?
-    @State private var thePornDBTitle = ""
     @State private var selectedSection: OffcloudSection = .videos
 
     private let columns = (0..<2).map { _ in GridItem(.flexible(), spacing: 10, alignment: .top) }
@@ -644,15 +642,6 @@ struct OffcloudView: View {
                 searchCoverKey = nil
             }
         }
-        .sheet(isPresented: Binding(
-            get: { thePornDBKey != nil },
-            set: { if !$0 { thePornDBKey = nil } }
-        )) {
-            ThePornDBSearchView(initialQuery: thePornDBTitle) { image in
-                if let key = thePornDBKey { cacheOffcloudCover(image, key: key) }
-                thePornDBKey = nil
-            }
-        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: torrentFileTypes,
@@ -732,12 +721,8 @@ struct OffcloudView: View {
             if index.isMultiple(of: 32) { await Task.yield() }
         }
 
-        // Batches just control how many Task objects exist at once — the actual
-        // network+decode concurrency is capped by ThumbnailLoadGate below, shared
-        // with every other automatic thumbnail fetch in the app. Before this fix,
-        // opening the Offcloud tab could fire up to 8 simultaneous ThePornDB
-        // requests for the *entire* transfer history at once (not just what's on
-        // screen), which is what was getting the app killed for memory pressure.
+        // Batches control how many frame-extraction tasks exist at once; the shared
+        // thumbnail gate keeps network and image decoding bounded.
         let batchSize = 8
         for start in stride(from: 0, to: jobs.count, by: batchSize) {
             guard !Task.isCancelled else { return }
@@ -755,8 +740,6 @@ struct OffcloudView: View {
                                stableKey: job.key,
                                targetPointSize: ThumbnailPipeline.targetPointSize(for: .small)
                            ) {
-                            VideoThumbnailLoader.cacheImage(image, forStableKey: job.key)
-                        } else if let image = await VideoThumbnailLoader.downloadThePornDBCoverImage(for: job.title) {
                             VideoThumbnailLoader.cacheImage(image, forStableKey: job.key)
                         }
                     }
@@ -849,10 +832,6 @@ struct OffcloudView: View {
                             searchCoverTitle = entry.file.displayName
                             searchCoverKey = key
                         },
-                        onSearchThePornDB: {
-                            thePornDBTitle = entry.file.displayName
-                            thePornDBKey = key
-                        },
                         onRemoveCover: {
                             VideoThumbnailLoader.removeCachedImage(forStableKey: key)
                         }
@@ -883,10 +862,6 @@ struct OffcloudView: View {
                         stableCacheKey: offcloudFolderCoverKey(for: transfer),                        onSearchCover: {
                             searchCoverTitle = VideoTitleFormatter.title(from: transfer.fileName)
                             searchCoverKey = offcloudFolderCoverKey(for: transfer)
-                        },
-                        onSearchThePornDB: {
-                            thePornDBTitle = VideoTitleFormatter.title(from: transfer.fileName)
-                            thePornDBKey = offcloudFolderCoverKey(for: transfer)
                         },
                         onRemoveCover: {
                             VideoThumbnailLoader.removeCachedImage(forStableKey: offcloudFolderCoverKey(for: transfer))
@@ -1092,7 +1067,6 @@ private struct OffcloudTransferPoster: View {
     var videoCount: Int = 0
     let stableCacheKey: String
     let onSearchCover: () -> Void
-    var onSearchThePornDB: (() -> Void)? = nil
     let onRemoveCover: () -> Void
     let action: () -> Void
 
@@ -1107,11 +1081,6 @@ private struct OffcloudTransferPoster: View {
         .contextMenu {
             Button(action: onSearchCover) {
                 Label("Search or Paste Image URL", systemImage: "magnifyingglass")
-            }
-            if let onSearchThePornDB {
-                Button(action: onSearchThePornDB) {
-                    Label("Search ThePornDB", systemImage: "star.fill")
-                }
             }
             Button(role: .destructive, action: onRemoveCover) {
                 Label("Remove Cover", systemImage: "photo.badge.minus")
@@ -1270,8 +1239,6 @@ private struct OffcloudFilesView: View {
     @State private var detailFile: OffcloudFile?
     @State private var searchCoverKey: String?
     @State private var searchCoverTitle = ""
-    @State private var thePornDBKey: String?
-    @State private var thePornDBTitle = ""
     let transfer: OffcloudTransfer
     let files: [OffcloudFile]
     let isLoading: Bool
@@ -1338,10 +1305,6 @@ private struct OffcloudFilesView: View {
                                     searchCoverTitle = file.displayName
                                     searchCoverKey = "offcloud|\(transfer.requestId)|\(file.path ?? file.name)"
                                 },
-                                onSearchThePornDB: {
-                                    thePornDBTitle = file.displayName
-                                    thePornDBKey = "offcloud|\(transfer.requestId)|\(file.path ?? file.name)"
-                                },
                                 onRemoveCover: {
                                     VideoThumbnailLoader.removeCachedImage(forStableKey: "offcloud|\(transfer.requestId)|\(file.path ?? file.name)")
                                 }
@@ -1373,15 +1336,6 @@ private struct OffcloudFilesView: View {
                 searchCoverKey = nil
             }
         }
-        .sheet(isPresented: Binding(
-            get: { thePornDBKey != nil },
-            set: { if !$0 { thePornDBKey = nil } }
-        )) {
-            ThePornDBSearchView(initialQuery: thePornDBTitle) { image in
-                if let key = thePornDBKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
-                thePornDBKey = nil
-            }
-        }
         .fullScreenCover(item: $detailFile) { file in
             OffcloudVideoDetailsHost(
                 vm: vm,
@@ -1399,8 +1353,6 @@ private struct OffcloudFolderFilesView: View {
     @State private var detailFile: OffcloudFile?
     @State private var searchCoverKey: String?
     @State private var searchCoverTitle = ""
-    @State private var thePornDBKey: String?
-    @State private var thePornDBTitle = ""
     private let columns = (0..<2).map { _ in GridItem(.flexible(), spacing: 10, alignment: .top) }
 
     private var folderPosterPrefetchID: [String] {
@@ -1430,10 +1382,6 @@ private struct OffcloudFolderFilesView: View {
                                 stableCacheKey: "offcloud|\(transfer.requestId)|\(file.path ?? file.name)",                                onSearchCover: {
                                     searchCoverTitle = file.displayName
                                     searchCoverKey = "offcloud|\(transfer.requestId)|\(file.path ?? file.name)"
-                                },
-                                onSearchThePornDB: {
-                                    thePornDBTitle = file.displayName
-                                    thePornDBKey = "offcloud|\(transfer.requestId)|\(file.path ?? file.name)"
                                 },
                                 onRemoveCover: {
                                     VideoThumbnailLoader.removeCachedImage(forStableKey: "offcloud|\(transfer.requestId)|\(file.path ?? file.name)")
@@ -1469,15 +1417,6 @@ private struct OffcloudFolderFilesView: View {
             YandexImageSearchView(initialQuery: searchCoverTitle) { image in
                 if let key = searchCoverKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
                 searchCoverKey = nil
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { thePornDBKey != nil },
-            set: { if !$0 { thePornDBKey = nil } }
-        )) {
-            ThePornDBSearchView(initialQuery: thePornDBTitle) { image in
-                if let key = thePornDBKey { VideoThumbnailLoader.cacheImage(image, forStableKey: key) }
-                thePornDBKey = nil
             }
         }
     }
@@ -1609,7 +1548,6 @@ private struct OffcloudFilePoster: View {
     let file: OffcloudFile
     let stableCacheKey: String
     var onSearchCover: (() -> Void)? = nil
-    var onSearchThePornDB: (() -> Void)? = nil
     var onRemoveCover: (() -> Void)? = nil
     let action: () -> Void
 
@@ -1752,11 +1690,6 @@ private struct OffcloudFilePoster: View {
         if let onSearchCover {
             Button(action: onSearchCover) {
                 Label("Search or Paste Image URL", systemImage: "magnifyingglass")
-            }
-        }
-        if let onSearchThePornDB {
-            Button(action: onSearchThePornDB) {
-                Label("Search ThePornDB", systemImage: "star.fill")
             }
         }
         if let onRemoveCover {
