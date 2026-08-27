@@ -2667,6 +2667,30 @@ private struct PirateBayResult: Decodable, Identifiable {
         case id, name, leechers, seeders, size, username, added, status, category
         case infoHash = "info_hash"
     }
+    init(
+        id: String,
+        name: String,
+        infoHash: String,
+        leechers: String,
+        seeders: String,
+        size: String,
+        username: String = "",
+        added: String,
+        status: String = "",
+        category: String = ""
+    ) {
+        self.id = id
+        self.name = name
+        self.infoHash = infoHash
+        self.leechers = leechers
+        self.seeders = seeders
+        self.size = size
+        self.username = username
+        self.added = added
+        self.status = status
+        self.category = category
+    }
+
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
         func text(_ key: CodingKeys) -> String {
@@ -2702,6 +2726,13 @@ private enum PirateBaySection: String, CaseIterable, Identifiable {
     var tint: Color { switch self { case .movies: return .blue; case .tv: return .cyan; case .adult: return .pink } }
 }
 
+private enum DiscoverIndexer: String, CaseIterable, Identifiable {
+    case pirateBay = "Pirate Bay"
+    case milkie = "Milkie"
+    var id: String { rawValue }
+    var icon: String { self == .milkie ? "drop.fill" : "sailboat.fill" }
+}
+
 private enum PirateBaySort: String, CaseIterable, Identifiable {
     case newest = "Newest", seeders = "Seeders"
     var id: String { rawValue }
@@ -2731,12 +2762,21 @@ private final class PirateBayLatestModel: ObservableObject {
     @Published var error: String?
     private var requestID = UUID()
 
-    func load(section: PirateBaySection, quality: PirateBayQuality, query rawQuery: String = "") async {
+    func load(
+        indexer: DiscoverIndexer = .pirateBay,
+        section: PirateBaySection,
+        quality: PirateBayQuality,
+        query rawQuery: String = ""
+    ) async {
         let currentID = UUID(); requestID = currentID
         isLoading = true; loadingMessage = "Loading torrents…"; error = nil; items = []
         defer { if requestID == currentID { isLoading = false } }
-        let category = quality.category(for: section)
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if indexer == .milkie {
+            await loadMilkie(section: section, quality: quality, query: query, currentID: currentID)
+            return
+        }
+        let category = quality.category(for: section)
         let url: URL?
         if query.isEmpty {
             var parts = URLComponents(string: "https://apibay.org/q.php")!
@@ -2774,11 +2814,79 @@ private final class PirateBayLatestModel: ObservableObject {
                 : error.localizedDescription
         }
     }
+
+    private func loadMilkie(
+        section: PirateBaySection,
+        quality: PirateBayQuality,
+        query: String,
+        currentID: UUID
+    ) async {
+        guard MilkieKeyStore.isReady else {
+            error = "Add a Milkie API key in Settings"
+            return
+        }
+        let category: MilkieClient.Category = {
+            switch section {
+            case .movies: return .movies
+            case .tv: return .tv
+            case .adult: return .adult
+            }
+        }()
+        do {
+            loadingMessage = query.isEmpty ? "Loading Milkie…" : "Searching Milkie…"
+            let listed = try await MilkieClient.search(
+                query: query,
+                categories: [category],
+                pageSize: 80
+            )
+            guard requestID == currentID else { return }
+            let filtered = listed.filter { torrent in
+                torrent.releaseName.localizedCaseInsensitiveContains(quality.rawValue)
+                    || (quality == .ultraHD && torrent.releaseName.localizedCaseInsensitiveContains("4k"))
+            }
+            let pool = filtered.isEmpty ? listed : filtered
+            let ranked = pool
+                .filter { $0.seeders > 0 && $0.size >= 50 * 1_024 * 1_024 }
+                .sorted {
+                    if query.isEmpty {
+                        return ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+                    }
+                    if $0.seeders != $1.seeders { return $0.seeders > $1.seeders }
+                    return ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
+                }
+            let hydrated = await MilkieClient.hydrateInfoHashes(Array(ranked.prefix(40)), limit: 40)
+            guard requestID == currentID else { return }
+            items = hydrated.compactMap { torrent in
+                guard let hash = torrent.infoHash, !hash.isEmpty else { return nil }
+                return PirateBayResult(
+                    id: torrent.id,
+                    name: torrent.releaseName,
+                    infoHash: hash,
+                    leechers: String(torrent.leechers),
+                    seeders: String(torrent.seeders),
+                    size: String(torrent.size),
+                    username: "Milkie",
+                    added: String(Int((torrent.createdAt ?? Date()).timeIntervalSince1970)),
+                    status: "milkie",
+                    category: String(torrent.category)
+                )
+            }
+            guard !items.isEmpty else {
+                error = "No Milkie torrents with active seeders were found"
+                return
+            }
+        } catch {
+            guard requestID == currentID else { return }
+            items = []
+            self.error = error.localizedDescription
+        }
+    }
 }
 
 private struct PirateBayView: View {
     @ObservedObject var vm: AppViewModel
     @StateObject private var model = PirateBayLatestModel()
+    @State private var indexer: DiscoverIndexer = .pirateBay
     @State private var section: PirateBaySection = .movies
     @State private var quality: PirateBayQuality = .fullHD
     @State private var query = ""
@@ -2795,6 +2903,7 @@ private struct PirateBayView: View {
                 LinearGradient(colors: [AppTheme.bg, section.tint.opacity(0.10), AppTheme.bg], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
                 ScrollView {
                     LazyVStack(spacing: 13) {
+                        indexerBar
                         categoryBar
                         qualityBar
                         searchBar
@@ -2811,6 +2920,30 @@ private struct PirateBayView: View {
             .overlay(alignment: .top) { if let notice { Text(notice).font(.subheadline.bold()).padding(.horizontal, 18).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
             .task { if model.items.isEmpty { await reload() } }
         }
+    }
+
+    private var indexerBar: some View {
+        HStack(spacing: 8) {
+            ForEach(DiscoverIndexer.allCases) { value in
+                Button {
+                    guard indexer != value else { return }
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) { indexer = value }
+                    Task { await reload() }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: value.icon)
+                        Text(value.rawValue).font(.system(size: 13, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(indexer == value ? .black : .white.opacity(0.62))
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                    .background {
+                        if indexer == value { Capsule().fill(Color.white) }
+                        else { Capsule().fill(Color.white.opacity(0.06)) }
+                    }
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(4).background(Color.black.opacity(0.26), in: Capsule())
     }
 
     private var categoryBar: some View {
@@ -2918,7 +3051,9 @@ private struct PirateBayView: View {
         }.buttonStyle(.plain)
     }
 
-    private func reload() async { await model.load(section: section, quality: quality, query: query) }
+    private func reload() async {
+        await model.load(indexer: indexer, section: section, quality: quality, query: query)
+    }
     private func toast(_ text: String) {
         notice = text
         Task { try? await Task.sleep(nanoseconds: 2_000_000_000); if notice == text { notice = nil } }
@@ -3131,7 +3266,7 @@ private struct PirateBayDetailsView: View {
             quality: OnlineStreamQuality.detect(hint: nil, fileName: item.name) ?? .p1080,
             seeders: item.seedCount,
             sizeBytes: item.byteCount,
-            origin: .pirateBay
+            origin: item.status == "milkie" ? .milkie : .pirateBay
         )
     }
     private var currentPlaybackTransfer: OnlinePlaybackTransfer? {
