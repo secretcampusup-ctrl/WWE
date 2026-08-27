@@ -375,39 +375,44 @@ struct ContentView: View {
 
     private func playlistSection(_ playlist: VideoPlaylist) -> some View {
         let links = vm.links(in: playlist)
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "text.badge.plus")
-                    .font(.system(size: 17))
-                    .foregroundColor(AppTheme.accent)
-                Text(playlist.name)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(Color(red: 0.8, green: 0.96, blue: 0.92))
-                    .lineLimit(1)
-                Spacer()
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                playlistCoverStack(links)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(playlist.name)
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(links.isEmpty ? "Empty collection" : "\(links.count) titles")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+                Spacer(minLength: 8)
                 if !links.isEmpty {
                     Button {
                         dismissKeyboard()
                         selectedPlaylistForSeeAll = playlist
                     } label: {
                         Text("See All")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(AppTheme.accent)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(AppPalette.gradient, in: Capsule())
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .contentShape(Rectangle())
 
             if links.isEmpty {
-                Text("No videos in this playlist yet")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.white.opacity(0.38))
+                Text("Add titles to this collection")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.38))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 22)
+                    .padding(.vertical, 18)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 14) {
+                    HStack(alignment: .top, spacing: 12) {
                         ForEach(links) { link in
                             MoviePosterCard(
                                 link: link,
@@ -433,6 +438,30 @@ struct ContentView: View {
                 }
             }
         }
+        .padding(16)
+        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    private func playlistCoverStack(_ links: [SavedVideoLink]) -> some View {
+        ZStack {
+            ForEach(Array(links.prefix(3).enumerated().reversed()), id: \.element.id) { index, link in
+                MoviePosterCard(link: link, width: 38, height: 56, onPlay: {}, onDelete: {})
+                    .allowsHitTesting(false)
+                    .offset(x: CGFloat(index) * 10)
+                    .rotationEffect(.degrees(Double(index) * 4 - 4))
+            }
+            if links.isEmpty {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(AppPalette.gradient)
+            }
+        }
+        .frame(width: 64, height: 56)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var librarySection: some View {

@@ -2691,6 +2691,8 @@ private struct PirateBayResult: Decodable, Identifiable {
     let added: String
     let status: String
     let category: String
+    let tmdbID: Int?
+    let imdbID: String?
     enum CodingKeys: String, CodingKey {
         case id, name, leechers, seeders, size, username, added, status, category
         case infoHash = "info_hash"
@@ -2705,7 +2707,9 @@ private struct PirateBayResult: Decodable, Identifiable {
         username: String = "",
         added: String,
         status: String = "",
-        category: String = ""
+        category: String = "",
+        tmdbID: Int? = nil,
+        imdbID: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -2717,6 +2721,8 @@ private struct PirateBayResult: Decodable, Identifiable {
         self.added = added
         self.status = status
         self.category = category
+        self.tmdbID = tmdbID
+        self.imdbID = imdbID
     }
 
     init(from decoder: Decoder) throws {
@@ -2730,6 +2736,8 @@ private struct PirateBayResult: Decodable, Identifiable {
         id = text(.id); name = text(.name); infoHash = text(.infoHash)
         leechers = text(.leechers); seeders = text(.seeders); size = text(.size)
         username = text(.username); added = text(.added); status = text(.status); category = text(.category)
+        tmdbID = nil
+        imdbID = nil
     }
     var seedCount: Int { Int(seeders) ?? 0 }
     var leechCount: Int { Int(leechers) ?? 0 }
@@ -2897,7 +2905,9 @@ private final class PirateBayLatestModel: ObservableObject {
                     username: "Milkie",
                     added: String(Int((torrent.createdAt ?? Date()).timeIntervalSince1970)),
                     status: "milkie",
-                    category: String(torrent.category)
+                    category: String(torrent.category),
+                    tmdbID: torrent.tmdbID,
+                    imdbID: torrent.imdbID
                 )
             }
             guard !items.isEmpty else {
@@ -3068,15 +3078,36 @@ private struct PirateBayView: View {
 
     private func resultCard(_ item: PirateBayResult) -> some View {
         NavigationLink { PirateBayDetailsView(vm: vm, item: item, tint: section.tint) } label: {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack(alignment: .top) { Text(item.name).font(.headline).foregroundStyle(.white).lineLimit(3); Spacer(minLength: 8); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 4) }
-                HStack(spacing: 12) {
-                    Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green)
-                    Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange)
-                    Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file)).foregroundStyle(.secondary)
-                    Spacer(); Text(item.addedDate, style: .relative).foregroundStyle(.secondary)
-                }.font(.caption.bold())
-            }.padding(15).background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 20)).overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.07)))
+            HStack(alignment: .top, spacing: 12) {
+                DiscoverResultArtwork(item: item, mediaType: section == .tv ? "tv" : "movie")
+                    .frame(width: 74, height: 110)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(item.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(3)
+                    HStack(spacing: 10) {
+                        Label("\(item.seedCount)", systemImage: "arrow.up.circle.fill").foregroundStyle(.green)
+                        Label("\(item.leechCount)", systemImage: "arrow.down.circle.fill").foregroundStyle(.orange)
+                    }
+                    .font(.caption.bold())
+                    HStack {
+                        Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file))
+                        Spacer()
+                        Text(item.addedDate, style: .relative)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.28))
+                    .padding(.top, 6)
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Color.white.opacity(0.08)))
         }.buttonStyle(.plain)
     }
 
@@ -3089,6 +3120,39 @@ private struct PirateBayView: View {
     }
 }
 
+private struct DiscoverResultArtwork: View {
+    let item: PirateBayResult
+    let mediaType: String
+    @State private var posterURL: URL?
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color.white.opacity(0.08), Color.black.opacity(0.35)], startPoint: .top, endPoint: .bottom)
+            if let posterURL {
+                KFImage(posterURL)
+                    .placeholder { ProgressView().tint(AppPalette.accent).scaleEffect(0.7) }
+                    .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 148, height: 220)))
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "film.stack.fill")
+                    .font(.title3)
+                    .foregroundStyle(AppPalette.gradient)
+            }
+        }
+        .task(id: item.id) { posterURL = await resolvePoster() }
+    }
+
+    private func resolvePoster() async -> URL? {
+        if let tmdbID = item.tmdbID,
+           let details = await TMDBService.shared.details(mediaType: mediaType, tmdbID: tmdbID, fallbackTitle: item.name) {
+            return details.posterURL ?? details.detailsPosterURL
+        }
+        let cleaned = VideoTitleFormatter.title(from: item.name)
+        return await TMDBService.shared.details(for: cleaned)?.posterURL
+    }
+}
+
 private let pirateBayImageRequestModifier = AnyModifier { request in
     var request = request
     request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1", forHTTPHeaderField: "User-Agent")
@@ -3098,6 +3162,21 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
 
 @MainActor private final class PirateBayDetailsModel: ObservableObject {
     @Published var imageURLs: [URL] = []; @Published var isLoading = false
+    func loadMilkieArtwork(_ item: PirateBayResult, mediaType: String) async {
+        guard imageURLs.isEmpty else { return }
+        isLoading = true
+        defer { isLoading = false }
+        if let tmdbID = item.tmdbID,
+           let details = await TMDBService.shared.details(mediaType: mediaType, tmdbID: tmdbID, fallbackTitle: item.name) {
+            imageURLs = [details.detailsBackdropURL, details.posterURL, details.detailsPosterURL].compactMap { $0 }
+            return
+        }
+        let cleaned = VideoTitleFormatter.title(from: item.name)
+        if let details = await TMDBService.shared.details(for: cleaned) {
+            imageURLs = [details.detailsBackdropURL, details.posterURL, details.detailsPosterURL].compactMap { $0 }
+        }
+    }
+
     func load(id: String) async {
         guard imageURLs.isEmpty, let url = URL(string: "https://apibay.org/t.php?id=\(id)") else { return }
         isLoading = true; defer { isLoading = false }
@@ -3204,7 +3283,13 @@ private struct PirateBayDetailsView: View {
             }
         }
         .overlay(alignment: .top) { if let message { Text(message).font(.subheadline.bold()).padding(.horizontal, 16).padding(.vertical, 10).background(.ultraThinMaterial, in: Capsule()).padding(.top, 8) } }
-        .task { await model.load(id: item.id) }
+        .task {
+            if item.status == "milkie" {
+                await model.loadMilkieArtwork(item, mediaType: item.category == "2" ? "tv" : "movie")
+            } else {
+                await model.load(id: item.id)
+            }
+        }
         .fullScreenCover(isPresented: $showViewer) {
             PirateBayImageViewer(urls: model.imageURLs, selection: $selectedImage)
         }

@@ -2597,23 +2597,58 @@ private struct StreamingPlatformSettingsView: View {
                     }
                 }
 
-                Section("Manual Stremio Add-on") {
-                    SecureField("https://…/manifest.json", text: $stremioAddonURL)
-                        .textContentType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Text("Paste a Stremio-compatible manifest URL here. If it contains a debrid token, it is stored securely in the iPhone Keychain. The add-on is searched first, alongside the existing Orion or Pirate Bay search.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Save Add-on URL") { saveStremioAddon() }
-                        .disabled(stremioAddonURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if StremioAddonStore.isConfigured {
-                        Button("Remove Add-on URL", role: .destructive) {
-                            _ = StremioAddonStore.clear()
-                            stremioAddonURL = ""
-                            status = "Manual add-on removed"
+                Section {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "puzzlepiece.extension.fill")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Add-ons").font(.headline)
+                                Text(StremioAddonStore.isConfigured ? "Connected" : "No add-on installed")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(StremioAddonStore.isConfigured ? AppPalette.accent : .secondary)
+                            }
+                            Spacer()
                         }
+                        Text("Paste a Stremio manifest. Tokens inside the URL are stored in the Keychain and searched first.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        SecureField("https://…/manifest.json", text: $stremioAddonURL)
+                            .textContentType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        HStack(spacing: 10) {
+                            Button(action: saveStremioAddon) {
+                                Text("Save Add-on")
+                                    .font(.subheadline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .foregroundStyle(.white)
+                            }
+                            .disabled(stremioAddonURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            if StremioAddonStore.isConfigured {
+                                Button(role: .destructive) {
+                                    _ = StremioAddonStore.clear()
+                                    stremioAddonURL = ""
+                                    status = "Manual add-on removed"
+                                } label: {
+                                    Text("Remove")
+                                        .font(.subheadline.bold())
+                                        .frame(width: 92, height: 44)
+                                        .background(Color.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.vertical, 6)
                 }
 
                 if !status.isEmpty {
