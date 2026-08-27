@@ -63,7 +63,7 @@ enum SubDLSubtitleService {
         } else {
             items.append(URLQueryItem(name: "film_name", value: query))
         }
-        if let languageCode { items.append(URLQueryItem(name: "languages", value: languageCode)) }
+        if let languageCode { items.append(URLQueryItem(name: "languages", value: languageCode.lowercased())) }
         if let season = requestedSeason, let episode = requestedEpisode {
             if !usesMetadata || mediaContext?.tmdbID == nil {
                 items.append(URLQueryItem(name: "type", value: "tv"))
