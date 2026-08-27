@@ -959,7 +959,7 @@ struct UnifiedContentView: View {
                 } label: {
                     Label(value.rawValue, systemImage: value.icon)
                         .font(.system(size: 12, weight: .bold)).lineLimit(1)
-                        .foregroundStyle(section == value ? .white : .secondary)
+                        .foregroundStyle(section == value ? Color.white : Color.secondary)
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                         .background {
                             if section == value {
@@ -1782,76 +1782,7 @@ private struct OnlineLibraryAddSheet: View {
             ZStack {
                 AppTheme.bg.ignoresSafeArea()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        Text("Add to Library")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
-                        Text(VideoTitleFormatter.title(from: episode?.title ?? entry.title))
-                            .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-
-                        if destination == nil {
-                            Text("Choose a connected library")
-                                .font(.headline).foregroundStyle(.white.opacity(0.8))
-                            ForEach(availableDestinations) { service in
-                                Button { destination = service; loadSources() } label: {
-                                    HStack(spacing: 14) {
-                                        Image(systemName: service.icon)
-                                            .font(.title3).foregroundStyle(.white)
-                                            .frame(width: 48, height: 48)
-                                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(service.title).font(.headline).foregroundStyle(.white)
-                                            Text("Select a quality before adding")
-                                                .font(.caption).foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                                    }
-                                    .padding(13)
-                                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                                }
-                                .buttonStyle(PremiumPressButtonStyle())
-                            }
-                        } else if isSearching {
-                            VStack(spacing: 14) {
-                                ProgressView().controlSize(.large).tint(AppPalette.accent)
-                                Text("Finding available qualities…").foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 230)
-                        } else if let status, sources.isEmpty {
-                            ContentUnavailableView("No qualities found", systemImage: "video.slash", description: Text(status))
-                                .frame(maxWidth: .infinity, minHeight: 260)
-                        } else {
-                            HStack {
-                                Button { destination = nil; sources = []; status = nil } label: {
-                                    Label(destination?.title ?? "Library", systemImage: "chevron.left")
-                                }
-                                .buttonStyle(.plain).foregroundStyle(AppPalette.accent)
-                                Spacer()
-                                Text("Choose quality").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-                            }
-                            ForEach(bestQualityChoices) { source in
-                                Button { add(source) } label: {
-                                    HStack(spacing: 14) {
-                                        Text(source.quality.label).font(.headline.bold()).foregroundStyle(.black)
-                                            .frame(width: 72, height: 54)
-                                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(source.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                                            Text("\(source.seeders) seeders · \(source.sizeLabel)")
-                                                .font(.caption).foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        if isAdding { ProgressView().tint(.white) }
-                                        else { Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.white.opacity(0.85)) }
-                                    }
-                                    .padding(12)
-                                    .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
-                                }
-                                .buttonStyle(PremiumPressButtonStyle())
-                                .disabled(isAdding)
-                            }
-                        }
-                    }
+                    sheetContent
                     .padding(20)
                     .padding(.bottom, 36)
                 }
@@ -1860,6 +1791,90 @@ private struct OnlineLibraryAddSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarLeading) { AppAnimatedBackButton(size: 36) { dismiss() } } }
         }
+    }
+
+    private var sheetContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Add to Library")
+                .font(.system(size: 28, weight: .bold, design: .rounded))
+            Text(VideoTitleFormatter.title(from: episode?.title ?? entry.title))
+                .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+            libraryContent
+        }
+    }
+
+    @ViewBuilder private var libraryContent: some View {
+        if destination == nil {
+            destinationList
+        } else if isSearching {
+            ProgressView().controlSize(.large).tint(AppPalette.accent)
+                .frame(maxWidth: .infinity, minHeight: 230)
+        } else if let status, sources.isEmpty {
+            ContentUnavailableView("No qualities found", systemImage: "video.slash", description: Text(status))
+                .frame(maxWidth: .infinity, minHeight: 260)
+        } else {
+            qualityList
+        }
+    }
+
+    private var destinationList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose a connected library").font(.headline).foregroundStyle(.white.opacity(0.8))
+            ForEach(availableDestinations) { service in
+                Button { destination = service; loadSources() } label: { destinationRow(service) }
+                    .buttonStyle(PremiumPressButtonStyle())
+            }
+        }
+    }
+
+    private func destinationRow(_ service: OnlineLibraryDestination) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: service.icon).font(.title3).foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(service.title).font(.headline).foregroundStyle(.white)
+                Text("Select a quality before adding").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+        }
+        .padding(13)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var qualityList: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Button { destination = nil; sources = []; status = nil } label: {
+                    Label(destination?.title ?? "Library", systemImage: "chevron.left")
+                }.buttonStyle(.plain).foregroundStyle(AppPalette.accent)
+                Spacer()
+                Text("Choose quality").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+            }
+            ForEach(bestQualityChoices) { source in qualityRow(source) }
+        }
+    }
+
+    private func qualityRow(_ source: OnlineTorrentSource) -> some View {
+        Button { add(source) } label: {
+            HStack(spacing: 14) {
+                Text(source.quality.label).font(.headline.bold()).foregroundStyle(.black)
+                    .frame(width: 72, height: 54)
+                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(source.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                    Text("\(source.seeders) seeders · \(source.sizeLabel)").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isAdding { ProgressView().tint(.white) }
+                else { Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.white.opacity(0.85)) }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+        .disabled(isAdding)
     }
 
     private var bestQualityChoices: [OnlineTorrentSource] {
@@ -2129,7 +2144,7 @@ private struct PikPakPreparationPlayerScreen: View {
                         .multilineTextAlignment(.center)
                     Text(detail)
                         .font(.footnote)
-                        .foregroundStyle(errorMessage == nil ? .white.opacity(0.56) : .orange.opacity(0.9))
+                        .foregroundStyle(errorMessage == nil ? Color.white.opacity(0.56) : Color.orange.opacity(0.9))
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
                 }
@@ -2332,7 +2347,7 @@ private struct ExperimentalOnlineSourcesView: View {
         HStack(spacing: 11) {
             Image(systemName: activeProviders.isEmpty ? "bolt.horizontal.circle.fill" : "icloud.and.arrow.up.fill")
                 .font(.title3)
-                .foregroundStyle(activeProviders.isEmpty ? AppPalette.purple : .green)
+                .foregroundStyle(activeProviders.isEmpty ? AppPalette.purple : Color.green)
             VStack(alignment: .leading, spacing: 3) {
                 Text(activeProviders.isEmpty ? "Direct Torrent Player" : activeProviders.joined(separator: " · "))
                     .font(.headline)
@@ -2361,7 +2376,7 @@ private struct ExperimentalOnlineSourcesView: View {
                 VStack(spacing: 2) {
                     Text(source.quality.label)
                         .font(.headline.bold())
-                        .foregroundStyle(isFastest ? .black : .white)
+                        .foregroundStyle(isFastest ? Color.black : Color.white)
                     if isFastest {
                         Text("FASTEST")
                             .font(.system(size: 8, weight: .black))
@@ -2400,7 +2415,7 @@ private struct ExperimentalOnlineSourcesView: View {
                         Text(currentTransfer?.phase == .downloading ? "Downloading" : "Preparing")
                             .font(.system(size: 9, weight: .bold))
                     }
-                    .foregroundStyle(currentTransfer?.phase == .downloading ? AppPalette.accent : .white)
+                    .foregroundStyle(currentTransfer?.phase == .downloading ? AppPalette.accent : Color.white)
                 } else {
                     Image(systemName: "play.fill")
                         .font(.headline)
@@ -2491,7 +2506,7 @@ private struct ExperimentalOnlineSourcesView: View {
         return HStack(spacing: 14) {
             Image(systemName: isDownloading ? "arrow.down.circle.fill" : "hourglass")
                 .font(.system(size: 23, weight: .semibold))
-                .foregroundStyle(isDownloading ? AppPalette.accent : .white)
+                .foregroundStyle(isDownloading ? AppPalette.accent : Color.white)
                 .frame(width: 48, height: 48)
                 .background(
                     (isDownloading ? AppPalette.accent : Color.white).opacity(0.12),
@@ -2688,23 +2703,7 @@ private struct StreamingPlatformSettingsView: View {
                         .foregroundStyle(.secondary)
                     ForEach(OnlineLibraryDestination.allCases) { destination in
                         Button { toggleLibraryDestination(destination) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: destination.icon)
-                                    .font(.headline)
-                                    .foregroundStyle(selectedLibraryDestinations.contains(destination) ? .white : AppPalette.accent)
-                                    .frame(width: 34, height: 34)
-                                    .background(selectedLibraryDestinations.contains(destination) ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)), in: Circle())
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(destination.title).foregroundStyle(.primary)
-                                    Text(destination.isConfigured ? "Connected" : "Connect this account in Servers first")
-                                        .font(.caption)
-                                        .foregroundStyle(destination.isConfigured ? .secondary : .orange)
-                                }
-                                Spacer()
-                                Image(systemName: selectedLibraryDestinations.contains(destination) ? "checkmark.circle.fill" : "circle")
-                                    .font(.title3)
-                                    .foregroundStyle(selectedLibraryDestinations.contains(destination) ? AppPalette.accent : .secondary)
-                            }
+                            libraryDestinationRow(destination)
                         }
                         .buttonStyle(.plain)
                         .disabled(!destination.isConfigured)
@@ -2718,18 +2717,7 @@ private struct StreamingPlatformSettingsView: View {
                         .foregroundStyle(.secondary)
                     ForEach(OnlineSearchProviderSelection.available) { provider in
                         Button { toggleSearchProvider(provider) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: searchProviderIcon(provider))
-                                    .font(.headline)
-                                    .foregroundStyle(selectedSearchProviders.contains(provider) ? .white : AppPalette.accent)
-                                    .frame(width: 34, height: 34)
-                                    .background(selectedSearchProviders.contains(provider) ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)), in: Circle())
-                                Text(provider.title).foregroundStyle(.primary)
-                                Spacer()
-                                Image(systemName: selectedSearchProviders.contains(provider) ? "checkmark.circle.fill" : "circle")
-                                    .font(.title3)
-                                    .foregroundStyle(selectedSearchProviders.contains(provider) ? AppPalette.accent : .secondary)
-                            }
+                            searchProviderRow(provider)
                         }
                         .buttonStyle(.plain)
                     }
@@ -2808,7 +2796,7 @@ private struct StreamingPlatformSettingsView: View {
                                 Text("Add-ons").font(.headline)
                                 Text(StremioAddonStore.isConfigured ? "Connected" : "No add-on installed")
                                     .font(.caption.weight(.semibold))
-                                    .foregroundStyle(StremioAddonStore.isConfigured ? AppPalette.accent : .secondary)
+                                    .foregroundStyle(StremioAddonStore.isConfigured ? AppPalette.accent : Color.secondary)
                             }
                             Spacer()
                         }
@@ -2918,6 +2906,51 @@ private struct StreamingPlatformSettingsView: View {
         .padding(16)
         .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func libraryDestinationRow(_ destination: OnlineLibraryDestination) -> some View {
+        let isSelected = selectedLibraryDestinations.contains(destination)
+        HStack(spacing: 12) {
+            Image(systemName: destination.icon)
+                .font(.headline)
+                .foregroundStyle(isSelected ? Color.white : AppPalette.accent)
+                .frame(width: 34, height: 34)
+                .background(
+                    isSelected ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)),
+                    in: Circle()
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(destination.title).foregroundStyle(Color.primary)
+                Text(destination.isConfigured ? "Connected" : "Connect this account in Servers first")
+                    .font(.caption)
+                    .foregroundStyle(destination.isConfigured ? Color.white.opacity(0.55) : Color.orange)
+            }
+            Spacer()
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.title3)
+                .foregroundStyle(isSelected ? AppPalette.accent : Color.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func searchProviderRow(_ provider: OnlineSearchProviderPreference) -> some View {
+        let isSelected = selectedSearchProviders.contains(provider)
+        HStack(spacing: 12) {
+            Image(systemName: searchProviderIcon(provider))
+                .font(.headline)
+                .foregroundStyle(isSelected ? Color.white : AppPalette.accent)
+                .frame(width: 34, height: 34)
+                .background(
+                    isSelected ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)),
+                    in: Circle()
+                )
+            Text(provider.title).foregroundStyle(Color.primary)
+            Spacer()
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.title3)
+                .foregroundStyle(isSelected ? AppPalette.accent : Color.secondary)
+        }
     }
 
     private func toggleSearchProvider(_ provider: OnlineSearchProviderPreference) {
