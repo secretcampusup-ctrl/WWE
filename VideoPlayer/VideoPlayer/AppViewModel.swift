@@ -1309,36 +1309,10 @@ class AppViewModel: ObservableObject {
         nowPlayingURL = nil
         nowPlayingHeaders = nil
 
-        // When the same PikPak account is connected natively, translate the DAV
-        // path to its stable file ID and request a fresh original CDN URL. This
-        // makes Media playback use the same fast route as a pasted direct link.
-        if isPikPakDAVServer(server), pikpakAccount != nil {
-            do {
-                if let native = try await nativePikPakPlayback(for: file, client: client) {
-                    DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-native file=\(file.name)")
-                    let saved = saveDirectLink(
-                        url.absoluteString,
-                        resolvedStream: native.stream,
-                        source: .pikpak,
-                        title: file.name,
-                        pikpakFileId: native.file.id,
-                        poster: native.file.thumbnailLink,
-                        fileSizeBytes: file.size ?? native.file.size
-                    )
-                    startPlayback(
-                        url: native.stream,
-                        title: file.name,
-                        linkId: saved?.id,
-                        headers: PikPakClient.shared.directPlaybackHeaders()
-                    )
-                    return nowPlayingURL != nil
-                }
-                DiagnosticLogger.log("[PlaybackRoute] provider=webdav-fallback reason=no-native-match file=\(file.name)")
-            } catch {
-                DiagnosticLogger.log("[PlaybackRoute] provider=webdav-fallback reason=\(error.localizedDescription) file=\(file.name)")
-            }
-        }
-
+        // Official PikPak guidance for third-party apps: use WebDAV, then follow
+        // the normal HTTP redirect. Do not swap the file onto the private Drive
+        // API. After the DAV host redirects, drop Basic auth so Range requests
+        // look like a normal CDN download.
         var playbackURL = url
         var playbackHeaders = client.streamHeaders()
         if isPikPakDAVServer(server),
@@ -1346,7 +1320,9 @@ class AppViewModel: ObservableObject {
            isResolvedPikPakCDNURL(directURL, comparedWith: url) {
             playbackURL = directURL
             playbackHeaders = PikPakClient.shared.directPlaybackHeaders()
-            DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-dav-cdn file=\(file.name)")
+            DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-webdav-redirect file=\(file.name)")
+        } else if isPikPakDAVServer(server) {
+            DiagnosticLogger.log("[PlaybackRoute] provider=pikpak-webdav file=\(file.name)")
         }
 
         let saved = saveDirectLink(

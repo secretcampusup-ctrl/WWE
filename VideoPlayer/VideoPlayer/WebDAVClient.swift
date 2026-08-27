@@ -160,7 +160,10 @@ final class WebDAVClient: NSObject {
         request.httpMethod = "GET"
         request.timeoutInterval = 8
         request.setValue(basicAuthHeader(), forHTTPHeaderField: "Authorization")
-        request.setValue("VideoPlayer/1.0 (iOS; WebDAV)", forHTTPHeaderField: "User-Agent")
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
 
@@ -179,7 +182,7 @@ final class WebDAVClient: NSObject {
 
     func streamHeaders() -> [String: String] {
         var headers: [String: String] = [
-            "User-Agent": "VideoPlayer/1.0 (iOS; AVPlayer; WebDAV)",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
             "Accept": "*/*"
         ]
         if !authUsername.isEmpty {

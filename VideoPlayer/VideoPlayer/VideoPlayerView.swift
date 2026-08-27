@@ -110,7 +110,10 @@ struct VideoPlayerView: View {
         // A pasted PikPak direct link is extensionless and plays in VLC.
         // Library titles often end with .mp4 and used to force AVPlayer, which
         // stalled on the same CDN file. Keep every PikPak download on VLC.
-        if LinkResolver.isPikPakDirectDownload(url.absoluteString) {
+        let host = (url.host ?? "").lowercased()
+        if LinkResolver.isPikPakDirectDownload(url.absoluteString)
+            || host.contains("mypikpak.com")
+            || host.contains("pikpak.com") {
             return true
         }
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
