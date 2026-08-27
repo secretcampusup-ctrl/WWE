@@ -1810,8 +1810,21 @@ private struct OnlineLibraryAddSheet: View {
             ProgressView().controlSize(.large).tint(AppPalette.accent)
                 .frame(maxWidth: .infinity, minHeight: 230)
         } else if let status, sources.isEmpty {
-            ContentUnavailableView("No qualities found", systemImage: "video.slash", description: Text(status))
-                .frame(maxWidth: .infinity, minHeight: 260)
+            // ContentUnavailableView is iOS 17+; keep a simple fallback for iOS 16.
+            VStack(spacing: 14) {
+                Image(systemName: "video.slash")
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(Color.secondary)
+                Text("No qualities found")
+                    .font(.headline)
+                    .foregroundStyle(Color.primary)
+                Text(status)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
+            .frame(maxWidth: .infinity, minHeight: 260)
         } else {
             qualityList
         }
