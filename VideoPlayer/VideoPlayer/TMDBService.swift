@@ -59,7 +59,12 @@ struct TMDBTitleDetails: Identifiable, Codable {
     }
     var detailsBackdropURL: URL? {
         guard let path = noLanguageBackdropPath ?? backdropPath else { return nil }
-        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
+        // w1280 covers a 3x iPhone width. `/original` backdrops are often 4–10 MB.
+        return URL(string: "https://image.tmdb.org/t/p/w1280\(path)")
+    }
+    var compactBackdropURL: URL? {
+        guard let path = noLanguageBackdropPath ?? backdropPath ?? posterPath else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/w780\(path)")
     }
     var detailsPosterURL: URL? {
         // `noLanguagePosterPath` only exists after a full title-details fetch
@@ -68,11 +73,13 @@ struct TMDBTitleDetails: Identifiable, Codable {
         // by the discover/list feed, instead of blocking on a heavy per-title
         // details request just to resolve a poster URL.
         guard let path = noLanguagePosterPath ?? detailsPosterPath else { return nil }
-        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
+        return URL(string: "https://image.tmdb.org/t/p/w780\(path)")
     }
     var heroPosterURL: URL? {
         guard let path = noLanguagePosterPath else { return nil }
-        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
+        // Hero is a full-bleed phone portrait. w780 is the largest TMDB poster
+        // tier before `/original` (often 2–8 MB and 2000×3000+).
+        return URL(string: "https://image.tmdb.org/t/p/w780\(path)")
     }
     var logoURL: URL? {
         guard let logoPath else { return nil }

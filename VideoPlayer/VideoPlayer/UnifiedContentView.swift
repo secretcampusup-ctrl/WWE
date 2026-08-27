@@ -1120,7 +1120,8 @@ struct UnifiedPosterArtwork: View {
             } else if let url = resolvedPosterURL {
                 KFImage(url)
                     .placeholder { ProgressView().tint(AppPalette.accent) }
-                    .cacheOriginalImage()
+                    .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 240, height: 360)))
+                    .scaleFactor(UIScreen.main.scale)
                     .onSuccess { result in
                         // Kingfisher's URL cache is disposable. Keep the library
                         // poster under the same persistent key every screen reads.
@@ -1147,7 +1148,10 @@ struct UnifiedPosterArtwork: View {
             // title details anyway to show cast/overview/etc). Grid posters
             // just use whatever's already in `entry.details`/`entry.posterURL`
             // from the list response, with zero extra network calls.
-            resolvedPosterURL = entry.details?.detailsPosterURL ?? entry.posterURL
+            // Grid cards are ~112pt wide. Prefer the list-sized TMDB poster
+            // (w342) over the details/hero file so Home rows do not download
+            // a 780–original still for every visible cell.
+            resolvedPosterURL = entry.posterURL ?? entry.details?.detailsPosterURL
             hasCheckedCache = true
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
@@ -2424,6 +2428,7 @@ private struct StreamingPlatformSettingsView: View {
     @State private var orionAppKey = ""
     @State private var realDebridKey = ""
     @State private var stremioAddonURL = ""
+    @State private var milkieKey = ""
     @State private var selectedSearchProviders = OnlineSearchProviderSelection.selected
     @State private var status = ""
 
@@ -2517,6 +2522,26 @@ private struct StreamingPlatformSettingsView: View {
                     }
                 }
 
+                Section("Milkie") {
+                    SecureField("API / download key", text: $milkieKey)
+                        .textContentType(.password)
+                    Text("Milkie.cc search uses x-milkie-auth. The key from Settings → Security on milkie.cc is stored in the Keychain. A built-in key is used until you save your own.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Save Milkie Key") {
+                        let key = milkieKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                        status = MilkieKeyStore.save(key) ? "Milkie key saved" : "Could not save Milkie key"
+                    }
+                    .disabled(milkieKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if MilkieKeyStore.usesCustomKey {
+                        Button("Remove Saved Milkie Key", role: .destructive) {
+                            _ = MilkieKeyStore.clear()
+                            milkieKey = ""
+                            status = "Custom Milkie key removed · built-in key is active"
+                        }
+                    }
+                }
+
                 Section("Manual Stremio Add-on") {
                     SecureField("https://…/manifest.json", text: $stremioAddonURL)
                         .textContentType(.URL)
@@ -2557,6 +2582,7 @@ private struct StreamingPlatformSettingsView: View {
                 orionAppKey = OrionCredentialStore.appKey
                 realDebridKey = RealDebridKeyStore.key
                 stremioAddonURL = StremioAddonStore.manifestURL
+                milkieKey = MilkieKeyStore.usesCustomKey ? MilkieKeyStore.key : ""
                 selectedSearchProviders = OnlineSearchProviderSelection.selected
             }
         }
@@ -2623,6 +2649,7 @@ private struct StreamingPlatformSettingsView: View {
         case .orion: return "sparkles"
         case .pirateBay: return "sailboat.fill"
         case .nyaa: return "tv.inset.filled"
+        case .milkie: return "drop.fill"
         case .automatic: return "wand.and.stars"
         }
     }

@@ -462,17 +462,40 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
     }
 
     private func enrichFeatured(from items: [UnifiedMediaEntry]) async {
+        let candidates = Array(items.prefix(10))
         var enriched: [UnifiedMediaEntry] = []
-        for var entry in items.prefix(10) {
-            if let details = await TMDBService.shared.detailsOriginalFirst(
+
+        func apply(_ entry: UnifiedMediaEntry) async -> UnifiedMediaEntry? {
+            var updated = entry
+            guard let details = await TMDBService.shared.detailsOriginalFirst(
                 for: entry.title,
                 preferredMediaType: entry.details?.mediaType ?? "movie"
             ), let noLanguagePosterPath = details.noLanguagePosterPath,
-              !noLanguagePosterPath.isEmpty {
-                entry.details = details
-                enriched.append(entry)
-                featured = enriched
+               !noLanguagePosterPath.isEmpty else { return nil }
+            updated.details = details
+            return updated
+        }
+
+        // First slide must appear as soon as one poster is known. The rest
+        // resolve concurrently so later carousel pages are warm.
+        if let first = candidates.first, let resolved = await apply(first) {
+            enriched.append(resolved)
+            featured = enriched
+        }
+        await withTaskGroup(of: (Int, UnifiedMediaEntry?).self) { group in
+            for (index, entry) in candidates.dropFirst().enumerated() {
+                group.addTask {
+                    (index + 1, await apply(entry))
+                }
             }
+            var extras: [(Int, UnifiedMediaEntry)] = []
+            for await (index, resolved) in group {
+                if let resolved { extras.append((index, resolved)) }
+            }
+            for (_, entry) in extras.sorted(by: { $0.0 < $1.0 }) {
+                enriched.append(entry)
+            }
+            if enriched.count > 1 { featured = enriched }
         }
     }
 
@@ -1501,7 +1524,7 @@ struct HomeLibraryView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14).fill(AppTheme.card)
-                    if let url = item.entry.details?.detailsBackdropURL ?? item.entry.posterURL {
+                    if let url = item.entry.details?.compactBackdropURL ?? item.entry.posterURL {
                         KFImage(url)
                             .placeholder { ProgressView().tint(AppPalette.accent) }
                             .cacheOriginalImage()
@@ -2365,6 +2388,9 @@ private struct PersistentHeroArtwork: View {
 
         }
         .task(id: "\(cacheKey)|\(shouldPrepare)") {
+            if image == nil {
+                image = VideoThumbnailLoader.cachedHeroImageInMemory(forStableKey: cacheKey)
+            }
             if !shouldPrepare {
                 // Preserve the outgoing artwork through the carousel fade, then
                 // release its decoded pixels. Returning to it reuses disk cache.
@@ -2374,19 +2400,12 @@ private struct PersistentHeroArtwork: View {
                 onReleased()
                 return
             }
-            // A carousel step changes which off-screen item is the new "next"
-            // poster. Starting its disk/network decode in the same frame as the
-            // visible crossfade caused a small hitch. The incoming/current image
-            // is already warm, so defer only this new neighbor until the fade is
-            // complete; it still has several seconds before becoming visible.
+            // Neighbors can decode after the current slide is on screen.
+            // Keep the wait short so the next background is ready in time.
             if !isCurrent, image == nil {
-                try? await Task.sleep(nanoseconds: 620_000_000)
+                try? await Task.sleep(nanoseconds: 160_000_000)
                 guard !Task.isCancelled else { return }
             }
-            // A decoded image already on this layer is the only image the user
-            // should ever see. Replacing it with a temporary remote image and
-            // then replacing that again with UIImage caused the visible
-            // one-frame zoom/flicker during the first Hero presentation.
             if image != nil {
                 onPrepared()
                 return
@@ -2395,20 +2414,29 @@ private struct PersistentHeroArtwork: View {
                 image = primary
                 onPrepared()
             } else if let legacy = await VideoThumbnailLoader.cachedImageAsync(forStableKey: legacyCacheKey) {
-                // One-time migration: reuse the already downloaded v2 image and
-                // move it into the dedicated persistent Hero cache.
                 image = legacy
                 VideoThumbnailLoader.cacheHeroImageInBackground(legacy, forStableKey: cacheKey)
                 onPrepared()
-            } else if let remoteURL,
-                      let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: remoteURL),
-                      let downloaded = UIImage(data: data),
-                      !Task.isCancelled {
-                // Publish one final decoded image; never put a second remote
-                // image with a different rendering lifecycle into the Hero.
-                image = downloaded
-                VideoThumbnailLoader.cacheHeroImageInBackground(downloaded, forStableKey: cacheKey)
-                onPrepared()
+            } else if let remoteURL {
+                let target = CGSize(
+                    width: UIScreen.main.bounds.width,
+                    height: 670
+                )
+                if let downloaded = await VideoThumbnailLoader.downloadRemoteImage(
+                    from: remoteURL,
+                    stableKey: cacheKey,
+                    maxRetries: 2,
+                    targetPointSize: target
+                ), !Task.isCancelled {
+                    image = downloaded
+                    VideoThumbnailLoader.cacheHeroImageInBackground(downloaded, forStableKey: cacheKey)
+                    onPrepared()
+                }
+            }
+        }
+        .onAppear {
+            if image == nil {
+                image = VideoThumbnailLoader.cachedHeroImageInMemory(forStableKey: cacheKey)
             }
         }
         .onDisappear { onReleased() }
@@ -2845,15 +2873,16 @@ private final class PirateBayLatestModel: ObservableObject {
                     || (quality == .ultraHD && torrent.releaseName.localizedCaseInsensitiveContains("4k"))
             }
             let pool = filtered.isEmpty ? listed : filtered
-            let ranked = pool
-                .filter { $0.seeders > 0 && $0.size >= 50 * 1_024 * 1_024 }
-                .sorted {
-                    if query.isEmpty {
-                        return ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
-                    }
+            let seeded = pool.filter { $0.seeders > 0 && $0.size >= 50 * 1_024 * 1_024 }
+            let ranked: [MilkieTorrent]
+            if query.isEmpty {
+                ranked = seeded.sorted { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+            } else {
+                ranked = seeded.sorted {
                     if $0.seeders != $1.seeders { return $0.seeders > $1.seeders }
                     return ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
                 }
+            }
             let hydrated = await MilkieClient.hydrateInfoHashes(Array(ranked.prefix(40)), limit: 40)
             guard requestID == currentID else { return }
             items = hydrated.compactMap { torrent in
