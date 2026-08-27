@@ -155,6 +155,7 @@ struct VideoDetailsView: View {
     var onDelete: (() -> Void)? = nil
     var dismissOnPlay: Bool = true
     var onSelectEpisode: ((String) -> Void)? = nil
+    var onAddToLibrary: (() -> Void)? = nil
     var suggestionsTitle: String = "Unwatched"
     var suggestions: [VideoDetailsSuggestion] = []
     var onSelectSuggestion: ((String) -> Void)? = nil
@@ -193,6 +194,18 @@ struct VideoDetailsView: View {
 
                         VStack(spacing: 12) {
                             primaryPlayButton
+
+                            if let onAddToLibrary {
+                                Button(action: onAddToLibrary) {
+                                    Label("Add to Library", systemImage: "plus.rectangle.on.folder.fill")
+                                        .font(.subheadline.weight(.bold))
+                                        .foregroundStyle(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 46)
+                                        .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                }
+                                .buttonStyle(DetailsQuickActionPressStyle())
+                            }
 
                             HStack(spacing: 12) {
                                 actionButton(
@@ -754,6 +767,10 @@ struct VideoDetailsView: View {
             Spacer()
             movieActionButton(icon: "text.badge.plus") { openPlaylistPickerWithFeedback() }
             Spacer()
+            if let onAddToLibrary {
+                movieActionButton(icon: "plus.rectangle.on.folder", tint: AppPalette.accent, action: onAddToLibrary)
+                Spacer()
+            }
             movieActionButton(icon: "flag") {
                 if onDelete != nil { showDeleteConfirmation = true }
                 else { showDeleteUnavailable = true }

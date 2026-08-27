@@ -21,7 +21,7 @@ struct MainTabView: View {
             PirateBayView(vm: vm)
                 .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
-            UnifiedSettingsView(vm: vm, showsDoneButton: false)
+            LibrarySearchView(vm: vm)
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
 
@@ -180,7 +180,7 @@ struct MainTabView: View {
         return Button {
             selectTab(3)
         } label: {
-            Image(systemName: "gearshape.fill")
+            Image(systemName: "magnifyingglass")
                 .font(.system(size: 23, weight: .medium))
                 .symbolRenderingMode(.monochrome)
                 .foregroundStyle(isSelected ? AppPalette.accent : Color.white.opacity(0.9))
@@ -222,7 +222,7 @@ struct MainTabView: View {
         }
         .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
         .animation(.spring(response: 0.38, dampingFraction: 0.7), value: isSelected)
-        .accessibilityLabel("Settings")
+        .accessibilityLabel("Search")
     }
 
     private func dockButton(_ title: String, _ icon: String, _ tab: Int) -> some View {
@@ -265,6 +265,175 @@ struct MainTabView: View {
         UISelectionFeedbackGenerator().selectionChanged()
         withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
             selectedTab = tab
+        }
+    }
+}
+
+// MARK: - Online catalogue search
+
+/// Search is intentionally its own tab. Home stays a fast, offline-first view
+/// of the user's connected libraries while this screen owns all TMDB lookups.
+private struct LibrarySearchView: View {
+    @ObservedObject var vm: AppViewModel
+    @StateObject private var catalogue = ExperimentalOnlineCatalogModel()
+    @State private var query = ""
+    @State private var results: [UnifiedMediaEntry] = []
+    @State private var filter = "All"
+    @State private var isSearching = false
+    @State private var message: String?
+    @State private var searchTask: Task<Void, Never>?
+    @State private var selectedEntry: UnifiedMediaEntry?
+    @FocusState private var searchFocused: Bool
+
+    private var filteredResults: [UnifiedMediaEntry] {
+        results.filter { entry in
+            guard filter != "All" else { return true }
+            guard case let .catalog(mediaType, _) = entry.source else { return false }
+            return filter == "Movies" ? mediaType == "movie" : mediaType == "tv"
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                LinearGradient(
+                    colors: [AppTheme.bg, AppPalette.purple.opacity(0.13), AppTheme.bg],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ).ignoresSafeArea()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Search")
+                                .font(.system(size: 32, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                            Text("Find movies and TV shows, then add a quality to your enabled library.")
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.56))
+                        }
+
+                        HStack(spacing: 10) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundStyle(AppPalette.accent)
+                            TextField("Movie, TV show or actor", text: $query)
+                                .focused($searchFocused)
+                                .textInputAutocapitalization(.words)
+                                .autocorrectionDisabled()
+                                .submitLabel(.search)
+                                .onSubmit { search(query, immediately: true) }
+                            if !query.isEmpty {
+                                Button { query = ""; results = []; message = nil } label: {
+                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 15)
+                        .frame(height: 54)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.8))
+
+                        Picker("Type", selection: $filter) {
+                            Text("All").tag("All")
+                            Text("Movies").tag("Movies")
+                            Text("TV Shows").tag("TV Shows")
+                        }
+                        .pickerStyle(.segmented)
+
+                        if isSearching {
+                            HStack(spacing: 12) {
+                                ProgressView().tint(AppPalette.accent)
+                                Text("Searching catalogue…").foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 170)
+                        } else if query.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
+                            searchPlaceholder(icon: "sparkles", title: "Search the catalogue", subtitle: "Results open in the same details view as your library.")
+                        } else if filteredResults.isEmpty {
+                            searchPlaceholder(icon: "film.stack", title: message ?? "No results found", subtitle: "Try a different title, year, or spelling.")
+                        } else {
+                            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 20) {
+                                ForEach(filteredResults) { entry in
+                                    Button { selectedEntry = entry } label: { searchPoster(entry) }
+                                        .buttonStyle(PremiumPressButtonStyle())
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 26)
+                    .padding(.bottom, 118)
+                }
+                .scrollIndicators(.hidden)
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .onChange(of: query) { search($0) }
+            .onDisappear { searchTask?.cancel() }
+            .fullScreenCover(item: $selectedEntry) { entry in
+                UnifiedMediaDetailsHost(
+                    vm: vm,
+                    entry: entry,
+                    section: entry.id.contains("|tv|") ? .shows : .movies,
+                    categoryEntries: filteredResults
+                )
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func searchPoster(_ entry: UnifiedMediaEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous).fill(AppTheme.card)
+                if let url = entry.posterURL {
+                    KFImage(url).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "film.fill").font(.largeTitle).foregroundStyle(.secondary)
+                }
+                LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .center, endPoint: .bottom)
+                if let rating = entry.details?.voteAverage, rating > 0 {
+                    Text(String(format: "%.1f", rating))
+                        .font(.caption.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(8)
+                }
+            }
+            .aspectRatio(0.67, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            Text(entry.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+            Text(entry.details?.releaseDate.map { String($0.prefix(4)) } ?? "—")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func searchPlaceholder(icon: String, title: String, subtitle: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 34, weight: .semibold)).foregroundStyle(AppPalette.gradient)
+            Text(title).font(.headline).foregroundStyle(.white)
+            Text(subtitle).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 210)
+        .padding(.horizontal, 28)
+    }
+
+    private func search(_ rawQuery: String, immediately: Bool = false) {
+        searchTask?.cancel()
+        let value = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.count >= 2 else { isSearching = false; results = []; message = nil; return }
+        searchTask = Task { @MainActor in
+            if !immediately { try? await Task.sleep(nanoseconds: 300_000_000) }
+            guard !Task.isCancelled else { return }
+            isSearching = true; message = nil
+            do {
+                let found = try await catalogue.search(value)
+                guard !Task.isCancelled, query.trimmingCharacters(in: .whitespacesAndNewlines) == value else { return }
+                results = found; message = found.isEmpty ? "No results found" : nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                results = []; message = "Search unavailable"
+            }
+            isSearching = false
         }
     }
 }
@@ -551,7 +720,6 @@ struct HomeLibraryView: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var catalog: UnifiedContentModel
     let isActive: Bool
-    @AppStorage("online_platform_experimental_enabled_v1") private var onlinePlatformEnabled = true
     @StateObject private var onlineCatalog = ExperimentalOnlineCatalogModel()
 
     @State private var selectedEntry: UnifiedMediaEntry?
@@ -560,6 +728,7 @@ struct HomeLibraryView: View {
     @State private var selectedCollection: HomeCollection?
     @State private var showFavorites = false
     @State private var showRefreshOverlay = false
+    @State private var showSettings = false
     @State private var isHomeSearchExpanded = false
     @State private var isHomeSearchContentVisible = false
     @State private var homeSearchText = ""
@@ -653,12 +822,10 @@ struct HomeLibraryView: View {
                         LazyVStack(alignment: .leading, spacing: 28) {
                             resumeSection
                             favoritesSection
-                            posterSection("Popular Movies", items: onlineCatalog.popularMovies)
-                            posterSection("Popular Korean Movies", items: onlineCatalog.popularKoreanMovies)
-                            posterSection("Recent TV Shows", items: onlineCatalog.airingTV)
-                            posterSection("Recent Korean Drama", items: onlineCatalog.recentKoreanDramas)
-                            posterSection("Top Rated", items: onlineCatalog.topRated)
-                            categorySection("Genres", categories: onlineCatalog.genres)
+                            posterSection("Recently Added", items: derivedData.recentlyAdded)
+                            posterSection("Movies", items: catalog.movies)
+                            posterSection("TV Shows", items: catalog.shows)
+                            categorySection("Genres", categories: derivedData.genres)
                         }
                         .padding(.top, 0)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -710,8 +877,7 @@ struct HomeLibraryView: View {
                 guard isActive else { return }
                 updateHeroRotationIfNeeded()
                 async let localLoad: Void = catalog.load(vm: vm, force: false)
-                async let onlineLoad: Void = onlineCatalog.load(force: false)
-                _ = await (localLoad, onlineLoad)
+                _ = await localLoad
                 scheduleDerivedDataRebuild()
             }
             .onReceive(catalog.$movies) { _ in scheduleDerivedDataRebuild() }
@@ -720,6 +886,12 @@ struct HomeLibraryView: View {
             .onReceive(onlineCatalog.$resumeCandidates) { _ in scheduleDerivedDataRebuild() }
             .onReceive(vm.$playbackHistory) { _ in scheduleDerivedDataRebuild() }
             .onReceive(vm.$savedLinks) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(NotificationCenter.default.publisher(for: .librarySourcesDidChange)) { _ in
+                Task {
+                    await catalog.load(vm: vm, force: true)
+                    scheduleDerivedDataRebuild()
+                }
+            }
             .onChange(of: heroRotationSlot) { _ in scheduleDerivedDataRebuild() }
             .onChange(of: homeSearchText) { query in scheduleHomeSearch(query) }
             .onChange(of: isActive) { active in
@@ -794,6 +966,9 @@ struct HomeLibraryView: View {
             .fullScreenCover(isPresented: $showFavorites) {
                 FavoritesAllView(vm: vm)
             }
+            .fullScreenCover(isPresented: $showSettings) {
+                UnifiedSettingsView(vm: vm)
+            }
             .fullScreenCover(isPresented: $showHeroPlayer) {
                 ResolvedPlayerScreen(
                     vm: vm,
@@ -810,17 +985,7 @@ struct HomeLibraryView: View {
         HStack(spacing: 8) {
             Spacer(minLength: 0)
             if !isHomeSearchExpanded {
-                Button(action: openHomeSearch) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 0.8))
-                        .shadow(color: .black.opacity(0.28), radius: 9, y: 4)
-                }
-                .buttonStyle(PremiumPressButtonStyle())
-                .accessibilityLabel("Search")
+                homeHeaderButton("gearshape.fill") { showSettings = true }
                 homeHeaderButton("arrow.clockwise") {
                     Task { await refreshLibrary() }
                 }
@@ -1482,8 +1647,7 @@ struct HomeLibraryView: View {
         showRefreshOverlay = true
         let startedAt = Date()
         async let localRefresh: Void = catalog.load(vm: vm, force: true)
-        async let onlineRefresh: Void = onlineCatalog.load(force: true)
-        _ = await (localRefresh, onlineRefresh)
+        _ = await localRefresh
 
         // If the pull happened while another scan was ending, the model queues
         // this forced refresh. Keep the overlay up through that queued pass too.
@@ -1730,17 +1894,15 @@ struct HomeLibraryView: View {
 
     private var allItems: [UnifiedMediaEntry] {
         var seen = Set<String>()
-        let onlineItems = onlinePlatformEnabled
-            ? onlineCatalog.trending + onlineCatalog.newMovies + onlineCatalog.popularMovies
-                + onlineCatalog.popularKoreanMovies + onlineCatalog.airingTV + onlineCatalog.newEpisodes
-                + onlineCatalog.recentKoreanDramas + onlineCatalog.topRated + onlineCatalog.resumeCandidates
-            : []
-        return (catalog.movies + catalog.shows + catalog.unknown + onlineItems)
+        // Home is the user's library, never the online catalogue. Search and
+        // Discover can surface external titles without silently mixing them
+        // into the personal Home feed.
+        return (catalog.movies + catalog.shows)
             .filter { seen.insert($0.id).inserted }
     }
 
     private var featuredItems: [UnifiedMediaEntry] {
-        onlinePlatformEnabled ? onlineCatalog.featured : derivedData.featured
+        derivedData.featured
     }
 
     private func buildFeaturedItems(from libraryItems: [UnifiedMediaEntry]) -> [UnifiedMediaEntry] {

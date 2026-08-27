@@ -1766,6 +1766,67 @@ class AppViewModel: ObservableObject {
             return error.localizedDescription
         }
     }
+
+    /// Adds a catalogue torrent to the library the user selected in Settings.
+    /// This deliberately does not start playback: adding is a background
+    /// library action and Home/Content refresh themselves from the notification.
+    func addOnlineSourceToLibrary(
+        _ source: OnlineTorrentSource,
+        destination: OnlineLibraryDestination
+    ) async -> String? {
+        do {
+            switch destination {
+            case .pikpak:
+                if let error = await addMagnetToPikPak(source.magnet) { return error }
+            case .torBox:
+                let client = TorBoxClient(apiKey: TorBoxKeyStore.load())
+                _ = try await client.createTorrent(magnet: source.magnet)
+                // Store the fresh account state so Content can show a cached
+                // item immediately when TorBox returns it as ready.
+                let torrents = try await client.torrents(bypassCache: true)
+                await Task.detached(priority: .utility) { TorBoxLibraryStore.save(torrents) }.value
+            case .offcloud:
+                _ = try await OffcloudClient(apiKey: OffcloudKeyStore.load()).create(url: source.magnet)
+            case .realDebrid:
+                try await addMagnetToRealDebridLibrary(source.magnet)
+            }
+            NotificationCenter.default.post(name: .librarySourcesDidChange, object: nil)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func addMagnetToRealDebridLibrary(_ magnet: String) async throws {
+        let token = RealDebridKeyStore.key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { throw LibraryAddError.notConfigured("Real-Debrid") }
+        var request = URLRequest(url: URL(string: "https://api.real-debrid.com/rest/1.0/torrents/addMagnet")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 35
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var formAllowed = CharacterSet.urlQueryAllowed
+        formAllowed.remove(charactersIn: "&=+")
+        request.httpBody = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: formAllowed) ?? magnet)".data(using: .utf8)
+        let (_, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw LibraryAddError.requestFailed("Real-Debrid could not add this magnet")
+        }
+    }
+}
+
+enum LibraryAddError: LocalizedError {
+    case notConfigured(String), requestFailed(String)
+    var errorDescription: String? {
+        switch self {
+        case let .notConfigured(name): return "Connect \(name) in Settings first."
+        case let .requestFailed(message): return message
+        }
+    }
+}
+
+extension Notification.Name {
+    static let librarySourcesDidChange = Notification.Name("librarySourcesDidChange")
 }
 
 extension AppViewModel {
@@ -1787,7 +1848,7 @@ extension AppViewModel {
             title: source.name,
             provider: OnlinePlaybackProviderPreference.selected.title,
             phase: .preparing,
-            message: "جاري إضافة الملف إلى المكتبة"
+            message: "Adding to library"
         )
 
         onlinePlaybackPreparationTask = Task { [weak self] in
@@ -1826,7 +1887,7 @@ extension AppViewModel {
                                 title: source.name,
                                 provider: progress.provider,
                                 phase: .preparing,
-                                message: progress.message ?? "جاري إضافة الملف إلى المكتبة"
+                                message: progress.message ?? "Adding to library"
                             )
                         case .downloading:
                             DiagnosticLogger.log("[OnlinePlayback] downloading provider=\(progress.provider)")
@@ -1835,7 +1896,7 @@ extension AppViewModel {
                                 title: source.name,
                                 provider: progress.provider,
                                 phase: .downloading,
-                                message: progress.message ?? "جاري تجهيز الملف على الخدمة السحابية"
+                                message: progress.message ?? "Preparing on cloud service"
                             )
                         }
                     }
@@ -1851,7 +1912,7 @@ extension AppViewModel {
                         title: resolved.title,
                         provider: resolved.provider,
                         phase: .downloading,
-                        message: "جاري تحديث المكتبة للتشغيل"
+                        message: "Refreshing library for playback"
                     )
                     if let webDAV = await self.resolvePikPakViaWebDAV(title: resolved.title) {
                         finalResolved = webDAV
@@ -1867,7 +1928,7 @@ extension AppViewModel {
                     title: finalResolved.title,
                     provider: finalResolved.provider,
                     phase: .ready,
-                    message: "جاهز للتشغيل من المكتبة"
+                    message: "Ready to play from library"
                 )
             } catch is CancellationError {
                 return

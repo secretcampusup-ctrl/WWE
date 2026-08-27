@@ -116,6 +116,59 @@ enum OnlinePlaybackProviderPreference: String, CaseIterable, Identifiable {
     }
 }
 
+/// Services that may receive a torrent from a catalogue title. This is kept
+/// separate from the playback preference: a user can add one title to several
+/// cloud libraries while still choosing just one service for playback.
+enum OnlineLibraryDestination: String, CaseIterable, Identifiable {
+    case pikpak, realDebrid, offcloud, torBox
+
+    private static let defaultsKey = "online_library_destinations_v1"
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .pikpak: return "PikPak"
+        case .realDebrid: return "Real-Debrid"
+        case .offcloud: return "Offcloud"
+        case .torBox: return "TorBox"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .pikpak: return "bolt.horizontal.cloud.fill"
+        case .realDebrid: return "cloud.fill"
+        case .offcloud: return "arrow.down.to.line.compact"
+        case .torBox: return "shippingbox.fill"
+        }
+    }
+
+    var isConfigured: Bool {
+        switch self {
+        case .pikpak: return PikPakClient.shared.loadAccount() != nil
+        case .realDebrid: return !RealDebridKeyStore.key.isEmpty
+        case .offcloud: return !OffcloudKeyStore.load().isEmpty
+        case .torBox: return !TorBoxKeyStore.load().isEmpty
+        }
+    }
+
+    static var selected: Set<Self> {
+        get {
+            if let values = UserDefaults.standard.stringArray(forKey: defaultsKey) {
+                return Set(values.compactMap(Self.init(rawValue:)))
+            }
+            // Existing configured accounts remain usable after the upgrade, but
+            // nothing is silently enabled when no account has been connected.
+            return Set(allCases.filter(\.isConfigured))
+        }
+        set { UserDefaults.standard.set(newValue.map(\.rawValue), forKey: defaultsKey) }
+    }
+
+    static var enabledConfigured: [Self] {
+        allCases.filter { selected.contains($0) && $0.isConfigured }
+    }
+}
+
 enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
     case automatic, stremioAddon, orion, pirateBay, nyaa, milkie
     private static let defaultsKey = "online_search_provider_preference_v1"

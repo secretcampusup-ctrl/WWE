@@ -807,7 +807,7 @@ actor OnlinePlaybackResolver {
         onProgress(.init(
             provider: Provider.pikpak.rawValue,
             phase: .preparing,
-            message: "جاري إضافة الملف إلى المكتبة"
+            message: "Adding to library"
         ))
         let before = (try? await client.listFiles()).map { Set($0.map(\.id)) } ?? []
         let taskID = try await client.addOfflineTask(urlOrMagnet: source.magnet)
@@ -815,7 +815,7 @@ actor OnlinePlaybackResolver {
         onProgress(.init(
             provider: Provider.pikpak.rawValue,
             phase: .downloading,
-            message: "جاري تجهيز الملف على PikPak"
+            message: "Preparing file on PikPak"
         ))
 
         for _ in 0..<60 {
@@ -838,7 +838,7 @@ actor OnlinePlaybackResolver {
                             onProgress(.init(
                                 provider: Provider.pikpak.rawValue,
                                 phase: .downloading,
-                                message: "جاري تحديث المكتبة للتشغيل"
+                                message: "Refreshing library for playback"
                             ))
                             return ResolvedOnlinePlayback(
                                 url: url, title: resolved.item.name, provider: Provider.pikpak.rawValue,
@@ -859,7 +859,7 @@ actor OnlinePlaybackResolver {
                                     onProgress(.init(
                                         provider: Provider.pikpak.rawValue,
                                         phase: .downloading,
-                                        message: "جاري تحديث المكتبة للتشغيل"
+                                        message: "Refreshing library for playback"
                                     ))
                                     return ResolvedOnlinePlayback(
                                         url: url, title: item.name, provider: Provider.pikpak.rawValue,
@@ -888,7 +888,7 @@ actor OnlinePlaybackResolver {
                         onProgress(.init(
                             provider: Provider.pikpak.rawValue,
                             phase: .downloading,
-                            message: "جاري تحديث المكتبة للتشغيل"
+                            message: "Refreshing library for playback"
                         ))
                         return ResolvedOnlinePlayback(
                             url: url, title: item.name, provider: Provider.pikpak.rawValue,

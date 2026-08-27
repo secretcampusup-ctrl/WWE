@@ -26,11 +26,11 @@ enum HLSSegmentDownloader {
 
         var errorDescription: String? {
             switch self {
-            case .invalidPlaylist: return "تعذّر قراءة قائمة تشغيل HLS"
-            case .noSegments: return "ما فيه مقاطع فيديو في هذا الرابط"
-            case .encryptedSegments: return "المقاطع مشفّرة (AES) — هذا غير مدعوم حالياً"
-            case .exportFailed(let msg): return "فشل تحويل الفيديو إلى mp4: \(msg)"
-            case .vlcFailed(let msg): return "فشل تنزيل الفيديو بواسطة VLC: \(msg)"
+            case .invalidPlaylist: return "Could not read the HLS playlist"
+            case .noSegments: return "This link has no video segments"
+            case .encryptedSegments: return "Encrypted AES segments are not supported"
+            case .exportFailed(let msg): return "Could not export video to MP4: \(msg)"
+            case .vlcFailed(let msg): return "VLC could not download the video: \(msg)"
             }
         }
     }
@@ -104,7 +104,7 @@ enum HLSSegmentDownloader {
         let combinedSize = combinedAttrs?[.size] as? Int
         guard let size = combinedSize, size > 10_000 else {
             try? FileManager.default.removeItem(at: tempDir)
-            throw DownloadError.exportFailed("الملف الناتج من دمج المقاطع صغير جداً (\(combinedSize ?? 0) بايت) — يبدو أن المقاطع لم تنزل بشكل صحيح")
+            throw DownloadError.exportFailed("The merged file is too small (\(combinedSize ?? 0) bytes)")
         }
 
         let mp4URL = tempDir.appendingPathComponent("output.mp4")
@@ -196,7 +196,7 @@ enum HLSSegmentDownloader {
             if !hasStarted, Date().timeIntervalSince(startedAt) > 45 {
                 player.stop()
                 try? FileManager.default.removeItem(at: outputURL)
-                throw DownloadError.vlcFailed("تعذر فتح رابط HLS")
+                throw DownloadError.vlcFailed("Could not open the HLS link")
             }
         }
 
@@ -205,7 +205,7 @@ enum HLSSegmentDownloader {
         let finalSize = (finalAttributes?[.size] as? NSNumber)?.uint64Value ?? 0
         guard finalSize > 10_000 else {
             try? FileManager.default.removeItem(at: outputURL)
-            throw DownloadError.vlcFailed("لم ينتج ملف MP4 صالح")
+            throw DownloadError.vlcFailed("No valid MP4 file was produced")
         }
         onProgress(Progress(downloadedSegments: 1000, totalSegments: 1000, bytesWritten: Int64(clamping: finalSize), totalBytesExpected: Int64(clamping: finalSize)))
         return outputURL
@@ -218,14 +218,14 @@ enum HLSSegmentDownloader {
         let asset = AVURLAsset(url: sourceFile)
         let tracks = try await asset.load(.tracks)
         guard !tracks.isEmpty else {
-            throw DownloadError.exportFailed("لا توجد مسارات فيديو/صوت صالحة بعد التحميل (الملف الناتج فاسد)")
+            throw DownloadError.exportFailed("No valid video or audio tracks were found after download")
         }
         let duration = try await asset.load(.duration)
         guard duration.isValid, duration.seconds.isFinite, duration.seconds > 0 else {
             // The .ts container parses enough to report tracks, but has no
             // usable timeline — a strong sign the concatenated segments have
             // PTS/DTS discontinuities or are encrypted, not a codec/preset issue.
-            throw DownloadError.exportFailed("تيار الفيديو الناتج من دمج المقاطع غير صالح (مدة غير معروفة) — قد تكون المقاطع غير متجانسة أو مشفّرة جزئياً")
+            throw DownloadError.exportFailed("The merged video stream is invalid or has an unknown duration")
         }
 
         // Passthrough is fast (no re-encode) but only works when every track's

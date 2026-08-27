@@ -930,6 +930,9 @@ struct UnifiedContentView: View {
                 // (movie vs show) and appears in the library.
                 Task { await model.load(vm: vm, force: true) }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .librarySourcesDidChange)) { _ in
+                Task { await model.load(vm: vm, force: true) }
+            }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
             .sheet(item: $manualSearch) { request in
@@ -1332,6 +1335,7 @@ struct UnifiedMediaDetailsHost: View {
     @State private var activeEntry: UnifiedMediaEntry
     @State private var showPlayer = false
     @State private var showOnlineSources = false
+    @State private var showLibraryAdd = false
     @State private var presentOnlinePlayerAfterSourcesDismiss = false
     /// The source sheet is bypassed only for an explicit PikPak choice. The
     /// ID lets us ignore stale updates after changing episode or leaving.
@@ -1372,6 +1376,11 @@ struct UnifiedMediaDetailsHost: View {
         return activeEntry.episodes.first { $0.id == selectedEpisodeID }
     }
 
+    private var isCatalogueEntry: Bool {
+        if case .catalog = activeEntry.source { return true }
+        return false
+    }
+
     var body: some View {
         VideoDetailsView(
             vm: vm,
@@ -1382,6 +1391,9 @@ struct UnifiedMediaDetailsHost: View {
                 guard selection.id != episodeID else { return }
                 selection.id = episodeID
             },
+            onAddToLibrary: isCatalogueEntry && !OnlineLibraryDestination.enabledConfigured.isEmpty ? {
+                showLibraryAdd = true
+            } : nil,
             suggestionsTitle: suggestionsTitle,
             suggestions: suggestions,
             onSelectSuggestion: selectSuggestion
@@ -1452,6 +1464,10 @@ struct UnifiedMediaDetailsHost: View {
                 onSelect: selectPikPakQuality
             )
             .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showLibraryAdd) {
+            OnlineLibraryAddSheet(vm: vm, entry: activeEntry, episode: selectedEpisode)
+                .preferredColorScheme(.dark)
         }
         .fullScreenCover(
             isPresented: $showOnlineSources,
@@ -1746,6 +1762,152 @@ struct UnifiedMediaDetailsHost: View {
     }
 }
 
+private struct OnlineLibraryAddSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: AppViewModel
+    let entry: UnifiedMediaEntry
+    let episode: UnifiedEpisode?
+    @State private var destination: OnlineLibraryDestination?
+    @State private var sources: [OnlineTorrentSource] = []
+    @State private var isSearching = false
+    @State private var isAdding = false
+    @State private var status: String?
+
+    private var availableDestinations: [OnlineLibraryDestination] {
+        OnlineLibraryDestination.enabledConfigured
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                AppTheme.bg.ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("Add to Library")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                        Text(VideoTitleFormatter.title(from: episode?.title ?? entry.title))
+                            .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+
+                        if destination == nil {
+                            Text("Choose a connected library")
+                                .font(.headline).foregroundStyle(.white.opacity(0.8))
+                            ForEach(availableDestinations) { service in
+                                Button { destination = service; loadSources() } label: {
+                                    HStack(spacing: 14) {
+                                        Image(systemName: service.icon)
+                                            .font(.title3).foregroundStyle(.white)
+                                            .frame(width: 48, height: 48)
+                                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(service.title).font(.headline).foregroundStyle(.white)
+                                            Text("Select a quality before adding")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                                    }
+                                    .padding(13)
+                                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                }
+                                .buttonStyle(PremiumPressButtonStyle())
+                            }
+                        } else if isSearching {
+                            VStack(spacing: 14) {
+                                ProgressView().controlSize(.large).tint(AppPalette.accent)
+                                Text("Finding available qualities…").foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 230)
+                        } else if let status, sources.isEmpty {
+                            ContentUnavailableView("No qualities found", systemImage: "video.slash", description: Text(status))
+                                .frame(maxWidth: .infinity, minHeight: 260)
+                        } else {
+                            HStack {
+                                Button { destination = nil; sources = []; status = nil } label: {
+                                    Label(destination?.title ?? "Library", systemImage: "chevron.left")
+                                }
+                                .buttonStyle(.plain).foregroundStyle(AppPalette.accent)
+                                Spacer()
+                                Text("Choose quality").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                            }
+                            ForEach(bestQualityChoices) { source in
+                                Button { add(source) } label: {
+                                    HStack(spacing: 14) {
+                                        Text(source.quality.label).font(.headline.bold()).foregroundStyle(.black)
+                                            .frame(width: 72, height: 54)
+                                            .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(source.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                                            Text("\(source.seeders) seeders · \(source.sizeLabel)")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        if isAdding { ProgressView().tint(.white) }
+                                        else { Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.white.opacity(0.85)) }
+                                    }
+                                    .padding(12)
+                                    .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
+                                }
+                                .buttonStyle(PremiumPressButtonStyle())
+                                .disabled(isAdding)
+                            }
+                        }
+                    }
+                    .padding(20)
+                    .padding(.bottom, 36)
+                }
+            }
+            .navigationTitle("Library")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarLeading) { AppAnimatedBackButton(size: 36) { dismiss() } } }
+        }
+    }
+
+    private var bestQualityChoices: [OnlineTorrentSource] {
+        let grouped = Dictionary(grouping: sources, by: \.quality)
+        return grouped.compactMap { _, values in
+            values.max { $0.seeders < $1.seeders }
+        }
+        .sorted { $0.quality < $1.quality }
+        .prefix(4).map { $0 }
+    }
+
+    @MainActor private func loadSources() {
+        guard let destination, case let .catalog(mediaType, tmdbID) = entry.source else { return }
+        isSearching = true; sources = []; status = nil
+        Task {
+            var imdbID = entry.details?.imdbID
+            if imdbID?.isEmpty != false {
+                imdbID = await TMDBService.shared.externalIMDbID(mediaType: mediaType, tmdbID: tmdbID)
+            }
+            let context = OnlineSourceLookupContext(
+                title: entry.details?.title ?? entry.title,
+                year: entry.details?.releaseDate.map { String($0.prefix(4)) },
+                mediaType: mediaType, tmdbID: tmdbID, imdbID: imdbID,
+                season: episode?.season ?? (mediaType == "tv" ? 1 : nil),
+                episode: episode?.episode ?? (mediaType == "tv" ? 1 : nil)
+            )
+            do {
+                let found = try await OnlineSourceSearchService.shared.search(context)
+                guard self.destination == destination else { return }
+                self.sources = found
+                self.status = found.isEmpty ? "Try a different search provider or title." : nil
+            } catch { self.status = error.localizedDescription }
+            self.isSearching = false
+        }
+    }
+
+    @MainActor private func add(_ source: OnlineTorrentSource) {
+        guard let destination, !isAdding else { return }
+        isAdding = true
+        Task {
+            let error = await vm.addOnlineSourceToLibrary(source, destination: destination)
+            isAdding = false
+            if let error { status = error }
+            else { dismiss() }
+        }
+    }
+}
+
 private struct PikPakQualityChoiceSheet: View {
     let title: String
     let isSearching: Bool
@@ -1913,24 +2075,24 @@ private struct PikPakPreparationPlayerScreen: View {
     @State private var stepIndex = 0
 
     private let preparingSteps = [
-        "جاري جلب الرابط",
-        "جاري تحديد المسار",
-        "جاري تجهيز الملف"
+        "Fetching stream link",
+        "Selecting video file",
+        "Preparing file"
     ]
 
     private var headline: String {
-        if errorMessage != nil { return "تعذر تجهيز التشغيل" }
-        if phase == .downloading { return "جاري تجهيز الملف" }
-        if phase == .ready { return "جاهز للتشغيل" }
+        if errorMessage != nil { return "Could not prepare playback" }
+        if phase == .downloading { return "Preparing file" }
+        if phase == .ready { return "Ready to play" }
         return preparingSteps[stepIndex % preparingSteps.count]
     }
 
     private var detail: String {
         if let errorMessage, !errorMessage.isEmpty { return errorMessage }
         if phase == .downloading {
-            return "يتم تجهيز الملف على الخدمة السحابية. ابقَ هنا حتى يبدأ المشغّل."
+            return "The cloud service is preparing the file. Keep this screen open until playback begins."
         }
-        return "لا تغلق الشاشة. يتم تجهيز رابط التشغيل الآن."
+        return "Preparing the stream link now."
     }
 
     var body: some View {
@@ -1972,7 +2134,7 @@ private struct PikPakPreparationPlayerScreen: View {
                         .padding(.horizontal, 32)
                 }
                 Spacer()
-                Button(errorMessage == nil ? "إلغاء" : "رجوع") { onClose() }
+                Button(errorMessage == nil ? "Cancel" : "Back") { onClose() }
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
@@ -2491,6 +2653,7 @@ private struct StreamingPlatformSettingsView: View {
     @State private var stremioAddonURL = ""
     @State private var milkieKey = ""
     @State private var selectedSearchProviders = OnlineSearchProviderSelection.selected
+    @State private var selectedLibraryDestinations = OnlineLibraryDestination.selected
     @State private var status = ""
 
     var body: some View {
@@ -2517,6 +2680,36 @@ private struct StreamingPlatformSettingsView: View {
                     Text("Playback uses only the provider selected here. Automatic tries configured services in order, starting with Real-Debrid.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Add to Library") {
+                    Text("Choose the connected libraries that appear when you open a search result. You can enable more than one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(OnlineLibraryDestination.allCases) { destination in
+                        Button { toggleLibraryDestination(destination) } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: destination.icon)
+                                    .font(.headline)
+                                    .foregroundStyle(selectedLibraryDestinations.contains(destination) ? .white : AppPalette.accent)
+                                    .frame(width: 34, height: 34)
+                                    .background(selectedLibraryDestinations.contains(destination) ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)), in: Circle())
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(destination.title).foregroundStyle(.primary)
+                                    Text(destination.isConfigured ? "Connected" : "Connect this account in Servers first")
+                                        .font(.caption)
+                                        .foregroundStyle(destination.isConfigured ? .secondary : .orange)
+                                }
+                                Spacer()
+                                Image(systemName: selectedLibraryDestinations.contains(destination) ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
+                                    .foregroundStyle(selectedLibraryDestinations.contains(destination) ? AppPalette.accent : .secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!destination.isConfigured)
+                        .opacity(destination.isConfigured ? 1 : 0.55)
+                    }
                 }
 
                 Section("Search Providers") {
@@ -2680,6 +2873,7 @@ private struct StreamingPlatformSettingsView: View {
                 stremioAddonURL = StremioAddonStore.manifestURL
                 milkieKey = MilkieKeyStore.usesCustomKey ? MilkieKeyStore.key : ""
                 selectedSearchProviders = OnlineSearchProviderSelection.selected
+                selectedLibraryDestinations = OnlineLibraryDestination.selected
             }
         }
         .preferredColorScheme(.dark)
@@ -2737,6 +2931,15 @@ private struct StreamingPlatformSettingsView: View {
             selectedSearchProviders.insert(provider)
         }
         OnlineSearchProviderSelection.selected = selectedSearchProviders
+    }
+
+    private func toggleLibraryDestination(_ destination: OnlineLibraryDestination) {
+        if selectedLibraryDestinations.contains(destination) {
+            selectedLibraryDestinations.remove(destination)
+        } else {
+            selectedLibraryDestinations.insert(destination)
+        }
+        OnlineLibraryDestination.selected = selectedLibraryDestinations
     }
 
     private func searchProviderIcon(_ provider: OnlineSearchProviderPreference) -> String {

@@ -2871,7 +2871,7 @@ private struct PlayerAdvancedSettingsSheet: View {
             VStack(spacing: 3) {
                 Text("English subtitle preview")
                     .font(.custom(PlayerSubtitleTypeface.englishPostScriptName, fixedSize: CGFloat(previewSize)))
-                Text("مرحباً، ستظهر الترجمة العربية بشكل صحيح")
+                Text("Subtitle preview text")
                     .font(.system(size: previewSize, weight: .semibold, design: subtitleFont.design))
             }
                 .foregroundStyle(subtitleColor.color)
