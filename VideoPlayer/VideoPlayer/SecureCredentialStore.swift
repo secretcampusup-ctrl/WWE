@@ -67,6 +67,7 @@ enum AppCredentialKeys {
     static let orionAppAPIKey = "orion-app-api-key"
     static let realDebridAPIKey = "realdebrid-api-key"
     static let stremioAddonManifestURL = "stremio-addon-manifest-url"
+    static let milkieAPIKey = "milkie-api-key"
     static func webDAVPassword(serverID: UUID) -> String { "webdav-password-\(serverID.uuidString)" }
 }
 
@@ -116,7 +117,7 @@ enum OnlinePlaybackProviderPreference: String, CaseIterable, Identifiable {
 }
 
 enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
-    case automatic, stremioAddon, orion, pirateBay, nyaa
+    case automatic, stremioAddon, orion, pirateBay, nyaa, milkie
     private static let defaultsKey = "online_search_provider_preference_v1"
     var id: String { rawValue }
     var title: String {
@@ -126,6 +127,7 @@ enum OnlineSearchProviderPreference: String, CaseIterable, Identifiable {
         case .orion: return "Orion"
         case .pirateBay: return "The Pirate Bay"
         case .nyaa: return "Nyaa"
+        case .milkie: return "Milkie"
         }
     }
     static var selected: Self {
@@ -141,20 +143,57 @@ enum OnlineSearchProviderSelection {
     private static let defaultsKey = "online_search_providers_v2"
 
     static var available: [OnlineSearchProviderPreference] {
-        [.stremioAddon, .orion, .pirateBay, .nyaa]
+        [.stremioAddon, .orion, .pirateBay, .nyaa, .milkie]
     }
 
     static var selected: Set<OnlineSearchProviderPreference> {
         get {
-            if let values = UserDefaults.standard.stringArray(forKey: defaultsKey) {
-                return Set(values.compactMap(OnlineSearchProviderPreference.init(rawValue:)))
+            var values: Set<OnlineSearchProviderPreference>
+            if let stored = UserDefaults.standard.stringArray(forKey: defaultsKey) {
+                values = Set(stored.compactMap(OnlineSearchProviderPreference.init(rawValue:)))
+            } else {
+                // Migrate the old single-provider setting; new users receive all
+                // public providers so they get a broader source list immediately.
+                let legacy = OnlineSearchProviderPreference.selected
+                values = legacy == .automatic ? Set(available) : [legacy]
             }
-            // Migrate the old single-provider setting; new users receive all
-            // public providers so they get a broader source list immediately.
-            let legacy = OnlineSearchProviderPreference.selected
-            return legacy == .automatic ? Set(available) : [legacy]
+            // One-time enable so an existing provider list picks up Milkie.
+            let migratedKey = "online_search_providers_milkie_v1"
+            if !UserDefaults.standard.bool(forKey: migratedKey) {
+                values.insert(.milkie)
+                UserDefaults.standard.set(values.map(\.rawValue), forKey: defaultsKey)
+                UserDefaults.standard.set(true, forKey: migratedKey)
+            }
+            return values
         }
         set { UserDefaults.standard.set(newValue.map(\.rawValue), forKey: defaultsKey) }
+    }
+}
+
+enum MilkieKeyStore {
+    /// Account download/API key supplied for this app build.
+    static let defaultKey = "L8AshsgTRN8kszD+eX5fuLOEYRF4lio5"
+
+    static var key: String {
+        let stored = SecureCredentialStore.string(for: AppCredentialKeys.milkieAPIKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return stored.isEmpty ? defaultKey : stored
+    }
+
+    static var isReady: Bool { !key.isEmpty }
+
+    static var usesCustomKey: Bool {
+        let stored = SecureCredentialStore.string(for: AppCredentialKeys.milkieAPIKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !stored.isEmpty
+    }
+
+    @discardableResult static func save(_ key: String) -> Bool {
+        SecureCredentialStore.set(key, for: AppCredentialKeys.milkieAPIKey)
+    }
+
+    @discardableResult static func clear() -> Bool {
+        SecureCredentialStore.remove(AppCredentialKeys.milkieAPIKey)
     }
 }
 

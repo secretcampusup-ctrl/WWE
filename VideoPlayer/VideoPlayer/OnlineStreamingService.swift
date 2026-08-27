@@ -34,6 +34,7 @@ struct OnlineTorrentSource: Identifiable, Hashable, Sendable {
         case manual = "Manual Magnet"
         case stremioAddon = "Manual Add-on"
         case nyaa = "Nyaa"
+        case milkie = "Milkie"
     }
 
     let id: String
@@ -189,6 +190,9 @@ actor OnlineSourceSearchService {
                     raw += try await searchPirateBay(context)
                 case .nyaa:
                     raw += try await searchNyaa(context)
+                case .milkie:
+                    guard MilkieKeyStore.isReady else { continue }
+                    raw += try await searchMilkie(context)
                 case .automatic:
                     continue
                 }
@@ -412,6 +416,53 @@ actor OnlineSourceSearchService {
                     seeders: Int(value.seeders) ?? 0,
                     sizeBytes: Int64(value.size) ?? 0,
                     origin: .pirateBay,
+                    requestedSeason: context.mediaType == "tv" ? context.season : nil,
+                    requestedEpisode: context.mediaType == "tv" ? context.episode : nil
+                ))
+            }
+            if Set(combined.map(\.quality)).count == OnlineStreamQuality.allCases.count { break }
+        }
+        return combined
+    }
+
+    private func searchMilkie(_ context: OnlineSourceLookupContext) async throws -> [OnlineTorrentSource] {
+        let categories: [MilkieClient.Category] = context.mediaType == "tv" ? [.tv] : [.movies]
+        var queries = [context.fallbackQuery]
+        if let year = context.year, !year.isEmpty, context.mediaType != "tv" {
+            queries.insert("\(context.title) \(year)", at: 0)
+        }
+        var combined: [OnlineTorrentSource] = []
+        var seen = Set<String>()
+
+        for query in queries {
+            let listed = try await MilkieClient.search(query: query, categories: categories, pageSize: 100)
+            let ranked = listed
+                .filter { torrent in
+                    if context.mediaType == "tv",
+                       let found = Self.episodeIdentity(in: torrent.releaseName),
+                       (found.season != (context.season ?? 1) || found.episode != (context.episode ?? 1)) {
+                        return false
+                    }
+                    return OnlineStreamQuality.detect(hint: nil, fileName: torrent.releaseName) != nil
+                }
+                .sorted {
+                    if $0.seeders != $1.seeders { return $0.seeders > $1.seeders }
+                    return $0.size > $1.size
+                }
+            let hydrated = await MilkieClient.hydrateInfoHashes(ranked, limit: 16)
+            for torrent in hydrated {
+                guard let hash = torrent.infoHash, !hash.isEmpty,
+                      let quality = OnlineStreamQuality.detect(hint: nil, fileName: torrent.releaseName) else { continue }
+                let key = hash.lowercased()
+                guard seen.insert(key).inserted else { continue }
+                combined.append(OnlineTorrentSource(
+                    id: "milkie|\(torrent.id)",
+                    name: torrent.releaseName,
+                    magnet: MilkieClient.magnet(infoHash: hash, name: torrent.releaseName),
+                    quality: quality,
+                    seeders: torrent.seeders,
+                    sizeBytes: torrent.size,
+                    origin: .milkie,
                     requestedSeason: context.mediaType == "tv" ? context.season : nil,
                     requestedEpisode: context.mediaType == "tv" ? context.episode : nil
                 ))
