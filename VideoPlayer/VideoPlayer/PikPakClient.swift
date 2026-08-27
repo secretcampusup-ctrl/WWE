@@ -884,47 +884,28 @@ final class PikPakClient {
         let medias = dict["medias"] as? [[String: Any]] ?? []
         let originalFileURL = applicationOctetStreamURL(in: dict)
 
-        // PikPak returns every server-side rendition in `medias`. Playback
-        // should start at 4K when it is available, otherwise use the highest
-        // visible rendition instead of always locking the user to Original.
-        let availableMedia = medias.compactMap { media -> (metadata: [String: Any], url: URL)? in
-            guard (media["is_visible"] as? Bool) != false,
-                  let url = self.mediaLinkURL(media) else { return nil }
-            return (media, url)
+        // Official PikPak playback and a pasted direct link both use the
+        // original CDN file. The `medias` ladder is a server transcode; on
+        // AVPlayer it often stalls every second even though the same file is
+        // smooth in PikPak's own app. Keep those renditions for the quality
+        // menu only.
+        if let originalFileURL {
+            DiagnosticLogger.log("[PikPakStream] route=octet-stream host=\(originalFileURL.host ?? "unknown")")
+            return originalFileURL
         }
-        if let selected = availableMedia.max(by: {
-            self.mediaResolutionScore($0.metadata) < self.mediaResolutionScore($1.metadata)
-        }) {
-            DiagnosticLogger.log("[PikPakStream] route=best-quality score=\(mediaResolutionScore(selected.metadata)) host=\(selected.url.host ?? "unknown")")
-            return selected.url
+        if let web = dict["web_content_link"] as? String,
+           let url = URL(string: web),
+           !web.isEmpty {
+            DiagnosticLogger.log("[PikPakStream] route=web-content host=\(url.host ?? "unknown")")
+            return url
         }
-
-        // Match rclone/PikPak's fast path: begin with the stable original-file
-        // link, read its fid, then select the media URL carrying that same fid.
-        // Media URLs allow less restrictive concurrent Range requests; choosing
-        // merely the first item labelled "Original" can select a stale/hidden
-        // rendition belonging to another backend object.
-        if let originalFileURL,
-           let expectedFileID = pikPakFileID(in: originalFileURL) {
-            let matchingMedia: [(metadata: [String: Any], url: URL)] = medias.compactMap { media in
-                guard let url = self.mediaLinkURL(media),
-                      self.pikPakFileID(in: url) == expectedFileID else { return nil }
-                return (media, url)
-            }
-            let selected = matchingMedia.first(where: {
-                (self.isOriginalMedia($0.metadata) || self.isOriginalPikPakURL($0.url))
-                    && ($0.metadata["is_visible"] as? Bool) != false
-            }) ?? matchingMedia.first(where: {
-                self.isOriginalMedia($0.metadata) || self.isOriginalPikPakURL($0.url)
-            }) ?? matchingMedia.first
-            if let selected {
-                DiagnosticLogger.log("[PikPakStream] route=original-media-fid-match host=\(selected.url.host ?? "unknown")")
-                return selected.url
-            }
+        if let download = dict["download_url"] as? String,
+           let url = URL(string: download),
+           !download.isEmpty {
+            DiagnosticLogger.log("[PikPakStream] route=download-url host=\(url.host ?? "unknown")")
+            return url
         }
 
-        // Prefer a visible original rendition next. `is_origin` is the actual
-        // API field; older payloads may instead use is_original or a name/category.
         if let url = medias.lazy
             .filter({ self.isOriginalMedia($0) && ($0["is_visible"] as? Bool) != false })
             .compactMap({ self.mediaLinkURL($0) })
@@ -937,22 +918,6 @@ final class PikPakClient {
             .compactMap({ self.mediaLinkURL($0) })
             .first {
             DiagnosticLogger.log("[PikPakStream] route=original-media-fallback host=\(url.host ?? "unknown")")
-            return url
-        }
-
-        // If PikPak supplied no matching media route, use its original-file URL.
-        if let originalFileURL {
-            DiagnosticLogger.log("[PikPakStream] route=octet-stream host=\(originalFileURL.host ?? "unknown")")
-            return originalFileURL
-        }
-        if let download = dict["download_url"] as? String,
-           let url = URL(string: download),
-           !download.isEmpty {
-            return url
-        }
-        if let web = dict["web_content_link"] as? String,
-           let url = URL(string: web),
-           !web.isEmpty {
             return url
         }
         if let url = medias.reversed().compactMap({ self.mediaLinkURL($0) }).first {

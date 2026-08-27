@@ -1395,6 +1395,7 @@ struct UnifiedMediaDetailsHost: View {
             if shouldShowPikPakPreparationPlayer {
                 PikPakPreparationPlayerScreen(
                     title: currentDetailsItem.title,
+                    phase: activePikPakTransfer?.phase,
                     message: activePikPakTransfer?.message,
                     errorMessage: pikPakPreparationError,
                     onClose: {
@@ -1434,14 +1435,9 @@ struct UnifiedMediaDetailsHost: View {
             onDismiss: {
                 guard presentOnlinePlayerAfterSourcesDismiss else { return }
                 presentOnlinePlayerAfterSourcesDismiss = false
-                guard vm.ensurePreparedOnlinePlaybackIsActive() else {
-                    DiagnosticLogger.log("[OnlinePlayback] presentation aborted because playback state is empty")
-                    vm.errorMessage = "The stream was prepared, but the player did not receive its URL."
-                    return
+                if vm.nowPlayingURL != nil || vm.preparedOnlinePlayback != nil {
+                    _ = vm.ensurePreparedOnlinePlaybackIsActive()
                 }
-                // onDismiss runs after the source cover has fully completed its
-                // transition, so the player cover can no longer be torn down by
-                // the outgoing cover's lifecycle.
                 showPlayer = true
             }
         ) {
@@ -1449,7 +1445,9 @@ struct UnifiedMediaDetailsHost: View {
                 vm: vm,
                 entry: activeEntry,
                 episode: selectedEpisode,
-                onPlaybackReady: {
+                onPlaybackReady: { sourceID in
+                    automaticPikPakTransferID = sourceID
+                    pikPakPreparationError = nil
                     presentOnlinePlayerAfterSourcesDismiss = true
                     showOnlineSources = false
                 }
@@ -1656,6 +1654,7 @@ struct UnifiedMediaDetailsHost: View {
     private func selectPikPakQuality(_ source: OnlineTorrentSource) {
         guard automaticPikPakTransferID == nil else { return }
         automaticPikPakTransferID = source.id
+        pikPakPreparationError = nil
         vm.prepareOnlineSource(source, historyItem: currentDetailsItem)
         presentPikPakPlayerAfterChooserDismiss = true
         showPikPakQualityChooser = false
@@ -1884,9 +1883,32 @@ private struct PikPakSourceRow: View {
 
 private struct PikPakPreparationPlayerScreen: View {
     let title: String
+    let phase: OnlinePlaybackTransfer.Phase?
     let message: String?
     let errorMessage: String?
     let onClose: () -> Void
+    @State private var stepIndex = 0
+
+    private let preparingSteps = [
+        "جاري جلب الرابط",
+        "جاري تحديد المسار",
+        "جاري تجهيز الملف"
+    ]
+
+    private var headline: String {
+        if errorMessage != nil { return "تعذر تجهيز التشغيل" }
+        if phase == .downloading { return "جاري تجهيز الملف" }
+        if phase == .ready { return "جاهز للتشغيل" }
+        return preparingSteps[stepIndex % preparingSteps.count]
+    }
+
+    private var detail: String {
+        if let errorMessage, !errorMessage.isEmpty { return errorMessage }
+        if phase == .downloading {
+            return "يتم تجهيز الملف على الخدمة السحابية. ابقَ هنا حتى يبدأ المشغّل."
+        }
+        return "لا تغلق الشاشة. يتم تجهيز رابط التشغيل الآن."
+    }
 
     var body: some View {
         ZStack {
@@ -1901,24 +1923,33 @@ private struct PikPakPreparationPlayerScreen: View {
 
             VStack(spacing: 22) {
                 Spacer()
-                PikPakOrbitLoader(size: 132)
+                if errorMessage == nil {
+                    PikPakOrbitLoader(size: 132)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(.orange)
+                }
                 VStack(spacing: 9) {
-                    Text(errorMessage == nil ? "Preparing your stream" : "Couldn’t prepare the stream")
+                    Text(headline)
                         .font(.system(size: 23, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .id(headline)
+                        .transition(.opacity)
                     Text(VideoTitleFormatter.title(from: title))
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.white.opacity(0.64))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
-                    Text(errorMessage ?? message ?? "PikPak is connecting to the selected quality. You can stay here while it finishes.")
+                    Text(detail)
                         .font(.footnote)
                         .foregroundStyle(errorMessage == nil ? .white.opacity(0.56) : .orange.opacity(0.9))
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
                 }
                 Spacer()
-                Button(errorMessage == nil ? "Cancel" : "Back") { onClose() }
+                Button(errorMessage == nil ? "إلغاء" : "رجوع") { onClose() }
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
@@ -1928,7 +1959,14 @@ private struct PikPakPreparationPlayerScreen: View {
                     .padding(.bottom, 35)
             }
         }
+        .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
+        .onReceive(Timer.publish(every: 1.6, on: .main, in: .common).autoconnect()) { _ in
+            guard errorMessage == nil, phase != .downloading, phase != .ready else { return }
+            withAnimation(.easeInOut(duration: 0.25)) {
+                stepIndex += 1
+            }
+        }
     }
 }
 
@@ -1968,7 +2006,7 @@ private struct ExperimentalOnlineSourcesView: View {
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
     let episode: UnifiedEpisode?
-    let onPlaybackReady: () -> Void
+    let onPlaybackReady: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var sources: [OnlineTorrentSource] = []
     @State private var isSearching = true
@@ -2237,6 +2275,7 @@ private struct ExperimentalOnlineSourcesView: View {
         resolvingID = source.id
         message = nil
         vm.prepareOnlineSource(source, historyItem: playbackHistoryItem)
+        onPlaybackReady(source.id)
     }
 
     private var currentTransfer: OnlinePlaybackTransfer? {
@@ -2255,7 +2294,6 @@ private struct ExperimentalOnlineSourcesView: View {
         case .ready:
             if vm.playPreparedOnlineSource() {
                 self.resolvingID = nil
-                onPlaybackReady()
             }
         case .failed:
             message = transfer.message

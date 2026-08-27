@@ -1806,7 +1806,7 @@ extension AppViewModel {
             title: source.name,
             provider: OnlinePlaybackProviderPreference.selected.title,
             phase: .preparing,
-            message: "Preparing stream…"
+            message: "جاري جلب الرابط"
         )
 
         onlinePlaybackPreparationTask = Task { [weak self] in
@@ -1845,7 +1845,7 @@ extension AppViewModel {
                                 title: source.name,
                                 provider: progress.provider,
                                 phase: .preparing,
-                                message: "Preparing stream…"
+                                message: "جاري جلب الرابط"
                             )
                         case .downloading:
                             DiagnosticLogger.log("[OnlinePlayback] downloading provider=\(progress.provider)")
@@ -1854,7 +1854,7 @@ extension AppViewModel {
                                 title: source.name,
                                 provider: progress.provider,
                                 phase: .downloading,
-                                message: "Downloading… You can keep browsing."
+                                message: "جاري تجهيز الملف على الخدمة السحابية"
                             )
                         }
                     }
@@ -1869,7 +1869,7 @@ extension AppViewModel {
                     title: resolved.title,
                     provider: resolved.provider,
                     phase: .ready,
-                    message: resolved.requiredDownload ? "Download complete · Ready to play" : "Ready to play"
+                    message: resolved.requiredDownload ? "اكتمل التجهيز · جاهز للتشغيل" : "جاهز للتشغيل"
                 )
             } catch is CancellationError {
                 return

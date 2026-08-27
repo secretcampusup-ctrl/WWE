@@ -286,8 +286,10 @@ final class VideoPlaybackEngine: ObservableObject {
 
         let item = makePlayerItem(asset: asset)
         attach(item: item)
-        player.automaticallyWaitsToMinimizeStalling = false
-        player.playImmediately(atRate: 1)
+        // Wait for a short forward buffer before forcing playback. PikPak's
+        // CDN otherwise starts, drains, and stalls about once a second.
+        player.automaticallyWaitsToMinimizeStalling = true
+        player.play()
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
