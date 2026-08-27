@@ -107,28 +107,18 @@ struct VideoPlayerView: View {
     }
 
     private var usesMKVPlayer: Bool {
-        // A pasted PikPak direct link is extensionless and plays in VLC.
-        // Library titles often end with .mp4 and used to force AVPlayer, which
-        // stalled on the same CDN file. Keep every PikPak download on VLC.
-        let host = (url.host ?? "").lowercased()
-        if LinkResolver.isPikPakDirectDownload(url.absoluteString)
-            || host.contains("mypikpak.com")
-            || host.contains("pikpak.com") {
-            return true
-        }
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
         let explicitExtension = url.pathExtension.lowercased()
+        let looksLikeMP4 = explicitExtension == "mp4" || explicitExtension == "m4v" || explicitExtension == "mov"
+            || decoded.range(of: #"(?i)\.(mp4|m4v|mov)(?:$|[?\s])"#, options: .regularExpression) != nil
+        let looksLikeMKV = explicitExtension == "mkv"
+            || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil
 
-        if explicitExtension == "mp4" || decoded.range(of: #"(?i)\.mp4(?:$|[?\s])"#, options: .regularExpression) != nil {
-            return false
-        }
-        if explicitExtension == "mkv" || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil {
-            return true
-        }
-        if explicitExtension.isEmpty,
-           LinkResolver.isPikPakDirectDownload(url.absoluteString) {
-            return true
-        }
+        // Keep the fast PikPak/WebDAV URL, but split engines by container.
+        // AVPlayer preserves the source resolution for MP4. VLC is only needed
+        // for Matroska and other extended formats.
+        if looksLikeMP4 { return false }
+        if looksLikeMKV { return true }
         if useExtendedPlayer { return true }
         return ["webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(explicitExtension)
     }
@@ -1781,7 +1771,12 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         media.addOption(":network-caching=\(isPikPakDirect ? 1200 : 2500)")
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=\(isPikPakDirect ? 500 : 1000)")
-        media.addOption(":drop-late-frames")
+        media.addOption(":no-drop-late-frames")
+        media.addOption(":no-skip-frames")
+        media.addOption(":avcodec-hw=any")
+        media.addOption(":avcodec-skiploopfilter=0")
+        media.addOption(":avcodec-skip-frame=0")
+        media.addOption(":avcodec-skip-idct=0")
         media.addOption(":freetype-font=\(subtitleStyle.fontName)")
         media.addOption(":sub-text-scale=\(vlcTextScale(for: subtitleStyle.fontSize))")
         media.addOption(":freetype-color=\(subtitleStyle.color)")
