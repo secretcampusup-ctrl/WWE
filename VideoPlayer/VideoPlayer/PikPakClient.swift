@@ -617,22 +617,30 @@ final class PikPakClient {
 
     func getFile(id: String) async throws -> (item: PikPakFileItem, streamURL: URL?) {
         let account = try await ensureValidToken()
-        var components = URLComponents(string: "\(driveBase)/drive/v1/files/\(id)")!
-        components.queryItems = [
-            URLQueryItem(name: "thumbnail_size", value: "SIZE_LARGE"),
-            URLQueryItem(name: "usage", value: "FETCH")
-        ]
-        let json = try await getJSON(url: components.url!.absoluteString, token: account.accessToken)
-        guard let item = mapFile(json) else { throw PikPakError.decode }
-        let stream = extractStreamURL(from: json)
-        return (item, stream)
+        let primary = try await fileJSON(id: id, token: account.accessToken, usage: nil)
+        guard let item = mapFile(primary) else { throw PikPakError.decode }
+        if let stream = extractDirectDownloadURL(from: primary) {
+            return (item, stream)
+        }
+        let fetched = try await fileJSON(id: id, token: account.accessToken, usage: "FETCH")
+        return (item, extractDirectDownloadURL(from: fetched))
     }
 
-    /// Fresh original-quality URL for a cloud file, with a playable variant fallback.
+    /// Same class of signed URL the PikPak website copies as a direct link.
     func streamURL(forFileId id: String) async throws -> URL {
         let (_, url) = try await getFile(id: id)
         guard let url else { throw PikPakError.noStreamURL }
         return url
+    }
+
+    private func fileJSON(id: String, token: String, usage: String?) async throws -> [String: Any] {
+        var components = URLComponents(string: "\(driveBase)/drive/v1/files/\(id)")!
+        var items = [URLQueryItem(name: "thumbnail_size", value: "SIZE_LARGE")]
+        if let usage {
+            items.append(URLQueryItem(name: "usage", value: usage))
+        }
+        components.queryItems = items
+        return try await getJSON(url: components.url!.absoluteString, token: token)
     }
 
     /// Fetch all visible, immediately playable renditions for the quality menu.
@@ -881,18 +889,11 @@ final class PikPakClient {
     }
 
     private func extractStreamURL(from dict: [String: Any]) -> URL? {
-        let medias = dict["medias"] as? [[String: Any]] ?? []
-        let originalFileURL = applicationOctetStreamURL(in: dict)
+        extractDirectDownloadURL(from: dict)
+    }
 
-        // Official PikPak playback and a pasted direct link both use the
-        // original CDN file. The `medias` ladder is a server transcode; on
-        // AVPlayer it often stalls every second even though the same file is
-        // smooth in PikPak's own app. Keep those renditions for the quality
-        // menu only.
-        if let originalFileURL {
-            DiagnosticLogger.log("[PikPakStream] route=octet-stream host=\(originalFileURL.host ?? "unknown")")
-            return originalFileURL
-        }
+    /// Website "copy download link" only. Never the `medias` transcode ladder.
+    private func extractDirectDownloadURL(from dict: [String: Any]) -> URL? {
         if let web = dict["web_content_link"] as? String,
            let url = URL(string: web),
            !web.isEmpty {
@@ -905,45 +906,14 @@ final class PikPakClient {
             DiagnosticLogger.log("[PikPakStream] route=download-url host=\(url.host ?? "unknown")")
             return url
         }
-
-        if let url = medias.lazy
-            .filter({ self.isOriginalMedia($0) && ($0["is_visible"] as? Bool) != false })
-            .compactMap({ self.mediaLinkURL($0) })
-            .first {
-            DiagnosticLogger.log("[PikPakStream] route=visible-original-media host=\(url.host ?? "unknown")")
+        if let originalFileURL = applicationOctetStreamURL(in: dict) {
+            DiagnosticLogger.log("[PikPakStream] route=octet-stream host=\(originalFileURL.host ?? "unknown")")
+            return originalFileURL
+        }
+        if let file = dict["file"] as? [String: Any], let url = extractDirectDownloadURL(from: file) {
             return url
         }
-        if let url = medias.lazy
-            .filter({ self.isOriginalMedia($0) })
-            .compactMap({ self.mediaLinkURL($0) })
-            .first {
-            DiagnosticLogger.log("[PikPakStream] route=original-media-fallback host=\(url.host ?? "unknown")")
-            return url
-        }
-        if let url = medias.reversed().compactMap({ self.mediaLinkURL($0) }).first {
-            return url
-        }
-        // 3) links map (mime → { url })
-        if let links = dict["links"] as? [String: Any] {
-            for (_, value) in links {
-                if let entry = value as? [String: Any],
-                   let u = entry["url"] as? String,
-                   let url = URL(string: u), !u.isEmpty {
-                    return url
-                }
-            }
-        }
-        // 4) Nested file / data
-        if let file = dict["file"] as? [String: Any], let url = extractStreamURL(from: file) {
-            return url
-        }
-        if let data = dict["data"] as? [String: Any], let url = extractStreamURL(from: data) {
-            return url
-        }
-        if let media = dict["media"] as? [String: Any],
-           let link = media["link"] as? [String: Any],
-           let u = link["url"] as? String,
-           let url = URL(string: u) {
+        if let data = dict["data"] as? [String: Any], let url = extractDirectDownloadURL(from: data) {
             return url
         }
         return nil

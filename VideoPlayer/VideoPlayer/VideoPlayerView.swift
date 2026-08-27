@@ -107,9 +107,12 @@ struct VideoPlayerView: View {
     }
 
     private var usesMKVPlayer: Bool {
-        // Prefer AVPlayer's fast hardware path for PikPak's converted stream;
-        // fall back to VLC on the rare rendition AVPlayer cannot decode.
-        if isPikPakTranscodedRendition { return useExtendedPlayer }
+        // A pasted PikPak direct link is extensionless and plays in VLC.
+        // Library titles often end with .mp4 and used to force AVPlayer, which
+        // stalled on the same CDN file. Keep every PikPak download on VLC.
+        if LinkResolver.isPikPakDirectDownload(url.absoluteString) {
+            return true
+        }
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
         let explicitExtension = url.pathExtension.lowercased()
 
@@ -119,8 +122,6 @@ struct VideoPlayerView: View {
         if explicitExtension == "mkv" || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil {
             return true
         }
-        // Extensionless PikPak download URLs do not reveal their container. VLC
-        // remains the safe fallback only when neither the URL nor title says MP4.
         if explicitExtension.isEmpty,
            LinkResolver.isPikPakDirectDownload(url.absoluteString) {
             return true
