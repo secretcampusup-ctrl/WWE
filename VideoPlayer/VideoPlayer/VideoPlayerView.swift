@@ -1768,7 +1768,7 @@ private final class MKVPlayerSurface: UIView, UIScrollViewDelegate {
         // safety buffer for that route, while preserving the more conservative
         // buffer used by ordinary remote MKV/WebDAV streams.
         let isPikPakDirect = LinkResolver.isPikPakDirectDownload(url.absoluteString)
-        media.addOption(":network-caching=\(isPikPakDirect ? 1200 : 2500)")
+        media.addOption(":network-caching=\(isPikPakDirect ? 800 : 1200)")
         media.addOption(":http-reconnect")
         media.addOption(":file-caching=\(isPikPakDirect ? 500 : 1000)")
         media.addOption(":no-drop-late-frames")

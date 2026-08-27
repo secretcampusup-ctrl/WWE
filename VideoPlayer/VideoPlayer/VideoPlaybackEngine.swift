@@ -672,19 +672,31 @@ final class VideoPlaybackEngine: ObservableObject {
         currentSeconds = safeSeconds
         if durationSeconds > 0 { progress = min(1, max(0, safeSeconds / durationSeconds)) }
         currentTimeFormatted = Self.format(seconds: safeSeconds)
-        // Small tolerance lets the decoder snap to keyframes → fewer stalls on 4K.
+        // Cloud files are keyframe-aligned. A 50ms window forced AVPlayer to
+        // download around an exact timestamp, then wait for the full forward
+        // buffer before the picture started moving again.
         let target = CMTime(seconds: safeSeconds, preferredTimescale: 600)
-        let tolerance = CMTime(seconds: 0.05, preferredTimescale: 600)
+        let tolerance = CMTime(seconds: 1.25, preferredTimescale: 600)
         player.currentItem?.cancelPendingSeeks()
+        player.currentItem?.preferredForwardBufferDuration = 2
+        player.automaticallyWaitsToMinimizeStalling = false
         isBuffering = true
         player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             Task { @MainActor [weak self] in
                 guard let self, generation == self.seekGeneration else { return }
                 if finished, self.isPlaying {
-                    self.player.play()
+                    self.player.playImmediately(atRate: 1)
                 }
                 if !finished { self.pendingSeekSeconds = nil }
                 self.isBuffering = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                    guard let self, generation == self.seekGeneration else { return }
+                    let isHighRes = self.resolutionWidth >= 6000 || self.resolutionHeight >= 6000
+                    self.player.currentItem?.preferredForwardBufferDuration = isHighRes
+                        ? self.highResForwardBufferSeconds
+                        : self.forwardBufferSeconds
+                    self.player.automaticallyWaitsToMinimizeStalling = true
+                }
             }
         }
     }
