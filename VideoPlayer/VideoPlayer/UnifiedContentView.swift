@@ -1137,22 +1137,16 @@ struct UnifiedPosterArtwork: View {
             }
         }
         .task(id: "\(section.rawValue)|\(manualCacheKey)") {
-            if let manual = await cachedPoster() {
-                cachedImage = manual
+            if let stored = await cachedPoster() {
+                cachedImage = stored
                 hasCheckedCache = true
                 return
             }
-            // List/grid posters never need the clean "no-language" poster —
-            // that variant only matters on the Hero (enrichFeatured already
-            // fetches it there) and the Details screen (which fetches full
-            // title details anyway to show cast/overview/etc). Grid posters
-            // just use whatever's already in `entry.details`/`entry.posterURL`
-            // from the list response, with zero extra network calls.
-            // Grid cards are ~112pt wide. Prefer the list-sized TMDB poster
-            // (w342) over the details/hero file so Home rows do not download
-            // a 780–original still for every visible cell.
             resolvedPosterURL = entry.posterURL ?? entry.details?.detailsPosterURL
             hasCheckedCache = true
+            guard resolvedPosterURL == nil else { return }
+            guard let frame = await loadVideoFrameFallback() else { return }
+            cachedImage = frame
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let updatedKey = notification.object as? String,
@@ -1167,7 +1161,30 @@ struct UnifiedPosterArtwork: View {
         if let manual = await VideoThumbnailLoader.cachedImageAsync(forStableKey: manualCacheKey) {
             return manual
         }
-        return nil
+        return await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
+    }
+
+    private func loadVideoFrameFallback() async -> UIImage? {
+        let url = entry.streamURL
+        let scheme = url.scheme?.lowercased()
+        guard scheme == "http" || scheme == "https" else { return nil }
+        var headers: [String: String] = [:]
+        if case let .webDAV(server, _) = entry.source {
+            headers = WebDAVClient(server: server).streamHeaders()
+        }
+        await ThumbnailLoadGate.shared.acquire()
+        defer { Task { await ThumbnailLoadGate.shared.release() } }
+        let frame = await VideoThumbnailLoader.loadPoster(
+            for: url,
+            headers: headers,
+            stableKey: cacheKey,
+            targetPointSize: CGSize(width: 160, height: 240),
+            allowRemoteFrame: true
+        )
+        if let frame {
+            VideoThumbnailLoader.cacheImageInBackground(frame, forStableKey: cacheKey)
+        }
+        return frame
     }
 }
 

@@ -659,7 +659,8 @@ enum VideoThumbnailLoader {
         for remote: URL,
         headers: [String: String] = [:],
         stableKey: String? = nil,
-        targetPointSize: CGSize? = nil
+        targetPointSize: CGSize? = nil,
+        allowRemoteFrame: Bool = false
     ) async -> UIImage? {
         let cacheKeyStr = stableKey ?? remote.absoluteString
         let pointSize = targetPointSize ?? ThumbnailPipeline.targetPointSize(for: .medium)
@@ -678,10 +679,9 @@ enum VideoThumbnailLoader {
             return cached
         }
 
-        // Nothing cached yet — generating a poster from here on means reading (and, for a
-        // remote URL, downloading) video bytes automatically. Skip unless the caller is a
-        // manual, user-initiated action.
-        guard isAutomaticDownloadEnabled else { return nil }
+        // Automatic grid prefetch stays off. A visible card with no TMDB
+        // poster may request one later frame through `allowRemoteFrame`.
+        guard isAutomaticDownloadEnabled || allowRemoteFrame else { return nil }
 
         return await requestCoordinator.image(for: "\(cacheKeyStr)|\(Int(targetPixelSize.width))x\(Int(targetPixelSize.height))") { [remote, headers] in
             let image: UIImage?
@@ -767,9 +767,8 @@ enum VideoThumbnailLoader {
         generator.requestedTimeToleranceBefore = .positiveInfinity
         generator.requestedTimeToleranceAfter = .positiveInfinity
 
-        // Prefer 40s with broad keyframe tolerance (cheap). One fallback only —
-        // multiple sequential seeks stall the main scroll when many cells load.
-        for seconds in [40.0, 1.0] {
+        // Later keyframes only. The first second is usually black or a title card.
+        for seconds in [24.0, 40.0, 12.0] {
             guard !Task.isCancelled else { return nil }
             do {
                 let time = CMTime(seconds: seconds, preferredTimescale: 600)
@@ -812,14 +811,14 @@ enum VideoThumbnailLoader {
 
         // Dynamic frame selection based on video duration
         let targetSeconds: Double
-        if duration < 5 {
-            targetSeconds = duration * 0.3  // First 30% for very short videos
-        } else if duration < 15 {
-            targetSeconds = duration * 0.5  // Middle for short videos
-        } else if duration < 60 {
-            targetSeconds = min(10.0, duration * 0.5)  // Up to 10s for medium videos
+        if duration < 8 {
+            targetSeconds = max(2.0, duration * 0.45)
+        } else if duration < 30 {
+            targetSeconds = duration * 0.35
+        } else if duration < 90 {
+            targetSeconds = min(24.0, duration * 0.22)
         } else {
-            targetSeconds = 10.0  // Consistent 10s for long videos
+            targetSeconds = 28.0
         }
 
         let generator = AVAssetImageGenerator(asset: asset)
@@ -831,8 +830,8 @@ enum VideoThumbnailLoader {
         // Try multiple times
         let times: [CMTime] = [
             CMTime(seconds: targetSeconds, preferredTimescale: 600),
-            CMTime(seconds: 0.0, preferredTimescale: 600),
-            CMTime(seconds: min(1.0, duration), preferredTimescale: 600)
+            CMTime(seconds: min(max(duration * 0.4, 8), max(duration - 2, 2)), preferredTimescale: 600),
+            CMTime(seconds: min(12.0, max(duration * 0.25, 3)), preferredTimescale: 600)
         ]
 
         for time in times {
@@ -1593,7 +1592,8 @@ struct PosterThumbnailView: View {
             for: videoURL,
             headers: remotePosterHeaders,
             stableKey: resolvedStableCacheKey,
-            targetPointSize: targetPointSize
+            targetPointSize: targetPointSize,
+            allowRemoteFrame: true
         )
 
         if let frame {
