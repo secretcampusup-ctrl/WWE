@@ -1955,7 +1955,7 @@ extension AppViewModel {
                 // direct torrent playback.
                 preparePlaybackHistory(for: historyItem)
             }
-            let source: LinkSource = resolved.provider.contains("WebDAV") ? .webdav : .pikpak
+            let source: SavedVideoLink.LinkSource = resolved.provider.contains("WebDAV") ? .webdav : .pikpak
             startPlayback(
                 url: resolved.url,
                 title: resolved.title,
