@@ -248,7 +248,16 @@ final class VideoPlaybackEngine: ObservableObject {
         // Without these headers AVPlayer can fail the first request and fall back
         // to the lower-quality compatibility player.
         if let httpHeaders, !httpHeaders.isEmpty {
-            options["AVURLAssetHTTPHeaderFieldsKey"] = httpHeaders
+            // AVPlayer is fastest with its own AppleCoreMedia user agent.
+            // Keep auth for WebDAV hosts; drop browser headers that made the
+            // same PikPak MP4 slower than VLC.
+            var playerHeaders = httpHeaders
+            playerHeaders.removeValue(forKey: "User-Agent")
+            playerHeaders.removeValue(forKey: "Referer")
+            playerHeaders.removeValue(forKey: "Referrer")
+            if !playerHeaders.isEmpty {
+                options["AVURLAssetHTTPHeaderFieldsKey"] = playerHeaders
+            }
         }
         // Work around a known AVKit limitation: URLs with no recognizable file
         // extension (e.g. PikPak's `/download/?fid=...` direct links) are often
