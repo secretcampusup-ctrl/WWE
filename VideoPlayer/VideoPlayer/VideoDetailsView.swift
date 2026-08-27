@@ -344,11 +344,15 @@ struct VideoDetailsView: View {
                 setArtworkFrame(cached)
             }
 
+            // Others / unmatched files have no TMDB artwork. Pull a real frame
+            // from the video itself (never the black first second) so the details
+            // header is never empty just because automatic grid download is off.
             if let highResolution = await VideoThumbnailLoader.loadPoster(
                 for: requestedURL,
                 headers: item.httpHeaders,
                 stableKey: detailKey,
-                targetPointSize: ThumbnailPipeline.targetPointSize(for: .large)
+                targetPointSize: ThumbnailPipeline.targetPointSize(for: .large),
+                allowRemoteFrame: true
             ) {
                 guard !Task.isCancelled, requestedURL == item.url else { return }
                 setArtworkFrame(highResolution)

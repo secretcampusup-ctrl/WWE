@@ -747,7 +747,7 @@ enum VideoThumbnailLoader {
     }
 
     /// Fast path for list cells: avoid loading duration and request a keyframe
-    /// near the beginning with broad tolerance, eliminating an extra network round-trip.
+    /// with broad tolerance, eliminating an extra network round-trip.
     private static func generateFastListThumbnail(
         url: URL,
         headers: [String: String] = [:],
@@ -759,6 +759,11 @@ enum VideoThumbnailLoader {
         if !headers.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = headers
         }
+        // Extensionless cloud URLs (PikPak `/download/?fid=…`) otherwise get
+        // rejected by AVURLAsset before any frame can be decoded.
+        if let mime = LinkResolver.mimeTypeHint(for: url) {
+            options["AVURLAssetOutOfBandMIMETypeKey"] = mime
+        }
 
         let asset = AVURLAsset(url: url, options: options)
         let generator = AVAssetImageGenerator(asset: asset)
@@ -767,8 +772,10 @@ enum VideoThumbnailLoader {
         generator.requestedTimeToleranceBefore = .positiveInfinity
         generator.requestedTimeToleranceAfter = .positiveInfinity
 
-        // Later keyframes only. The first second is usually black or a title card.
-        for seconds in [24.0, 40.0, 12.0] {
+        // Prefer later keyframes (not the black/title first second). Fall back
+        // to nearer times for progressive cloud files that cannot seek far
+        // without a long Range download — still never use 0.
+        for seconds in [24.0, 40.0, 12.0, 8.0, 5.0, 3.0] {
             guard !Task.isCancelled else { return nil }
             do {
                 let time = CMTime(seconds: seconds, preferredTimescale: 600)
@@ -791,6 +798,9 @@ enum VideoThumbnailLoader {
         if !headers.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = headers
         }
+        if let mime = LinkResolver.mimeTypeHint(for: url) {
+            options["AVURLAssetOutOfBandMIMETypeKey"] = mime
+        }
 
         let asset = AVURLAsset(url: url, options: options)
 
@@ -809,14 +819,15 @@ enum VideoThumbnailLoader {
             }
         }
 
-        // Dynamic frame selection based on video duration
+        // Dynamic frame selection based on video duration — never the first second
+        // (black screen / title card). Always pick a later representative frame.
         let targetSeconds: Double
         if duration < 8 {
             targetSeconds = max(2.0, duration * 0.45)
         } else if duration < 30 {
-            targetSeconds = duration * 0.35
+            targetSeconds = max(3.0, duration * 0.35)
         } else if duration < 90 {
-            targetSeconds = min(24.0, duration * 0.22)
+            targetSeconds = min(24.0, max(5.0, duration * 0.22))
         } else {
             targetSeconds = 28.0
         }
@@ -824,23 +835,25 @@ enum VideoThumbnailLoader {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = maximumPixelSize
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 1.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 1.5, preferredTimescale: 600)
 
-        // Try multiple times
-        let times: [CMTime] = [
-            CMTime(seconds: targetSeconds, preferredTimescale: 600),
-            CMTime(seconds: min(max(duration * 0.4, 8), max(duration - 2, 2)), preferredTimescale: 600),
-            CMTime(seconds: min(12.0, max(duration * 0.25, 3)), preferredTimescale: 600)
+        // Primary target, then mid-clip, then nearer fallbacks for progressive
+        // cloud files that cannot seek far cheaply. Floor is 2s — never 0.
+        let candidateSeconds: [Double] = [
+            targetSeconds,
+            min(max(duration * 0.4, 8), max(duration - 2, 2)),
+            min(12.0, max(duration * 0.25, 3)),
+            min(8.0, max(duration * 0.2, 3)),
+            min(5.0, max(duration * 0.15, 2)),
+            min(3.0, max(duration * 0.1, 2))
         ]
 
-        for time in times {
+        for seconds in candidateSeconds {
             guard !Task.isCancelled else { return nil }
-
+            let time = CMTime(seconds: max(2.0, seconds), preferredTimescale: 600)
             do {
                 let cg = try generator.copyCGImage(at: time, actualTime: nil)
-                // We use requestedTimeToleranceBefore/After for timing tolerance
-                // No need to check actualTime - the generator will return the closest frame
                 return UIImage(cgImage: cg)
             } catch {
                 continue
@@ -971,6 +984,9 @@ enum VideoThumbnailLoader {
         if !headers.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = headers
         }
+        if let mime = LinkResolver.mimeTypeHint(for: url) {
+            options["AVURLAssetOutOfBandMIMETypeKey"] = mime
+        }
 
         let asset = AVURLAsset(url: url, options: options)
 
@@ -989,9 +1005,10 @@ enum VideoThumbnailLoader {
             }
         }
 
-        // Prefer 40 seconds; clamp when the video is shorter.
-        let targetSeconds = duration > 40 ? 40.0 : max(0.0, duration * 0.5)
-        let safeTime = max(0.0, min(targetSeconds, max(duration - 0.5, 0)))
+        // Prefer 40 seconds; clamp when the video is shorter. Never use 0 —
+        // the opening frame is usually black or a title card.
+        let targetSeconds = duration > 40 ? 40.0 : max(2.0, duration * 0.5)
+        let safeTime = max(2.0, min(targetSeconds, max(duration - 0.5, 2)))
 
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -1005,8 +1022,9 @@ enum VideoThumbnailLoader {
             let cg = try generator.copyCGImage(at: time, actualTime: nil)
             return UIImage(cgImage: cg)
         } catch {
-            // Try fallback time
-            let fallbackTime = CMTime(seconds: min(5.0, duration / 2), preferredTimescale: 600)
+            // Nearer fallback — still not the first second.
+            let fallbackSeconds = max(2.0, min(5.0, duration * 0.35))
+            let fallbackTime = CMTime(seconds: fallbackSeconds, preferredTimescale: 600)
             do {
                 let cg = try generator.copyCGImage(at: fallbackTime, actualTime: nil)
                 return UIImage(cgImage: cg)

@@ -2,6 +2,11 @@ import Foundation
 import Combine
 import UIKit
 
+extension Notification.Name {
+    /// Posted after a PikPak offline magnet is ready and WebDAV index should rescan.
+    static let webDAVLibraryNeedsRefresh = Notification.Name("webDAVLibraryNeedsRefresh")
+}
+
 /// قائمة تشغيل يُنشئها المستخدم — تحتفظ فقط بمعرّفات الفيديوهات
 /// الموجودة أصلاً بالمكتبة (savedLinks) حتى لا يتكرر تخزين البيانات
 struct VideoPlaylist: Identifiable, Codable, Equatable {
@@ -1782,7 +1787,7 @@ extension AppViewModel {
             title: source.name,
             provider: OnlinePlaybackProviderPreference.selected.title,
             phase: .preparing,
-            message: "جاري جلب الرابط"
+            message: "جاري إضافة الملف إلى المكتبة"
         )
 
         onlinePlaybackPreparationTask = Task { [weak self] in
@@ -1821,7 +1826,7 @@ extension AppViewModel {
                                 title: source.name,
                                 provider: progress.provider,
                                 phase: .preparing,
-                                message: "جاري جلب الرابط"
+                                message: progress.message ?? "جاري إضافة الملف إلى المكتبة"
                             )
                         case .downloading:
                             DiagnosticLogger.log("[OnlinePlayback] downloading provider=\(progress.provider)")
@@ -1830,22 +1835,39 @@ extension AppViewModel {
                                 title: source.name,
                                 provider: progress.provider,
                                 phase: .downloading,
-                                message: "جاري تجهيز الملف على الخدمة السحابية"
+                                message: progress.message ?? "جاري تجهيز الملف على الخدمة السحابية"
                             )
                         }
                     }
                 }
                 try Task.checkCancellation()
                 guard self.onlinePlaybackTransfer?.id == transferID else { return }
-                self.preparedOnlinePlayback = resolved
+                // For PikPak: prefer WebDAV path so the file enters the library
+                // and playback uses the same route as browsing My Pack.
+                var finalResolved = resolved
+                if resolved.provider == "PikPak", resolved.pikpakFileID != nil {
+                    self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
+                        id: transferID,
+                        title: resolved.title,
+                        provider: resolved.provider,
+                        phase: .downloading,
+                        message: "جاري تحديث المكتبة للتشغيل"
+                    )
+                    if let webDAV = await self.resolvePikPakViaWebDAV(title: resolved.title) {
+                        finalResolved = webDAV
+                    }
+                }
+                try Task.checkCancellation()
+                guard self.onlinePlaybackTransfer?.id == transferID else { return }
+                self.preparedOnlinePlayback = finalResolved
                 self.preparedOnlinePlaybackHistoryItem = historyItem
-                DiagnosticLogger.log("[OnlinePlayback] ready provider=\(resolved.provider) requiredDownload=\(resolved.requiredDownload)")
+                DiagnosticLogger.log("[OnlinePlayback] ready provider=\(finalResolved.provider) requiredDownload=\(finalResolved.requiredDownload)")
                 self.onlinePlaybackTransfer = OnlinePlaybackTransfer(
                     id: transferID,
-                    title: resolved.title,
-                    provider: resolved.provider,
+                    title: finalResolved.title,
+                    provider: finalResolved.provider,
                     phase: .ready,
-                    message: resolved.requiredDownload ? "اكتمل التجهيز · جاهز للتشغيل" : "جاهز للتشغيل"
+                    message: "جاهز للتشغيل من المكتبة"
                 )
             } catch is CancellationError {
                 return
@@ -1863,6 +1885,63 @@ extension AppViewModel {
         }
     }
 
+    /// After a magnet lands in PikPak Drive, locate the same file through the
+    /// configured `dav.mypikpak.com` WebDAV server so Home/Discovery playback
+    /// uses the library route instead of a one-off API stream.
+    private func resolvePikPakViaWebDAV(title: String) async -> ResolvedOnlinePlayback? {
+        guard let server = servers.first(where: {
+            let host = ($0.baseURL?.host ?? $0.host).lowercased()
+            return host == "dav.mypikpak.com" || host.hasSuffix(".mypikpak.com")
+        }) else { return nil }
+
+        // Force a fresh listing so the newly offline-downloaded file is visible.
+        let videos = await contentLibraryFiles(server: server, forceRefresh: true)
+        let needle = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let stem = ((title as NSString).deletingPathExtension)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        let match = videos.first { file in
+            let name = file.name.lowercased()
+            let display = file.displayName.lowercased()
+            return name == needle
+                || display == needle
+                || name.contains(stem)
+                || display.contains(stem)
+                || stem.contains((file.name as NSString).deletingPathExtension.lowercased())
+        }
+        guard let file = match else {
+            DiagnosticLogger.log("[OnlinePlayback] WebDAV refresh found no match for \(title)")
+            return nil
+        }
+
+        let client = WebDAVClient(server: server)
+        guard let davURL = client.streamURL(for: file) else { return nil }
+
+        var playbackURL = davURL
+        var headers = client.streamHeaders()
+        // Same redirect path as normal WebDAV play for PikPak.
+        if let directURL = await client.resolvedStreamURL(for: file),
+           isResolvedPikPakCDNURL(directURL, comparedWith: davURL) {
+            playbackURL = directURL
+            headers = PikPakClient.shared.directPlaybackHeaders()
+        }
+
+        DiagnosticLogger.log("[OnlinePlayback] routed via WebDAV file=\(file.name)")
+        // Nudge the unified library so TMDB can classify the new file as
+        // movie/show on the next catalog pass.
+        NotificationCenter.default.post(name: .webDAVLibraryNeedsRefresh, object: server.id)
+
+        return ResolvedOnlinePlayback(
+            url: playbackURL,
+            title: file.name,
+            provider: "PikPak WebDAV",
+            headers: headers,
+            requiredDownload: true,
+            pikpakFileID: nil
+        )
+    }
+
     @discardableResult
     func playPreparedOnlineSource() -> Bool {
         guard let resolved = preparedOnlinePlayback else { return false }
@@ -1876,6 +1955,7 @@ extension AppViewModel {
                 // direct torrent playback.
                 preparePlaybackHistory(for: historyItem)
             }
+            let source: LinkSource = resolved.provider.contains("WebDAV") ? .webdav : .pikpak
             startPlayback(
                 url: resolved.url,
                 title: resolved.title,
@@ -1887,7 +1967,12 @@ extension AppViewModel {
                         title: resolved.title,
                         pikpakFileId: $0
                     )?.id
-                },
+                } ?? saveDirectLink(
+                    resolved.url.absoluteString,
+                    resolvedStream: resolved.url,
+                    source: source,
+                    title: resolved.title
+                )?.id,
                 headers: resolved.headers
             )
         }

@@ -924,6 +924,12 @@ struct UnifiedContentView: View {
                 }
             }
             .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
+            .onReceive(NotificationCenter.default.publisher(for: .webDAVLibraryNeedsRefresh)) { _ in
+                // A Discover/Home play just finished offline-adding a magnet into
+                // PikPak. Rescan WebDAV so the new file is classified by TMDB
+                // (movie vs show) and appears in the library.
+                Task { await model.load(vm: vm, force: true) }
+            }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
             .sheet(item: $manualSearch) { request in

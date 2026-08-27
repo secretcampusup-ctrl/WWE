@@ -3156,7 +3156,13 @@ private struct DiscoverResultArtwork: View {
 private let pirateBayImageRequestModifier = AnyModifier { request in
     var request = request
     request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1", forHTTPHeaderField: "User-Agent")
-    request.setValue("https://trafficimage.club/", forHTTPHeaderField: "Referer")
+    // Host-aware Referer so Milkie CDN screenshots load the same way as the site.
+    let host = request.url?.host?.lowercased() ?? ""
+    if host.contains("milkie.cc") {
+        request.setValue("https://milkie.cc/", forHTTPHeaderField: "Referer")
+    } else {
+        request.setValue("https://trafficimage.club/", forHTTPHeaderField: "Referer")
+    }
     return request
 }
 
@@ -3166,6 +3172,17 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
         guard imageURLs.isEmpty else { return }
         isLoading = true
         defer { isLoading = false }
+
+        // Milkie hosts release screenshots on their CDN:
+        // https://cdn.milkie.cc/t/{torrentId}/o_0.jpg … o_N.jpg
+        // Prefer these first so opening a Milkie file shows the same images
+        // as the website, even when TMDB has no match.
+        let siteImages = await Self.fetchMilkieCDNImages(torrentID: item.id)
+        if !siteImages.isEmpty {
+            imageURLs = siteImages
+            return
+        }
+
         if let tmdbID = item.tmdbID,
            let details = await TMDBService.shared.details(mediaType: mediaType, tmdbID: tmdbID, fallbackTitle: item.name) {
             imageURLs = [details.detailsBackdropURL, details.posterURL, details.detailsPosterURL].compactMap { $0 }
@@ -3175,6 +3192,50 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
         if let details = await TMDBService.shared.details(for: cleaned) {
             imageURLs = [details.detailsBackdropURL, details.posterURL, details.detailsPosterURL].compactMap { $0 }
         }
+    }
+
+    /// Probes sequential screenshot slots on Milkie's CDN until a gap is found.
+    private static func fetchMilkieCDNImages(torrentID: String) async -> [URL] {
+        let trimmed = torrentID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var found: [URL] = []
+        // Site typically shows up to ~6–8 screenshots; stop after a few consecutive misses.
+        var consecutiveMisses = 0
+        for index in 0..<12 {
+            guard consecutiveMisses < 2 else { break }
+            guard let url = URL(string: "https://cdn.milkie.cc/t/\(trimmed)/o_\(index).jpg") else { continue }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 8
+            request.setValue("https://milkie.cc/", forHTTPHeaderField: "Referer")
+            request.setValue(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1",
+                forHTTPHeaderField: "User-Agent"
+            )
+
+            do {
+                let (_, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode) else {
+                    consecutiveMisses += 1
+                    continue
+                }
+                let mime = (http.mimeType ?? "").lowercased()
+                let length = http.expectedContentLength
+                // Accept image responses; some CDNs omit mime on HEAD — still allow 200 with body size.
+                if mime.hasPrefix("image/") || length > 1_000 || (mime.isEmpty && length < 0) {
+                    found.append(url)
+                    consecutiveMisses = 0
+                } else {
+                    consecutiveMisses += 1
+                }
+            } catch {
+                consecutiveMisses += 1
+            }
+        }
+        return found
     }
 
     func load(id: String) async {

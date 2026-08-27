@@ -672,24 +672,55 @@ final class VideoPlaybackEngine: ObservableObject {
         currentSeconds = safeSeconds
         if durationSeconds > 0 { progress = min(1, max(0, safeSeconds / durationSeconds)) }
         currentTimeFormatted = Self.format(seconds: safeSeconds)
-        // Cloud files are keyframe-aligned. A 50ms window forced AVPlayer to
-        // download around an exact timestamp, then wait for the full forward
-        // buffer before the picture started moving again.
+        // Cloud progressive MP4: keep a small keyframe window so AVPlayer can
+        // land on the nearest I-frame quickly and show the new picture without
+        // waiting on an exact timestamp Range request.
         let target = CMTime(seconds: safeSeconds, preferredTimescale: 600)
-        let tolerance = CMTime(seconds: 1.25, preferredTimescale: 600)
+        let tolerance = CMTime(seconds: 2.0, preferredTimescale: 600)
         player.currentItem?.cancelPendingSeeks()
-        player.currentItem?.preferredForwardBufferDuration = 2
+        // Tiny forward buffer during the seek itself so the first frame after
+        // the jump can start moving as soon as it is decoded — not after a
+        // full 12s network fill.
+        player.currentItem?.preferredForwardBufferDuration = 1.5
+        // Allow the player to start as soon as the seek frame is ready; the
+        // buffer observers will re-enter the loading state only if the stream
+        // truly cannot keep up.
         player.automaticallyWaitsToMinimizeStalling = false
         isBuffering = true
         player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
             Task { @MainActor [weak self] in
                 guard let self, generation == self.seekGeneration else { return }
-                if finished, self.isPlaying {
-                    self.player.playImmediately(atRate: 1)
+                if !finished {
+                    self.pendingSeekSeconds = nil
+                    self.isBuffering = false
+                    return
                 }
-                if !finished { self.pendingSeekSeconds = nil }
-                self.isBuffering = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                // Seek landed — picture is at the new position. Resume playback
+                // immediately when the user intended to play so motion continues
+                // as soon as the keyframe is on screen instead of freezing for
+                // 10–15s while a large forward buffer is refilled.
+                if self.isPlaying {
+                    if let item = self.player.currentItem, item.isPlaybackLikelyToKeepUp {
+                        self.player.playImmediately(atRate: max(self.player.rate, 1))
+                        self.isBuffering = false
+                    } else {
+                        // Start decoding/output right away; network will catch up.
+                        // Keep isBuffering true only while the buffer is still empty
+                        // so the UI reflects real stalls, not the seek itself.
+                        self.player.play()
+                        if self.player.currentItem?.isPlaybackBufferEmpty == true {
+                            self.isBuffering = true
+                        } else {
+                            self.isBuffering = false
+                        }
+                    }
+                } else {
+                    self.isBuffering = false
+                }
+                // Hold the small post-seek buffer for a few seconds so the
+                // player does not pause again waiting for a large forward fill.
+                // Then restore the sustained cloud buffer for smooth playback.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
                     guard let self, generation == self.seekGeneration else { return }
                     let isHighRes = self.resolutionWidth >= 6000 || self.resolutionHeight >= 6000
                     self.player.currentItem?.preferredForwardBufferDuration = isHighRes

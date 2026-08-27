@@ -657,6 +657,14 @@ struct OnlinePlaybackProgress: Sendable {
 
     let provider: String
     let phase: Phase
+    /// Optional localized step text shown in the transfer banner.
+    let message: String?
+
+    init(provider: String, phase: Phase, message: String? = nil) {
+        self.provider = provider
+        self.phase = phase
+        self.message = message
+    }
 }
 
 typealias OnlinePlaybackProgressHandler = @Sendable (OnlinePlaybackProgress) -> Void
@@ -741,7 +749,7 @@ actor OnlinePlaybackResolver {
             do {
                 onProgress(.init(provider: provider.rawValue, phase: .preparing))
                 switch provider {
-                case .pikpak: return try await resolvePikPak(source)
+                case .pikpak: return try await resolvePikPak(source, onProgress: onProgress)
                 case .torBox: return try await resolveTorBox(source)
                 case .realDebrid: return try await resolveRealDebrid(source, onProgress: onProgress)
                 case .offcloud: return try await resolveOffcloud(source)
@@ -791,10 +799,24 @@ actor OnlinePlaybackResolver {
         }
     }
 
-    private func resolvePikPak(_ source: OnlineTorrentSource) async throws -> ResolvedOnlinePlayback {
+    private func resolvePikPak(
+        _ source: OnlineTorrentSource,
+        onProgress: @escaping OnlinePlaybackProgressHandler = { _ in }
+    ) async throws -> ResolvedOnlinePlayback {
         let client = PikPakClient.shared
+        onProgress(.init(
+            provider: Provider.pikpak.rawValue,
+            phase: .preparing,
+            message: "جاري إضافة الملف إلى المكتبة"
+        ))
         let before = (try? await client.listFiles()).map { Set($0.map(\.id)) } ?? []
         let taskID = try await client.addOfflineTask(urlOrMagnet: source.magnet)
+
+        onProgress(.init(
+            provider: Provider.pikpak.rawValue,
+            phase: .downloading,
+            message: "جاري تجهيز الملف على PikPak"
+        ))
 
         for _ in 0..<60 {
             if let task = try? await client.offlineTask(id: taskID) {
@@ -813,9 +835,16 @@ actor OnlinePlaybackResolver {
                                     "PikPak returned a different episode than the one selected."
                                 )
                             }
+                            onProgress(.init(
+                                provider: Provider.pikpak.rawValue,
+                                phase: .downloading,
+                                message: "جاري تحديث المكتبة للتشغيل"
+                            ))
                             return ResolvedOnlinePlayback(
                                 url: url, title: resolved.item.name, provider: Provider.pikpak.rawValue,
-                                headers: client.directPlaybackHeaders(), pikpakFileID: resolved.item.id
+                                headers: client.directPlaybackHeaders(),
+                                requiredDownload: true,
+                                pikpakFileID: resolved.item.id
                             )
                         }
                         if resolved.item.isFolder {
@@ -827,9 +856,16 @@ actor OnlinePlaybackResolver {
                             if let item = folderVideo {
                                 let streamURL = try? await client.streamURL(forFileId: item.id)
                                 if let url = streamURL {
+                                    onProgress(.init(
+                                        provider: Provider.pikpak.rawValue,
+                                        phase: .downloading,
+                                        message: "جاري تحديث المكتبة للتشغيل"
+                                    ))
                                     return ResolvedOnlinePlayback(
                                         url: url, title: item.name, provider: Provider.pikpak.rawValue,
-                                        headers: client.directPlaybackHeaders(), pikpakFileID: item.id
+                                        headers: client.directPlaybackHeaders(),
+                                        requiredDownload: true,
+                                        pikpakFileID: item.id
                                     )
                                 }
                             } else if source.requestsSpecificEpisode {
@@ -849,9 +885,16 @@ actor OnlinePlaybackResolver {
                 if let item = rootVideo {
                     let streamURL = try? await client.streamURL(forFileId: item.id)
                     if let url = streamURL {
+                        onProgress(.init(
+                            provider: Provider.pikpak.rawValue,
+                            phase: .downloading,
+                            message: "جاري تحديث المكتبة للتشغيل"
+                        ))
                         return ResolvedOnlinePlayback(
                             url: url, title: item.name, provider: Provider.pikpak.rawValue,
-                            headers: client.directPlaybackHeaders(), pikpakFileID: item.id
+                            headers: client.directPlaybackHeaders(),
+                            requiredDownload: true,
+                            pikpakFileID: item.id
                         )
                     }
                 }
