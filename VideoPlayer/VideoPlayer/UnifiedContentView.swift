@@ -1435,7 +1435,7 @@ struct UnifiedMediaDetailsHost: View {
             onDismiss: {
                 guard presentOnlinePlayerAfterSourcesDismiss else { return }
                 presentOnlinePlayerAfterSourcesDismiss = false
-                if vm.nowPlayingURL != nil || vm.preparedOnlinePlayback != nil {
+                if vm.nowPlayingURL != nil || vm.onlinePlaybackTransfer != nil {
                     _ = vm.ensurePreparedOnlinePlaybackIsActive()
                 }
                 showPlayer = true
