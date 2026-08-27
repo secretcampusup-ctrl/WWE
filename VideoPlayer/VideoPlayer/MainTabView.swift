@@ -635,6 +635,7 @@ struct HomeLibraryView: View {
                             posterSection("Recent TV Shows", items: onlineCatalog.airingTV)
                             posterSection("Recent Korean Drama", items: onlineCatalog.recentKoreanDramas)
                             posterSection("Top Rated", items: onlineCatalog.topRated)
+                            categorySection("Genres", categories: onlineCatalog.genres)
                         }
                         .padding(.top, 0)
                         .frame(maxWidth: .infinity, alignment: .leading)
