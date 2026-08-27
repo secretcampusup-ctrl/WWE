@@ -62,7 +62,12 @@ struct TMDBTitleDetails: Identifiable, Codable {
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var detailsPosterURL: URL? {
-        guard let path = noLanguagePosterPath else { return nil }
+        // `noLanguagePosterPath` only exists after a full title-details fetch
+        // (Details screen). Falling back to `detailsPosterPath` lets list/grid
+        // posters (Home sections) render instantly from data already returned
+        // by the discover/list feed, instead of blocking on a heavy per-title
+        // details request just to resolve a poster URL.
+        guard let path = noLanguagePosterPath ?? detailsPosterPath else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var heroPosterURL: URL? {
@@ -613,8 +618,10 @@ struct TMDBOnlineCatalogSnapshot: Codable {
     let trending: [TMDBCatalogItem]
     let newMovies: [TMDBCatalogItem]
     let popularMovies: [TMDBCatalogItem]
+    let popularKoreanMovies: [TMDBCatalogItem]
     let airingTV: [TMDBCatalogItem]
     let newEpisodes: [TMDBCatalogItem]
+    let recentKoreanDramas: [TMDBCatalogItem]
     let topRated: [TMDBCatalogItem]
     let movieGenres: [Int: String]
     let tvGenres: [Int: String]
@@ -624,16 +631,18 @@ struct TMDBOnlineCatalogSnapshot: Codable {
         trending: [],
         newMovies: [],
         popularMovies: [],
+        popularKoreanMovies: [],
         airingTV: [],
         newEpisodes: [],
+        recentKoreanDramas: [],
         topRated: [],
         movieGenres: [:],
         tvGenres: [:]
     )
 
     var isEmpty: Bool {
-        trending.isEmpty && newMovies.isEmpty && popularMovies.isEmpty
-            && airingTV.isEmpty && newEpisodes.isEmpty && topRated.isEmpty
+        trending.isEmpty && newMovies.isEmpty && popularMovies.isEmpty && popularKoreanMovies.isEmpty
+            && airingTV.isEmpty && newEpisodes.isEmpty && recentKoreanDramas.isEmpty && topRated.isEmpty
     }
 
     var isStale: Bool { Date().timeIntervalSince(refreshedAt) > 6 * 60 * 60 }
@@ -717,8 +726,28 @@ actor TMDBOnlineCatalogService {
             ]
         )
         async let popularMoviesResponse = list("/3/movie/popular", fallbackMediaType: "movie", extra: ["region": "US"])
+        // Korean movies/dramas use `discover`, since the curated `/popular` and
+        // `/on_the_air` endpoints don't accept an origin-country filter.
+        async let popularKoreanMoviesResponse = list(
+            "/3/discover/movie",
+            fallbackMediaType: "movie",
+            extra: [
+                "with_origin_country": "KR",
+                "sort_by": "popularity.desc",
+                "include_adult": "false"
+            ]
+        )
         async let airingTVResponse = list("/3/tv/on_the_air", fallbackMediaType: "tv")
         async let newEpisodesResponse = list("/3/tv/airing_today", fallbackMediaType: "tv")
+        async let recentKoreanDramaResponse = list(
+            "/3/discover/tv",
+            fallbackMediaType: "tv",
+            extra: [
+                "with_origin_country": "KR",
+                "sort_by": "first_air_date.desc",
+                "first_air_date.lte": dateFormatter.string(from: today)
+            ]
+        )
         async let topMoviesResponse = list("/3/movie/top_rated", fallbackMediaType: "movie", extra: ["region": "US"])
         async let topTVResponse = list("/3/tv/top_rated", fallbackMediaType: "tv")
         async let movieGenresResponse = genres("movie")
@@ -736,8 +765,10 @@ actor TMDBOnlineCatalogService {
             trending: trending,
             newMovies: try await newMoviesResponse,
             popularMovies: try await popularMoviesResponse,
+            popularKoreanMovies: try await popularKoreanMoviesResponse,
             airingTV: try await airingTVResponse,
             newEpisodes: try await newEpisodesResponse,
+            recentKoreanDramas: try await recentKoreanDramaResponse,
             topRated: topRated,
             movieGenres: try await movieGenresResponse,
             tvGenres: try await tvGenresResponse

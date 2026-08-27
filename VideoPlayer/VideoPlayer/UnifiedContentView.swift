@@ -1141,8 +1141,12 @@ struct UnifiedPosterArtwork: View {
                 hasCheckedCache = true
                 return
             }
-            resolvedPosterURL = await noLanguagePosterURL()
+            // Show the fast poster (already available from the list/discover
+            // response) immediately, so Home never blocks on a network call
+            // just to resolve a URL it already effectively has.
+            resolvedPosterURL = entry.details?.detailsPosterURL ?? entry.posterURL
             hasCheckedCache = true
+            await upgradeToNoLanguagePosterIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let updatedKey = notification.object as? String,
@@ -1154,24 +1158,20 @@ struct UnifiedPosterArtwork: View {
     }
 
     /// TMDB's list/discover endpoints only return the localized poster (often
-    /// with burned-in title text), so `entry.details` from the catalog builder
-    /// never carries a no-language poster. Resolve it once per title here —
-    /// via the entry's known TMDB id when available, so no title search is
-    /// needed — and fall back to the localized poster only if no
-    /// language-free rendition exists for that title.
-    private func noLanguagePosterURL() async -> URL? {
-        if let existing = entry.details?.detailsPosterURL {
-            return existing
-        }
-        if case let .catalog(mediaType, tmdbID) = entry.source {
-            let details = await TMDBService.shared.details(
-                mediaType: mediaType,
-                tmdbID: tmdbID,
-                fallbackTitle: entry.title
-            )
-            return details?.detailsPosterURL ?? entry.posterURL
-        }
-        return entry.posterURL
+    /// with burned-in title text). The fast path above already shows that
+    /// poster instantly; this silently fetches the full title details in the
+    /// background and swaps in the clean, no-language poster if one exists —
+    /// without ever blocking the initial render.
+    private func upgradeToNoLanguagePosterIfNeeded() async {
+        guard entry.details?.noLanguagePosterPath == nil,
+              case let .catalog(mediaType, tmdbID) = entry.source else { return }
+        let details = await TMDBService.shared.details(
+            mediaType: mediaType,
+            tmdbID: tmdbID,
+            fallbackTitle: entry.title
+        )
+        guard let upgraded = details?.detailsPosterURL, upgraded != resolvedPosterURL else { return }
+        resolvedPosterURL = upgraded
     }
 
     private func cachedPoster() async -> UIImage? {

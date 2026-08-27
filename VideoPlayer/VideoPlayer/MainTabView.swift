@@ -312,8 +312,10 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
     @Published private(set) var trending: [UnifiedMediaEntry] = []
     @Published private(set) var newMovies: [UnifiedMediaEntry] = []
     @Published private(set) var popularMovies: [UnifiedMediaEntry] = []
+    @Published private(set) var popularKoreanMovies: [UnifiedMediaEntry] = []
     @Published private(set) var airingTV: [UnifiedMediaEntry] = []
     @Published private(set) var newEpisodes: [UnifiedMediaEntry] = []
+    @Published private(set) var recentKoreanDramas: [UnifiedMediaEntry] = []
     @Published private(set) var topRated: [UnifiedMediaEntry] = []
     @Published private(set) var genres: [HomeCategoryCardModel] = []
     /// Search results are not part of the rotating online catalogue. Retain a
@@ -380,11 +382,14 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
         // after the Home screen opens.
         newMovies = entries(snapshot.newMovies, snapshot: snapshot)
         popularMovies = entries(snapshot.popularMovies, snapshot: snapshot)
+        popularKoreanMovies = entries(snapshot.popularKoreanMovies, snapshot: snapshot)
         airingTV = entries(snapshot.airingTV, snapshot: snapshot)
         newEpisodes = entries(snapshot.newEpisodes, snapshot: snapshot)
+        recentKoreanDramas = entries(snapshot.recentKoreanDramas, snapshot: snapshot)
         topRated = entries(snapshot.topRated, snapshot: snapshot)
 
-        let genrePool = trending + newMovies + popularMovies + airingTV + newEpisodes + topRated
+        let genrePool = trending + newMovies + popularMovies + popularKoreanMovies
+            + airingTV + newEpisodes + recentKoreanDramas + topRated
         let uniqueGenreNames = Set(genrePool.flatMap { $0.details?.genres.map(\.name) ?? [] })
         genres = uniqueGenreNames.sorted().compactMap { name in
             let matches = genrePool.filter { $0.details?.genres.contains(where: { $0.name == name }) == true }
@@ -625,27 +630,11 @@ struct HomeLibraryView: View {
                         LazyVStack(alignment: .leading, spacing: 28) {
                             resumeSection
                             favoritesSection
-                            if onlinePlatformEnabled {
-                                posterSection("Trending Now", items: onlineCatalog.trending)
-                                posterSection("Digital Releases", items: onlineCatalog.newMovies)
-                                posterSection("Popular Movies", items: onlineCatalog.popularMovies)
-                                posterSection("TV Shows Airing Now", items: onlineCatalog.airingTV)
-                                posterSection("New Episodes", items: onlineCatalog.newEpisodes)
-                                posterSection("Top Rated", items: onlineCatalog.topRated)
-                                categorySection("Genres", categories: onlineCatalog.genres)
-                            } else {
-                                posterSection("Recently Added", items: derivedData.recentlyAdded)
-                                posterSection("Movies", items: catalog.movies)
-                                posterSection("TV Shows", items: catalog.shows)
-                                posterSection("Anime", items: derivedData.anime)
-                                posterSection("Others", items: derivedData.others)
-                                posterSection("Unwatched", items: derivedData.unwatched)
-                                posterSection("Watched", items: derivedData.watched)
-                                categorySection("By Genre", categories: derivedData.genres)
-                                categorySection("By Rating", categories: derivedData.ratings)
-                                categorySection("By Release Date", categories: derivedData.releases)
-                                categorySection("By Age Rating", categories: derivedData.ageRatings)
-                            }
+                            posterSection("Popular Movies", items: onlineCatalog.popularMovies)
+                            posterSection("Popular Korean Movies", items: onlineCatalog.popularKoreanMovies)
+                            posterSection("Recent TV Shows", items: onlineCatalog.airingTV)
+                            posterSection("Recent Korean Drama", items: onlineCatalog.recentKoreanDramas)
+                            posterSection("Top Rated", items: onlineCatalog.topRated)
                         }
                         .padding(.top, 0)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -693,11 +682,12 @@ struct HomeLibraryView: View {
             // Keep the top-anchored search header stable when the keyboard appears.
             .ignoresSafeArea(.keyboard, edges: .bottom)
             .toolbar(.hidden, for: .navigationBar)
-            .task(id: "\(homeRefreshID)|online:\(onlinePlatformEnabled)") {
+            .task(id: homeRefreshID) {
                 guard isActive else { return }
                 updateHeroRotationIfNeeded()
-                await catalog.load(vm: vm, force: false)
-                if onlinePlatformEnabled { await onlineCatalog.load(force: false) }
+                async let localLoad: Void = catalog.load(vm: vm, force: false)
+                async let onlineLoad: Void = onlineCatalog.load(force: false)
+                _ = await (localLoad, onlineLoad)
                 scheduleDerivedDataRebuild()
             }
             .onReceive(catalog.$movies) { _ in scheduleDerivedDataRebuild() }
@@ -1468,12 +1458,8 @@ struct HomeLibraryView: View {
         showRefreshOverlay = true
         let startedAt = Date()
         async let localRefresh: Void = catalog.load(vm: vm, force: true)
-        if onlinePlatformEnabled {
-            async let onlineRefresh: Void = onlineCatalog.load(force: true)
-            _ = await (localRefresh, onlineRefresh)
-        } else {
-            _ = await localRefresh
-        }
+        async let onlineRefresh: Void = onlineCatalog.load(force: true)
+        _ = await (localRefresh, onlineRefresh)
 
         // If the pull happened while another scan was ending, the model queues
         // this forced refresh. Keep the overlay up through that queued pass too.
@@ -1614,14 +1600,15 @@ struct HomeLibraryView: View {
         .buttonStyle(.plain)
     }
 
+    @ViewBuilder
     private var favoritesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HomeSectionHeader(title: "Favorites", hasItems: !vm.favoriteLinks.isEmpty) {
-                showFavorites = true
-            }
-            if vm.favoriteLinks.isEmpty {
-                emptyRow("No favorites")
-            } else {
+        // Favorites disappears from Home entirely once empty, rather than
+        // showing an empty placeholder row like the other sections.
+        if !vm.favoriteLinks.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                HomeSectionHeader(title: "Favorites", hasItems: true) {
+                    showFavorites = true
+                }
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(alignment: .top, spacing: 14) {
                         ForEach(vm.favoriteLinks.prefix(20)) { link in
@@ -1721,8 +1708,8 @@ struct HomeLibraryView: View {
         var seen = Set<String>()
         let onlineItems = onlinePlatformEnabled
             ? onlineCatalog.trending + onlineCatalog.newMovies + onlineCatalog.popularMovies
-                + onlineCatalog.airingTV + onlineCatalog.newEpisodes + onlineCatalog.topRated
-                + onlineCatalog.resumeCandidates
+                + onlineCatalog.popularKoreanMovies + onlineCatalog.airingTV + onlineCatalog.newEpisodes
+                + onlineCatalog.recentKoreanDramas + onlineCatalog.topRated + onlineCatalog.resumeCandidates
             : []
         return (catalog.movies + catalog.shows + catalog.unknown + onlineItems)
             .filter { seen.insert($0.id).inserted }
