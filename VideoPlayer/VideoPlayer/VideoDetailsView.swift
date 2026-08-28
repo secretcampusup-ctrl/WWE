@@ -443,14 +443,18 @@ struct VideoDetailsView: View {
                 let preferred = (!item.relatedEpisodes.isEmpty || tmdbDetails?.isSeries == true) ? "tv" : nil
                 let loadedDetails: TMDBTitleDetails?
                 if let existing = tmdbDetails, existing.id > 0 {
-                    loadedDetails = await TMDBService.shared.details(
+                    if let byID = await TMDBService.shared.details(
                         mediaType: existing.mediaType,
                         tmdbID: existing.id,
                         fallbackTitle: existing.title
-                    ) ?? await TMDBService.shared.detailsOriginalFirst(
-                        for: item.title,
-                        preferredMediaType: preferred
-                    )
+                    ) {
+                        loadedDetails = byID
+                    } else {
+                        loadedDetails = await TMDBService.shared.detailsOriginalFirst(
+                            for: item.title,
+                            preferredMediaType: preferred
+                        )
+                    }
                 } else {
                     loadedDetails = await TMDBService.shared.detailsOriginalFirst(
                         for: item.title,
@@ -2000,7 +2004,7 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
 
 private struct CachedTMDBImage: View {
     let url: URL?
-    let contentMode: ContentMode
+    let contentMode: SwiftUI.ContentMode
     var placeholderSystemName: String? = nil
 
     var body: some View {
