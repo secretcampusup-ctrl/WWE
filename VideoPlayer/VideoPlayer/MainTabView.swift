@@ -3205,20 +3205,20 @@ private struct PirateBayResult: Decodable, Identifiable {
     var byteCount: Int64 { Int64(size) ?? 0 }
     var addedDate: Date { Date(timeIntervalSince1970: TimeInterval(added) ?? 0) }
     var magnet: String {
-        // Prefer a real magnet whenever we have an info hash. Only fall back to
-        // Milkie's authenticated .torrent URL when the list/details API omitted
-        // the hash entirely (encoded as milkie-file:{id}).
-        if status == "milkie", infoHash.hasPrefix("milkie-file:") {
-            let torrentID = String(infoHash.dropFirst("milkie-file:".count))
+        // Milkie is private: always use the authenticated .torrent download URL.
+        // Public magnets without the site passkey never resolve on debrid/PikPak.
+        if status == "milkie" {
+            let torrentID: String = {
+                if infoHash.hasPrefix("milkie-file:") {
+                    return String(infoHash.dropFirst("milkie-file:".count))
+                }
+                return id
+            }()
             if let url = MilkieClient.torrentDownloadURL(id: torrentID) {
                 return url.absoluteString
             }
         }
         let hash = infoHash.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !hash.isEmpty, !hash.hasPrefix("milkie-file:") else {
-            return MilkieClient.torrentDownloadURL(id: id)?.absoluteString
-                ?? "magnet:?xt=urn:btih:\(infoHash)"
-        }
         var parts = URLComponents()
         parts.scheme = "magnet"
         parts.queryItems = [

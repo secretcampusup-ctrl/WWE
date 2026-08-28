@@ -135,12 +135,9 @@ enum OnlineLibraryDestination: String, CaseIterable, Identifiable {
     }
 
     var icon: String {
-        switch self {
-        case .pikpak: return "bolt.horizontal.cloud.fill"
-        case .realDebrid: return "cloud.fill"
-        case .offcloud: return "arrow.down.to.line.compact"
-        case .torBox: return "shippingbox.fill"
-        }
+        // Shared symbol so every destination shows a real glyph (older iOS
+        // builds omit some cloud.* variants and draw empty tiles).
+        "cloud.fill"
     }
 
     var isConfigured: Bool {

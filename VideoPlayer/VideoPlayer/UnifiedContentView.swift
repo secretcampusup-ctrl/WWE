@@ -528,11 +528,10 @@ final class UnifiedContentModel: ObservableObject {
                 return
             }
 
-            // Search feels instant because TMDB search returns posters in one
-            // response. Library files need one lookup each — run a small pool
-            // of concurrent requests so Home/Media fill in quickly without
-            // hammering the API.
-            let concurrency = min(8, max(2, work.count))
+            // Library scan uses a single multi-search per title (like Search),
+            // not a full details request with credits/images. Higher concurrency
+            // + frequent UI publishes make Media feel as fast as Search.
+            let concurrency = min(16, max(4, work.count))
             var cursor = 0
             var changesSincePublish = 0
 
@@ -550,7 +549,7 @@ final class UnifiedContentModel: ObservableObject {
                         let title = self.metadataLookupTitle(for: entry)
                         let mediaType = self.preferredMediaType(for: entry)
                         group.addTask {
-                            let details = await TMDBService.shared.detailsOriginalFirst(
+                            let details = await TMDBService.shared.libraryQuickDetails(
                                 for: title,
                                 preferredMediaType: mediaType
                             )
@@ -572,9 +571,8 @@ final class UnifiedContentModel: ObservableObject {
                     changesSincePublish += 1
                 }
 
-                // Publish often so posters appear progressively instead of after
-                // the entire library finishes.
-                if changesSincePublish >= 8 || cursor >= work.count {
+                // Publish every few titles so posters appear almost immediately.
+                if changesSincePublish >= 4 || cursor >= work.count {
                     await self.publishClassifiedLibrary(
                         raw: raw,
                         metadataByQuery: metadataByQuery,
@@ -1518,7 +1516,7 @@ struct UnifiedMediaDetailsHost: View {
             )
             .preferredColorScheme(.dark)
         }
-        .sheet(isPresented: $showLibraryAdd) {
+        .fullScreenCover(isPresented: $showLibraryAdd) {
             OnlineLibraryAddSheet(vm: vm, entry: activeEntry, episode: selectedEpisode)
                 .preferredColorScheme(.dark)
         }
@@ -1829,6 +1827,9 @@ private struct OnlineLibraryAddSheet: View {
     @State private var showProgressModal = false
     @State private var addedSuccess = false
     @State private var activeQualityLabel = ""
+    @State private var pendingWatchSource: OnlineTorrentSource?
+    @State private var isPreparingWatch = false
+    @State private var watchError: String?
 
     private var availableDestinations: [OnlineLibraryDestination] {
         OnlineLibraryDestination.enabledConfigured
@@ -1974,13 +1975,14 @@ private struct OnlineLibraryAddSheet: View {
         HStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(providerGradient(service))
+                    .fill(AppPalette.gradient)
                     .frame(width: 54, height: 54)
-                Image(systemName: service.icon)
+                Image(systemName: "cloud.fill")
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
             }
-            .shadow(color: .black.opacity(0.4), radius: 10, y: 5)
+            .shadow(color: AppPalette.accent.opacity(0.35), radius: 10, y: 5)
 
             Text(service.title)
                 .font(.system(size: 18, weight: .heavy, design: .rounded))
@@ -1996,37 +1998,12 @@ private struct OnlineLibraryAddSheet: View {
         .padding(.vertical, 16)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.white.opacity(0.04))
+                .fill(AppTheme.card)
                 .overlay(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Color.white.opacity(0.06), lineWidth: 0.9)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.9)
                 )
         )
-    }
-
-    private func providerGradient(_ service: OnlineLibraryDestination) -> LinearGradient {
-        switch service {
-        case .pikpak:
-            return LinearGradient(
-                colors: [Color(red: 0.54, green: 0.17, blue: 0.89), Color(red: 0.29, green: 0.0, blue: 0.51)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-        case .realDebrid:
-            return LinearGradient(
-                colors: [Color(red: 0.0, green: 0.71, blue: 0.86), Color(red: 0.0, green: 0.51, blue: 0.69)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-        case .offcloud:
-            return LinearGradient(
-                colors: [Color(red: 0.2, green: 0.6, blue: 1.0), Color(red: 0.1, green: 0.35, blue: 0.75)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-        case .torBox:
-            return LinearGradient(
-                colors: [Color(red: 1.0, green: 0.55, blue: 0.2), Color(red: 0.85, green: 0.3, blue: 0.1)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-        }
     }
 
     // MARK: - Quality bottom sheet
@@ -2173,7 +2150,7 @@ private struct OnlineLibraryAddSheet: View {
             Color.black.opacity(0.7).ignoresSafeArea()
 
             VStack(spacing: 18) {
-                if addedSuccess {
+                if addedSuccess && !isPreparingWatch {
                     ZStack {
                         Circle()
                             .fill(
@@ -2194,25 +2171,50 @@ private struct OnlineLibraryAddSheet: View {
                     Text("Added to library successfully.")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.5))
-                    Button { dismiss() } label: {
-                        Text("Close")
-                            .font(.system(size: 15, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(
-                                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                    .fill(Color.white.opacity(0.1))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                            .stroke(Color.white.opacity(0.18), lineWidth: 0.9)
-                                    )
-                            )
+                    if let watchError {
+                        Text(watchError)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.orange.opacity(0.9))
+                            .multilineTextAlignment(.center)
                     }
-                    .buttonStyle(.plain)
+                    HStack(spacing: 10) {
+                        Button { dismiss() } label: {
+                            Text("Close")
+                                .font(.system(size: 15, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                        .fill(Color.white.opacity(0.1))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                                .stroke(Color.white.opacity(0.18), lineWidth: 0.9)
+                                        )
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button { watchFromWebDAV() } label: {
+                            Text("Watch")
+                                .font(.system(size: 15, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.black)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                        .fill(AppPalette.gradient)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
                     .padding(.top, 4)
                 } else {
-                    Text(activeQualityLabel.isEmpty ? "Adding to library…" : "Downloading \(activeQualityLabel)…")
+                    Text(
+                        isPreparingWatch
+                            ? "Opening from WebDAV…"
+                            : (activeQualityLabel.isEmpty ? "Adding to library…" : "Downloading \(activeQualityLabel)…")
+                    )
                         .font(.system(size: 18, weight: .heavy, design: .rounded))
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
@@ -2220,7 +2222,7 @@ private struct OnlineLibraryAddSheet: View {
                         .controlSize(.large)
                         .tint(AppPalette.accent)
                         .padding(.top, 6)
-                    Text(status ?? "Preparing offline task…")
+                    Text(status ?? (isPreparingWatch ? "Refreshing library for playback" : "Preparing offline task…"))
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.45))
                         .multilineTextAlignment(.center)
@@ -2287,11 +2289,13 @@ private struct OnlineLibraryAddSheet: View {
     @MainActor private func add(_ source: OnlineTorrentSource) {
         guard let destination, !isAdding else { return }
         isAdding = true
+        pendingWatchSource = source
         activeQualityLabel = source.quality.label
         withAnimation {
             showQualitySheet = false
             showProgressModal = true
             addedSuccess = false
+            watchError = nil
         }
         Task {
             let error = await vm.addOnlineSourceToLibrary(source, destination: destination)
@@ -2302,10 +2306,62 @@ private struct OnlineLibraryAddSheet: View {
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     addedSuccess = true
                 }
-                try? await Task.sleep(nanoseconds: 1_100_000_000)
-                dismiss()
             }
         }
+    }
+
+    /// Play via WebDAV after the offline add — never the direct CDN magnet path.
+    @MainActor private func watchFromWebDAV() {
+        guard !isPreparingWatch else { return }
+        isPreparingWatch = true
+        watchError = nil
+        status = "Refreshing library for playback"
+        Task {
+            let matchName = pendingWatchSource?.name ?? displayTitle
+            let needles = Self.watchNeedles(from: matchName)
+            // Provider may still be writing the file — poll WebDAV briefly.
+            for attempt in 0..<8 {
+                vm.notifyLibraryDidChange(scheduleFollowUpRescans: false)
+                for server in vm.servers {
+                    let files = await vm.contentLibraryFiles(server: server, forceRefresh: attempt == 0 || attempt == 3)
+                    if let file = files.first(where: { file in
+                        guard file.isVideo, !file.isDirectory else { return false }
+                        return Self.fileMatchesWatchNeedles(file.name, needles: needles)
+                    }) {
+                        let ok = await vm.preparePlayback(file: file, server: server)
+                        isPreparingWatch = false
+                        if ok {
+                            dismiss()
+                        } else {
+                            watchError = vm.errorMessage ?? "Could not start WebDAV playback."
+                        }
+                        return
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+            isPreparingWatch = false
+            watchError = "File is still downloading on the server. Close and open it from Home once it appears."
+        }
+    }
+
+    private static func watchNeedles(from name: String) -> [String] {
+        let cleaned = name
+            .replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .lowercased()
+        let tokens = cleaned
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { $0.count > 2 && !["the", "and", "bluray", "webrip", "web", "x264", "x265", "hevc", "aac", "dts"].contains($0) }
+        return Array(tokens.prefix(6))
+    }
+
+    private static func fileMatchesWatchNeedles(_ fileName: String, needles: [String]) -> Bool {
+        guard !needles.isEmpty else { return false }
+        let hay = fileName.lowercased()
+        let hits = needles.filter { hay.contains($0) }.count
+        return hits >= min(2, needles.count)
     }
 }
 

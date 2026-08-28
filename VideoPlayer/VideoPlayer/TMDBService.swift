@@ -116,7 +116,9 @@ struct TMDBEpisodeDetails: Codable {
     let name: String
     let overview: String
     let stillPath: String?
-    var imageURL: URL? { stillPath.flatMap { URL(string: "https://image.tmdb.org/t/p/w780\($0)") } }
+    /// Episode cards are ~160pt on phone — w300 is sharp enough and far faster
+    /// than w780 which was overkill for these thumbnails.
+    var imageURL: URL? { stillPath.flatMap { URL(string: "https://image.tmdb.org/t/p/w300\($0)") } }
 }
 actor TMDBService {
     static let shared = TMDBService()
@@ -205,6 +207,69 @@ actor TMDBService {
             if let result = await detailsForQuery(query, preferredMediaType: preferredMediaType) { return result }
         }
         return nil
+    }
+
+    /// Fast path for Home / Media library scans.
+    /// One multi-search request → poster + title + year. Full cast/images load
+    /// later when the user opens Details (same feel as the Search tab).
+    func libraryQuickDetails(for rawTitle: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
+        guard TMDBSettings.isConfigured else { return nil }
+        if let cached = cachedDetailsOriginalFirst(for: rawTitle, preferredMediaType: preferredMediaType) {
+            return cached
+        }
+        let filtered = Self.searchTitle(from: rawTitle)
+        let canonical = Self.canonicalTitleAndYear(from: filtered)
+        let query = canonical.title.isEmpty ? filtered : canonical.title
+        guard !query.isEmpty else { return nil }
+
+        var candidates = await quickSearchCandidates(for: query, year: canonical.year)
+        if candidates.isEmpty, query != filtered, !filtered.isEmpty {
+            candidates = await quickSearchCandidates(for: filtered, year: canonical.year)
+        }
+        guard let match = Self.bestMatch(in: candidates, query: query, preferredMediaType: preferredMediaType)
+                ?? candidates.first else { return nil }
+
+        let title = match.title ?? match.name ?? query
+        let details = TMDBTitleDetails(
+            id: match.id,
+            mediaType: match.mediaType,
+            imdbID: nil,
+            title: title,
+            overview: match.overview ?? "",
+            posterPath: match.posterPath,
+            backdropPath: match.backdropPath,
+            releaseDate: match.releaseDate ?? match.firstAirDate,
+            voteAverage: match.voteAverage ?? 0,
+            genres: [],
+            cast: [],
+            seasons: [],
+            trailerKey: nil,
+            runtimeMinutes: nil,
+            productionCountries: nil,
+            certification: nil,
+            director: nil,
+            logoPath: nil,
+            noLanguageBackdropPath: match.backdropPath,
+            noLanguagePosterPath: match.posterPath,
+            detailsPosterPath: match.posterPath
+        )
+        let base = query.lowercased()
+        detailsCache[base + "|" + (preferredMediaType ?? "any")] = details
+        detailsCache[base + "|" + match.mediaType] = details
+        detailsCache[base + "|any"] = details
+        detailsCache["tmdb|\(match.mediaType)|\(match.id)"] = details
+        persistCache()
+        return details
+    }
+
+    private func quickSearchCandidates(for query: String, year: String?) async -> [SearchResult] {
+        // Single multi-search — mirrors how the Search tab gets posters instantly.
+        var params: [String: String] = ["query": query, "include_adult": "false"]
+        if let year { params["year"] = year }
+        guard let response: SearchResponse = try? await request("/3/search/multi", query: params) else {
+            return []
+        }
+        return response.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
     }
 
     /// Loads a catalogue title by its stable TMDB identity. Home already owns
@@ -394,12 +459,22 @@ actor TMDBService {
         }
         if let response: TypedTitleSearchResponse = try? await request("/3/search/movie", query: movieQuery) {
             values.append(contentsOf: response.results.map {
-                SearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: $0.name)
+                SearchResult(
+                    id: $0.id, mediaType: "movie", title: $0.title, name: $0.name,
+                    posterPath: $0.posterPath, backdropPath: $0.backdropPath,
+                    releaseDate: $0.releaseDate, firstAirDate: $0.firstAirDate,
+                    voteAverage: $0.voteAverage, overview: $0.overview
+                )
             })
         }
         if let response: TypedTitleSearchResponse = try? await request("/3/search/tv", query: tvQuery) {
             values.append(contentsOf: response.results.map {
-                SearchResult(id: $0.id, mediaType: "tv", title: $0.title, name: $0.name)
+                SearchResult(
+                    id: $0.id, mediaType: "tv", title: $0.title, name: $0.name,
+                    posterPath: $0.posterPath, backdropPath: $0.backdropPath,
+                    releaseDate: $0.releaseDate, firstAirDate: $0.firstAirDate,
+                    voteAverage: $0.voteAverage, overview: $0.overview
+                )
             })
         }
         var seen = Set<String>()
@@ -862,10 +937,25 @@ private struct TypedTitleSearchResult: Decodable {
     let id: Int
     let title: String?
     let name: String?
+    let posterPath: String?
+    let backdropPath: String?
+    let releaseDate: String?
+    let firstAirDate: String?
+    let voteAverage: Double?
+    let overview: String?
 }
 
 private struct SearchResult: Decodable {
-    let id: Int; let mediaType: String; let title: String?; let name: String?
+    let id: Int
+    let mediaType: String
+    let title: String?
+    let name: String?
+    let posterPath: String?
+    let backdropPath: String?
+    let releaseDate: String?
+    let firstAirDate: String?
+    let voteAverage: Double?
+    let overview: String?
 }
 private struct DetailPayload: Decodable {
     let title: String?; let name: String?; let overview: String?

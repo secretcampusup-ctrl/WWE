@@ -452,20 +452,12 @@ actor OnlineSourceSearchService {
             let hydrated = await MilkieClient.hydrateInfoHashes(ranked, limit: 24)
             for torrent in hydrated {
                 guard let quality = OnlineStreamQuality.detect(hint: nil, fileName: torrent.releaseName) else { continue }
-                // Prefer a real magnet when the API returns an info hash.
-                // Otherwise fall back to Milkie's authenticated torrent-file URL
-                // (same pattern Jackett uses) so PikPak/TorBox can still fetch it.
-                let link: String
-                let dedupeKey: String
-                if let hash = torrent.infoHash, !hash.isEmpty {
-                    link = MilkieClient.magnet(infoHash: hash, name: torrent.releaseName)
-                    dedupeKey = hash.lowercased()
-                } else if let torrentURL = MilkieClient.torrentDownloadURL(id: torrent.id) {
-                    link = torrentURL.absoluteString
-                    dedupeKey = "milkie-file:\(torrent.id)"
-                } else {
-                    continue
-                }
+                // Milkie is a private tracker: public magnets without the site
+                // passkey never resolve. Always hand debrid/PikPak the
+                // authenticated .torrent URL (Jackett / autodl pattern).
+                guard let torrentURL = MilkieClient.torrentDownloadURL(id: torrent.id) else { continue }
+                let link = torrentURL.absoluteString
+                let dedupeKey = torrent.infoHash?.lowercased() ?? "milkie-file:\(torrent.id)"
                 guard seen.insert(dedupeKey).inserted else { continue }
                 combined.append(OnlineTorrentSource(
                     id: "milkie|\(torrent.id)",
@@ -1689,9 +1681,13 @@ enum MilkieClient {
     static func torrentDownloadURL(id: String) -> URL? {
         let key = MilkieKeyStore.key
         guard !id.isEmpty, !key.isEmpty else { return nil }
-        var parts = URLComponents(string: "https://milkie.cc/api/v1/torrents/\(id)/torrent")
-        parts?.queryItems = [URLQueryItem(name: "key", value: key)]
-        return parts?.url
+        // Build manually so `+` in the download key stays `%2B` (URLQueryItem
+        // is fine, but some older runtimes still mangle the path).
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "+&=")
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+        let encodedID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        return URL(string: "https://milkie.cc/api/v1/torrents/\(encodedID)/torrent?key=\(encodedKey)")
     }
 
     static func search(
