@@ -107,18 +107,29 @@ struct VideoPlayerView: View {
     }
 
     private var usesMKVPlayer: Bool {
+        // Server-transcoded PikPak streams are always progressive MP4, even when
+        // the original torrent name still ends with `.mkv`. Keep them on AVPlayer.
+        if isPikPakTranscodedRendition { return false }
+
         let decoded = ((title.removingPercentEncoding ?? title) + " " + (url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent)).lowercased()
         let explicitExtension = url.pathExtension.lowercased()
         let looksLikeMP4 = explicitExtension == "mp4" || explicitExtension == "m4v" || explicitExtension == "mov"
             || decoded.range(of: #"(?i)\.(mp4|m4v|mov)(?:$|[?\s])"#, options: .regularExpression) != nil
         let looksLikeMKV = explicitExtension == "mkv"
             || decoded.range(of: #"(?i)\.mkv(?:$|[?\s])"#, options: .regularExpression) != nil
+            // Titles cleaned by TMDB lose the extension; release tags still mark Matroska encodes.
+            || decoded.range(of: #"(?i)\b(x265|hevc|h\.?265|x264|h\.?264|bluray|web[- .]?dl|remux)\b"#, options: .regularExpression) != nil
+                && !looksLikeMP4
 
         // Keep the fast PikPak/WebDAV URL, but split engines by container.
-        // AVPlayer preserves the source resolution for MP4. VLC is only needed
-        // for Matroska and other extended formats.
+        // AVPlayer on a Matroska file produces the classic "audio only / black
+        // picture" failure — which is exactly what users saw after adding a
+        // Discover/Search torrent into the library and playing it.
         if looksLikeMP4 { return false }
         if looksLikeMKV { return true }
+        // Extensionless PikPak *original* CDN links: Search/Discover magnets are
+        // overwhelmingly MKV. Prefer VLC rather than risk black-screen AVPlayer.
+        if LinkResolver.isPikPakDirectDownload(url.absoluteString) { return true }
         if useExtendedPlayer { return true }
         return ["webm", "avi", "flv", "wmv", "m2ts", "mts", "ts"].contains(explicitExtension)
     }

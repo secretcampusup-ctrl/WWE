@@ -887,6 +887,15 @@ struct HomeLibraryView: View {
             .onReceive(vm.$playbackHistory) { _ in scheduleDerivedDataRebuild() }
             .onReceive(vm.$savedLinks) { _ in scheduleDerivedDataRebuild() }
             .onReceive(NotificationCenter.default.publisher(for: .librarySourcesDidChange)) { _ in
+                // "Add to Library" from Discover/Search — force a full rescan so
+                // Home shows the new movie/show/episode as soon as the provider
+                // lists it (WebDAV / TorBox / Offcloud).
+                Task {
+                    await catalog.load(vm: vm, force: true)
+                    scheduleDerivedDataRebuild()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .webDAVLibraryNeedsRefresh)) { _ in
                 Task {
                     await catalog.load(vm: vm, force: true)
                     scheduleDerivedDataRebuild()

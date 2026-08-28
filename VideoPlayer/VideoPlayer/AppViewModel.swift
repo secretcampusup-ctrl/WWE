@@ -1790,10 +1790,32 @@ class AppViewModel: ObservableObject {
             case .realDebrid:
                 try await addMagnetToRealDebridLibrary(source.magnet)
             }
-            NotificationCenter.default.post(name: .librarySourcesDidChange, object: nil)
+            // Home + Media listen for these notifications. Providers need a few
+            // seconds before the new file is listable on WebDAV / account APIs,
+            // so schedule staggered rescans instead of a single immediate pass.
+            notifyLibraryDidChange(scheduleFollowUpRescans: true)
             return nil
         } catch {
             return error.localizedDescription
+        }
+    }
+
+    /// Broadcast that the library changed so Home and Media rescans pick up
+    /// newly offline-added movies, shows, and episodes.
+    func notifyLibraryDidChange(scheduleFollowUpRescans: Bool = false) {
+        NotificationCenter.default.post(name: .librarySourcesDidChange, object: nil)
+        NotificationCenter.default.post(name: .webDAVLibraryNeedsRefresh, object: nil)
+        guard scheduleFollowUpRescans else { return }
+        // PikPak / TorBox / Offcloud often accept the magnet before the file is
+        // visible. Retry at increasing intervals so the item appears as soon as
+        // the provider surfaces it without the user pulling to refresh.
+        let delays: [TimeInterval] = [2, 5, 12, 25, 45]
+        for delay in delays {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                NotificationCenter.default.post(name: .librarySourcesDidChange, object: nil)
+                NotificationCenter.default.post(name: .webDAVLibraryNeedsRefresh, object: nil)
+            }
         }
     }
 
