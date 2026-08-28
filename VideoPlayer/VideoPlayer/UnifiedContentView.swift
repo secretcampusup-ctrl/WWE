@@ -1772,59 +1772,137 @@ private struct OnlineLibraryAddSheet: View {
     @State private var isSearching = false
     @State private var isAdding = false
     @State private var status: String?
+    @State private var addedSuccess = false
 
     private var availableDestinations: [OnlineLibraryDestination] {
         OnlineLibraryDestination.enabledConfigured
     }
 
+    private var displayTitle: String {
+        VideoTitleFormatter.title(from: episode?.title ?? entry.title)
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
-                AppTheme.bg.ignoresSafeArea()
+                sheetAtmosphere
                 ScrollView {
-                    sheetContent
-                    .padding(20)
-                    .padding(.bottom, 36)
+                    VStack(alignment: .leading, spacing: 22) {
+                        titleCard
+                        libraryContent
+                    }
+                    .padding(18)
+                    .padding(.bottom, 40)
+                }
+                .scrollIndicators(.hidden)
+
+                if addedSuccess {
+                    successOverlay
                 }
             }
-            .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { AppAnimatedBackButton(size: 36) { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
+                ToolbarItem(placement: .principal) {
+                    Text(destination == nil ? "Add to Library" : (destination?.title ?? "Quality"))
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var sheetAtmosphere: some View {
+        ZStack {
+            AppTheme.bg.ignoresSafeArea()
+            RadialGradient(
+                colors: [AppPalette.purple.opacity(0.22), .clear],
+                center: .topTrailing,
+                startRadius: 20,
+                endRadius: 380
+            )
+            .ignoresSafeArea()
+            if let url = entry.posterURL {
+                KFImage(url)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 280)
+                    .blur(radius: 42)
+                    .opacity(0.22)
+                    .mask(
+                        LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
         }
     }
 
-    private var sheetContent: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Add to Library")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-            Text(VideoTitleFormatter.title(from: episode?.title ?? entry.title))
-                .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-            libraryContent
+    private var titleCard: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.card)
+                if let url = entry.posterURL {
+                    KFImage(url).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "film.fill").foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 72, height: 108)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SEND TO LIBRARY")
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .tracking(1.6)
+                    .foregroundStyle(AppPalette.accent)
+                Text(displayTitle)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(3)
+                if let year = entry.details?.releaseDate.map({ String($0.prefix(4)) }) {
+                    Text(year)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                if episode != nil {
+                    Text("S\(episode!.season) · E\(episode!.episode)")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.08), in: Capsule())
+                }
+            }
+            Spacer(minLength: 0)
         }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 0.8)
+                )
+        )
     }
 
     @ViewBuilder private var libraryContent: some View {
         if destination == nil {
             destinationList
         } else if isSearching {
-            ProgressView().controlSize(.large).tint(AppPalette.accent)
-                .frame(maxWidth: .infinity, minHeight: 230)
+            searchingCard
         } else if let status, sources.isEmpty {
-            // ContentUnavailableView is iOS 17+; keep a simple fallback for iOS 16.
-            VStack(spacing: 14) {
-                Image(systemName: "video.slash")
-                    .font(.system(size: 40, weight: .semibold))
-                    .foregroundStyle(Color.secondary)
-                Text("No qualities found")
-                    .font(.headline)
-                    .foregroundStyle(Color.primary)
-                Text(status)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-            }
-            .frame(maxWidth: .infinity, minHeight: 260)
+            emptyQualitiesCard(status)
         } else {
             qualityList
         }
@@ -1832,62 +1910,222 @@ private struct OnlineLibraryAddSheet: View {
 
     private var destinationList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Choose a connected library").font(.headline).foregroundStyle(.white.opacity(0.8))
-            ForEach(availableDestinations) { service in
-                Button { destination = service; loadSources() } label: { destinationRow(service) }
-                    .buttonStyle(PremiumPressButtonStyle())
+            Text("WHERE SHOULD IT LIVE?")
+                .font(.system(size: 11, weight: .heavy, design: .rounded))
+                .tracking(1.4)
+                .foregroundStyle(.white.opacity(0.42))
+            ForEach(Array(availableDestinations.enumerated()), id: \.element.id) { index, service in
+                Button {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) {
+                        destination = service
+                    }
+                    loadSources()
+                } label: {
+                    destinationRow(service, index: index)
+                }
+                .buttonStyle(PremiumPressButtonStyle())
             }
         }
     }
 
-    private func destinationRow(_ service: OnlineLibraryDestination) -> some View {
+    private func destinationRow(_ service: OnlineLibraryDestination, index: Int) -> some View {
         HStack(spacing: 14) {
-            Image(systemName: service.icon).font(.title3).foregroundStyle(.white)
-                .frame(width: 48, height: 48)
-                .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(service.title).font(.headline).foregroundStyle(.white)
-                Text("Select a quality before adding").font(.caption).foregroundStyle(.secondary)
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(AppPalette.gradient)
+                    .frame(width: 52, height: 52)
+                Image(systemName: service.icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .shadow(color: AppPalette.accent.opacity(0.35), radius: 10, y: 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(service.title)
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("Pick a quality · offline add · Home refresh")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
             }
             Spacer()
-            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white.opacity(0.35))
         }
-        .padding(13)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.055 + Double(index) * 0.008))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.14), Color.white.opacity(0.04)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.9
+                        )
+                )
+        )
     }
 
     private var qualityList: some View {
-        VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Button { destination = nil; sources = []; status = nil } label: {
-                    Label(destination?.title ?? "Library", systemImage: "chevron.left")
-                }.buttonStyle(.plain).foregroundStyle(AppPalette.accent)
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        destination = nil; sources = []; status = nil
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(destination?.title ?? "Back")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(AppPalette.accent)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(AppPalette.accent.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
                 Spacer()
-                Text("Choose quality").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                Text("BEST QUALITIES")
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.4))
             }
             ForEach(bestQualityChoices) { source in qualityRow(source) }
+            if let status, !status.isEmpty, !sources.isEmpty {
+                Text(status)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.orange.opacity(0.9))
+                    .padding(.top, 4)
+            }
         }
     }
 
     private func qualityRow(_ source: OnlineTorrentSource) -> some View {
         Button { add(source) } label: {
-            HStack(spacing: 14) {
-                Text(source.quality.label).font(.headline.bold()).foregroundStyle(.black)
-                    .frame(width: 72, height: 54)
-                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(source.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                    Text("\(source.seeders) seeders · \(source.sizeLabel)").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Text(source.quality.label)
+                    .font(.system(size: 15, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.black)
+                    .frame(width: 70, height: 52)
+                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: AppPalette.accent.opacity(0.3), radius: 8, y: 3)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(source.name)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    HStack(spacing: 8) {
+                        Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
+                            .foregroundStyle(.green.opacity(0.9))
+                        Text(source.sizeLabel)
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
                 }
-                Spacer()
-                if isAdding { ProgressView().tint(.white) }
-                else { Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(.white.opacity(0.85)) }
+                Spacer(minLength: 0)
+                if isAdding {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.1), in: Circle())
+                }
             }
             .padding(12)
-            .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Color.white.opacity(0.09), lineWidth: 0.8)
+                    )
+            )
         }
         .buttonStyle(PremiumPressButtonStyle())
         .disabled(isAdding)
+    }
+
+    private var searchingCard: some View {
+        VStack(spacing: 16) {
+            ProgressView().controlSize(.large).tint(AppPalette.accent)
+            Text("Finding the best qualities…")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.72))
+            Text("Comparing seeders across your search providers")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.4))
+        }
+        .frame(maxWidth: .infinity, minHeight: 220)
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+    }
+
+    private func emptyQualitiesCard(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "video.slash")
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundStyle(Color.secondary)
+            Text("No qualities found")
+                .font(.system(size: 17, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+            Text(message)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+            Button {
+                destination = nil; sources = []; status = nil
+            } label: {
+                Text("Try another library")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(AppPalette.accent)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, minHeight: 240)
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+    }
+
+    private var successOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48, weight: .semibold))
+                    .foregroundStyle(AppPalette.gradient)
+                Text("Added to library")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("Home & Media will refresh shortly")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(28)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+            )
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.94)))
     }
 
     private var bestQualityChoices: [OnlineTorrentSource] {
@@ -1930,8 +2168,15 @@ private struct OnlineLibraryAddSheet: View {
         Task {
             let error = await vm.addOnlineSourceToLibrary(source, destination: destination)
             isAdding = false
-            if let error { status = error }
-            else { dismiss() }
+            if let error {
+                status = error
+            } else {
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                    addedSuccess = true
+                }
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                dismiss()
+            }
         }
     }
 }

@@ -449,16 +449,28 @@ actor OnlineSourceSearchService {
                     if $0.seeders != $1.seeders { return $0.seeders > $1.seeders }
                     return $0.size > $1.size
                 }
-            let hydrated = await MilkieClient.hydrateInfoHashes(ranked, limit: 16)
+            let hydrated = await MilkieClient.hydrateInfoHashes(ranked, limit: 24)
             for torrent in hydrated {
-                guard let hash = torrent.infoHash, !hash.isEmpty,
-                      let quality = OnlineStreamQuality.detect(hint: nil, fileName: torrent.releaseName) else { continue }
-                let key = hash.lowercased()
-                guard seen.insert(key).inserted else { continue }
+                guard let quality = OnlineStreamQuality.detect(hint: nil, fileName: torrent.releaseName) else { continue }
+                // Prefer a real magnet when the API returns an info hash.
+                // Otherwise fall back to Milkie's authenticated torrent-file URL
+                // (same pattern Jackett uses) so PikPak/TorBox can still fetch it.
+                let link: String
+                let dedupeKey: String
+                if let hash = torrent.infoHash, !hash.isEmpty {
+                    link = MilkieClient.magnet(infoHash: hash, name: torrent.releaseName)
+                    dedupeKey = hash.lowercased()
+                } else if let torrentURL = MilkieClient.torrentDownloadURL(id: torrent.id) {
+                    link = torrentURL.absoluteString
+                    dedupeKey = "milkie-file:\(torrent.id)"
+                } else {
+                    continue
+                }
+                guard seen.insert(dedupeKey).inserted else { continue }
                 combined.append(OnlineTorrentSource(
                     id: "milkie|\(torrent.id)",
                     name: torrent.releaseName,
-                    magnet: MilkieClient.magnet(infoHash: hash, name: torrent.releaseName),
+                    magnet: link,
                     quality: quality,
                     seeders: torrent.seeders,
                     sizeBytes: torrent.size,
@@ -1778,10 +1790,13 @@ private struct MilkieRow: Decodable {
     let downloaded: MilkieFlexibleNumber?
     let createdAt: String?
     let infoHash: String?
+    let info_hash: String?
+    let hash: String?
     let externals: MilkieExternals?
 
     var model: MilkieTorrent {
-        let hash = infoHash?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawHash = infoHash ?? info_hash ?? hash
+        let hash = rawHash?.trimmingCharacters(in: .whitespacesAndNewlines)
         let imdb = externals?.imdb?.trimmingCharacters(in: .whitespacesAndNewlines)
         return MilkieTorrent(
             id: id,

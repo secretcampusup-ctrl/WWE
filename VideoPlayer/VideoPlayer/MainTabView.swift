@@ -284,6 +284,7 @@ private struct LibrarySearchView: View {
     @State private var searchTask: Task<Void, Never>?
     @State private var selectedEntry: UnifiedMediaEntry?
     @FocusState private var searchFocused: Bool
+    @State private var appearPulse = false
 
     private var filteredResults: [UnifiedMediaEntry] {
         results.filter { entry in
@@ -293,81 +294,45 @@ private struct LibrarySearchView: View {
         }
     }
 
+    private var topHit: UnifiedMediaEntry? { filteredResults.first }
+    private var gridResults: [UnifiedMediaEntry] {
+        Array(filteredResults.dropFirst())
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
-                LinearGradient(
-                    colors: [AppTheme.bg, AppPalette.purple.opacity(0.13), AppTheme.bg],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ).ignoresSafeArea()
+                searchAtmosphere
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("Search")
-                                .font(.system(size: 32, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                            Text("Find movies and TV shows, then add a quality to your enabled library.")
-                                .font(.subheadline)
-                                .foregroundStyle(.white.opacity(0.56))
-                        }
-
-                        HStack(spacing: 10) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(AppPalette.accent)
-                            TextField("Movie, TV show or actor", text: $query)
-                                .focused($searchFocused)
-                                .textInputAutocapitalization(.words)
-                                .autocorrectionDisabled()
-                                .submitLabel(.search)
-                                .onSubmit { search(query, immediately: true) }
-                            if !query.isEmpty {
-                                Button { query = ""; results = []; message = nil } label: {
-                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 15)
-                        .frame(height: 54)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 0.8))
-
-                        Picker("Type", selection: $filter) {
-                            Text("All").tag("All")
-                            Text("Movies").tag("Movies")
-                            Text("TV Shows").tag("TV Shows")
-                        }
-                        .pickerStyle(.segmented)
+                    VStack(alignment: .leading, spacing: 22) {
+                        searchHeroHeader
+                        searchField
+                        filterChips
 
                         if isSearching {
-                            HStack(spacing: 12) {
-                                ProgressView().tint(AppPalette.accent)
-                                Text("Searching catalogue…").foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 170)
+                            searchingState
                         } else if query.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
-                            searchPlaceholder(icon: "sparkles", title: "Search the catalogue", subtitle: "Results open in the same details view as your library.")
+                            idleDiscoveryState
                         } else if filteredResults.isEmpty {
-                            searchPlaceholder(icon: "film.stack", title: message ?? "No results found", subtitle: "Try a different title, year, or spelling.")
+                            emptyState
                         } else {
-                            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 20) {
-                                ForEach(filteredResults) { entry in
-                                    Button { selectedEntry = entry } label: { searchPoster(entry) }
-                                        .buttonStyle(PremiumPressButtonStyle())
-                                }
-                            }
+                            resultsBody
                         }
                     }
                     .padding(.horizontal, 18)
-                    .padding(.top, 26)
-                    .padding(.bottom, 118)
+                    .padding(.top, 18)
+                    .padding(.bottom, 124)
                 }
                 .scrollIndicators(.hidden)
             }
             .toolbar(.hidden, for: .navigationBar)
             .onChange(of: query) { search($0) }
+            .onAppear {
+                withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
+                    appearPulse = true
+                }
+            }
             .onDisappear { searchTask?.cancel() }
             .fullScreenCover(item: $selectedEntry) { entry in
                 UnifiedMediaDetailsHost(
@@ -381,40 +346,313 @@ private struct LibrarySearchView: View {
         .preferredColorScheme(.dark)
     }
 
-    private func searchPoster(_ entry: UnifiedMediaEntry) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 18, style: .continuous).fill(AppTheme.card)
-                if let url = entry.posterURL {
-                    KFImage(url).resizable().scaledToFill()
-                } else {
-                    Image(systemName: "film.fill").font(.largeTitle).foregroundStyle(.secondary)
-                }
-                LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .center, endPoint: .bottom)
-                if let rating = entry.details?.voteAverage, rating > 0 {
-                    Text(String(format: "%.1f", rating))
-                        .font(.caption.bold()).foregroundStyle(.white)
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .padding(8)
-                }
-            }
-            .aspectRatio(0.67, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            Text(entry.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-            Text(entry.details?.releaseDate.map { String($0.prefix(4)) } ?? "—")
-                .font(.caption).foregroundStyle(.secondary)
+    private var searchAtmosphere: some View {
+        ZStack {
+            AppTheme.bg.ignoresSafeArea()
+            // Soft cinematic wash — purple depth without competing with posters.
+            RadialGradient(
+                colors: [AppPalette.purple.opacity(appearPulse ? 0.28 : 0.16), .clear],
+                center: .topTrailing,
+                startRadius: 20,
+                endRadius: 420
+            )
+            .ignoresSafeArea()
+            RadialGradient(
+                colors: [AppPalette.accent.opacity(0.12), .clear],
+                center: .bottomLeading,
+                startRadius: 10,
+                endRadius: 360
+            )
+            .ignoresSafeArea()
         }
     }
 
-    private func searchPlaceholder(icon: String, title: String, subtitle: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 34, weight: .semibold)).foregroundStyle(AppPalette.gradient)
-            Text(title).font(.headline).foregroundStyle(.white)
-            Text(subtitle).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+    private var searchHeroHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(AppPalette.gradient, in: Circle())
+                Text("CATALOGUE")
+                    .font(.system(size: 11, weight: .heavy, design: .rounded))
+                    .tracking(2.4)
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            Text("Search")
+                .font(.system(size: 40, weight: .heavy, design: .rounded))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.white, .white.opacity(0.82)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+            Text("Type a title. Open details. Add the quality you want into your library.")
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.52))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 8)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(searchFocused ? AppPalette.accent : .white.opacity(0.55))
+            TextField("Movie, series, or year…", text: $query)
+                .focused($searchFocused)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .font(.system(size: 16, weight: .medium, design: .rounded))
+                .onSubmit { search(query, immediately: true) }
+            if isSearching {
+                ProgressView().controlSize(.small).tint(AppPalette.accent)
+            } else if !query.isEmpty {
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        query = ""; results = []; message = nil
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 26, height: 26)
+                        .background(Color.white.opacity(0.1), in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 56)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: searchFocused
+                                    ? [AppPalette.accent.opacity(0.85), AppPalette.purple.opacity(0.45)]
+                                    : [Color.white.opacity(0.16), Color.white.opacity(0.05)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: searchFocused ? 1.2 : 0.8
+                        )
+                )
+                .shadow(color: searchFocused ? AppPalette.accent.opacity(0.22) : .clear, radius: 16, y: 4)
+        )
+        .animation(.easeOut(duration: 0.22), value: searchFocused)
+    }
+
+    private var filterChips: some View {
+        HStack(spacing: 8) {
+            ForEach(["All", "Movies", "TV Shows"], id: \.self) { chip in
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { filter = chip }
+                } label: {
+                    Text(chip)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(filter == chip ? .black : .white.opacity(0.72))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background {
+                            if filter == chip {
+                                Capsule().fill(AppPalette.gradient)
+                            } else {
+                                Capsule().fill(Color.white.opacity(0.07))
+                            }
+                        }
+                        .overlay(Capsule().stroke(Color.white.opacity(filter == chip ? 0 : 0.1), lineWidth: 0.8))
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+            if !filteredResults.isEmpty {
+                Text("\(filteredResults.count)")
+                    .font(.system(size: 12, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.06), in: Capsule())
+            }
+        }
+    }
+
+    private var resultsBody: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let top = topHit {
+                Button { selectedEntry = top } label: { featuredSearchCard(top) }
+                    .buttonStyle(PremiumPressButtonStyle())
+            }
+            if !gridResults.isEmpty {
+                Text("MORE MATCHES")
+                    .font(.system(size: 11, weight: .heavy, design: .rounded))
+                    .tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.42))
+                    .padding(.top, 4)
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12)
+                    ],
+                    spacing: 14
+                ) {
+                    ForEach(gridResults) { entry in
+                        Button { selectedEntry = entry } label: { searchPoster(entry) }
+                            .buttonStyle(PremiumPressButtonStyle())
+                    }
+                }
+            }
+        }
+    }
+
+    private func featuredSearchCard(_ entry: UnifiedMediaEntry) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 24, style: .continuous).fill(AppTheme.card)
+            if let url = entry.posterURL ?? entry.details?.detailsBackdropURL {
+                KFImage(url)
+                    .resizable()
+                    .scaledToFill()
+            }
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.35), .black.opacity(0.92)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text("TOP MATCH")
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .tracking(1.4)
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(AppPalette.gradient, in: Capsule())
+                    if let rating = entry.details?.voteAverage, rating > 0 {
+                        Label(String(format: "%.1f", rating), systemImage: "star.fill")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                }
+                Text(entry.title)
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                HStack(spacing: 8) {
+                    Text(entry.details?.releaseDate.map { String($0.prefix(4)) } ?? "—")
+                    if case let .catalog(mediaType, _) = entry.source {
+                        Text("·")
+                        Text(mediaType == "tv" ? "Series" : "Movie")
+                    }
+                }
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.62))
+            }
+            .padding(16)
+        }
+        .frame(height: 210)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.9)
+        )
+        .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
+    }
+
+    private func searchPoster(_ entry: UnifiedMediaEntry) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.card)
+                if let url = entry.posterURL {
+                    KFImage(url).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "film.fill").font(.title2).foregroundStyle(.secondary)
+                }
+                LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
+                if let rating = entry.details?.voteAverage, rating > 0 {
+                    Text(String(format: "%.1f", rating))
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(6)
+                }
+            }
+            .aspectRatio(0.68, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+            )
+            Text(entry.title)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .frame(minHeight: 30, alignment: .topLeading)
+            Text(entry.details?.releaseDate.map { String($0.prefix(4)) } ?? "—")
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.42))
+        }
+    }
+
+    private var searchingState: some View {
+        VStack(spacing: 16) {
+            ProgressView().controlSize(.large).tint(AppPalette.accent)
+            Text("Scanning the catalogue…")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .frame(maxWidth: .infinity, minHeight: 220)
+    }
+
+    private var idleDiscoveryState: some View {
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(AppPalette.purple.opacity(0.18))
+                    .frame(width: 88, height: 88)
+                    .scaleEffect(appearPulse ? 1.08 : 0.94)
+                Image(systemName: "binoculars.fill")
+                    .font(.system(size: 32, weight: .semibold))
+                    .foregroundStyle(AppPalette.gradient)
+            }
+            Text("Start typing to explore")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+            Text("Results open in the same cinematic details view as your library — ready to add.")
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+        }
+        .frame(maxWidth: .infinity, minHeight: 240)
+        .padding(.top, 20)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "film.stack")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(AppPalette.gradient)
+            Text(message ?? "No results found")
+                .font(.system(size: 17, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+            Text("Try another title, year, or spelling.")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.48))
         }
         .frame(maxWidth: .infinity, minHeight: 210)
-        .padding(.horizontal, 28)
+        .padding(.top, 24)
     }
 
     private func search(_ rawQuery: String, immediately: Bool = false) {
@@ -755,8 +993,8 @@ struct HomeLibraryView: View {
     private let heroSlideTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
     private let heroRotationTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
-    private let posterWidth: CGFloat = 112
-    private let posterHeight: CGFloat = 168
+    private let posterWidth: CGFloat = 100
+    private let posterHeight: CGFloat = 150
     private static let sourceISO8601Formatter = ISO8601DateFormatter()
 
     private enum HomeSearchFilter: String, CaseIterable, Identifiable {
@@ -913,9 +1151,19 @@ struct HomeLibraryView: View {
                 }
             }
             .onReceive(heroSlideTimer) { _ in
+                // Only advance when the *next* slide already has poster + title
+                // fully prepared — never flash incomplete Hero content.
                 guard isActive, !isHomeSearchExpanded,
                       featuredItems.count > 1, pendingHeroID == nil else { return }
-                requestHeroIndex((heroIndex + 1) % featuredItems.count)
+                let next = (heroIndex + 1) % featuredItems.count
+                guard featuredItems.indices.contains(next),
+                      isHeroAssetPrepared(featuredItems[next]) else {
+                    // Kick off preparation for the next slide and wait for the
+                    // prepared callback to finish the transition.
+                    requestHeroIndex(next)
+                    return
+                }
+                requestHeroIndex(next)
             }
             .onReceive(heroRotationTimer) { date in
                 guard isActive else { return }
@@ -2206,7 +2454,14 @@ struct HomeLibraryView: View {
             resume: Array(resumed.sorted {
                 ($0.history?.watchedAt ?? .distantPast) > ($1.history?.watchedAt ?? .distantPast)
             }.prefix(12)),
-            recentlyAdded: items.map { ($0, sourceDate($0)) }.sorted { $0.1 > $1.1 }.map(\.0),
+            // Newest WebDAV/provider mtime first so offline-added titles from
+            // Search land at the top of Recently Added as soon as they scan in.
+            recentlyAdded: items.map { ($0, sourceDate($0)) }
+                .sorted { lhs, rhs in
+                    if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                    return lhs.0.title.localizedStandardCompare(rhs.0.title) == .orderedAscending
+                }
+                .map(\.0),
             watched: watched.sorted { $0.1 > $1.1 }.map(\.0),
             unwatched: unwatched,
             anime: anime,
@@ -2915,6 +3170,20 @@ private struct PirateBayResult: Decodable, Identifiable {
     var byteCount: Int64 { Int64(size) ?? 0 }
     var addedDate: Date { Date(timeIntervalSince1970: TimeInterval(added) ?? 0) }
     var magnet: String {
+        // Milkie list rows sometimes omit infoHash. Jackett-style clients then
+        // download the .torrent via the authenticated API URL instead.
+        if status == "milkie", infoHash.hasPrefix("milkie-file:") {
+            let torrentID = String(infoHash.dropFirst("milkie-file:".count))
+            if let url = MilkieClient.torrentDownloadURL(id: torrentID) {
+                return url.absoluteString
+            }
+        }
+        if status == "milkie", !infoHash.hasPrefix("milkie-file:"),
+           let url = MilkieClient.torrentDownloadURL(id: id) {
+            // Prefer the authenticated torrent file for private tracker adds —
+            // magnets alone often fail for Milkie without the site passkey.
+            return url.absoluteString
+        }
         var parts = URLComponents(); parts.scheme = "magnet"
         parts.queryItems = [
             URLQueryItem(name: "xt", value: "urn:btih:\(infoHash)"), URLQueryItem(name: "dn", value: name),
@@ -3062,10 +3331,17 @@ private final class PirateBayLatestModel: ObservableObject {
                     return ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast)
                 }
             }
-            let hydrated = await MilkieClient.hydrateInfoHashes(Array(ranked.prefix(40)), limit: 40)
+            let hydrated = await MilkieClient.hydrateInfoHashes(Array(ranked.prefix(50)), limit: 50)
             guard requestID == currentID else { return }
             items = hydrated.compactMap { torrent in
-                guard let hash = torrent.infoHash, !hash.isEmpty else { return nil }
+                // Keep rows even when the list endpoint omits infoHash — PikPak
+                // and TorBox accept Milkie's authenticated torrent-file URL.
+                let hash: String
+                if let value = torrent.infoHash, !value.isEmpty {
+                    hash = value
+                } else {
+                    hash = "milkie-file:\(torrent.id)"
+                }
                 return PirateBayResult(
                     id: torrent.id,
                     name: torrent.releaseName,
@@ -3344,69 +3620,58 @@ private let pirateBayImageRequestModifier = AnyModifier { request in
         isLoading = true
         defer { isLoading = false }
 
-        // Milkie hosts release screenshots on their CDN:
+        // Only the torrent's own Milkie CDN screenshots — not TMDB/Yandex search.
         // https://cdn.milkie.cc/t/{torrentId}/o_0.jpg … o_N.jpg
-        // Prefer these first so opening a Milkie file shows the same images
-        // as the website, even when TMDB has no match.
         let siteImages = await Self.fetchMilkieCDNImages(torrentID: item.id)
-        if !siteImages.isEmpty {
-            imageURLs = siteImages
-            return
-        }
-
-        if let tmdbID = item.tmdbID,
-           let details = await TMDBService.shared.details(mediaType: mediaType, tmdbID: tmdbID, fallbackTitle: item.name) {
-            imageURLs = [details.detailsBackdropURL, details.posterURL, details.detailsPosterURL].compactMap { $0 }
-            return
-        }
-        let cleaned = VideoTitleFormatter.title(from: item.name)
-        if let details = await TMDBService.shared.details(for: cleaned) {
-            imageURLs = [details.detailsBackdropURL, details.posterURL, details.detailsPosterURL].compactMap { $0 }
-        }
+        imageURLs = siteImages
     }
 
-    /// Probes sequential screenshot slots on Milkie's CDN until a gap is found.
+    /// Loads the release screenshots Milkie hosts for this torrent id
+    /// (`cdn.milkie.cc/t/{id}/o_0.jpg` …). Uses GET — many CDN edges reject HEAD.
     private static func fetchMilkieCDNImages(torrentID: String) async -> [URL] {
         let trimmed = torrentID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        var found: [URL] = []
-        // Site typically shows up to ~6–8 screenshots; stop after a few consecutive misses.
-        var consecutiveMisses = 0
-        for index in 0..<12 {
-            guard consecutiveMisses < 2 else { break }
-            guard let url = URL(string: "https://cdn.milkie.cc/t/\(trimmed)/o_\(index).jpg") else { continue }
-
-            var request = URLRequest(url: url)
-            request.httpMethod = "HEAD"
-            request.timeoutInterval = 8
-            request.setValue("https://milkie.cc/", forHTTPHeaderField: "Referer")
-            request.setValue(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1",
-                forHTTPHeaderField: "User-Agent"
-            )
-
-            do {
-                let (_, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
-                guard let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode) else {
-                    consecutiveMisses += 1
-                    continue
+        // Probe a modest window in parallel; keep only successful slots and
+        // preserve order so the gallery matches the site.
+        return await withTaskGroup(of: (Int, URL?).self) { group in
+            for index in 0..<10 {
+                group.addTask {
+                    guard let url = URL(string: "https://cdn.milkie.cc/t/\(trimmed)/o_\(index).jpg") else {
+                        return (index, nil)
+                    }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "GET"
+                    request.timeoutInterval = 10
+                    request.setValue("https://milkie.cc/", forHTTPHeaderField: "Referer")
+                    request.setValue(
+                        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1",
+                        forHTTPHeaderField: "User-Agent"
+                    )
+                    // Only need status / a few bytes to confirm the image exists.
+                    request.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+                    do {
+                        let (data, response) = try await HighPriorityNetworkManager.shared.responsiveData(for: request)
+                        guard let http = response as? HTTPURLResponse,
+                              (200..<300).contains(http.statusCode) else {
+                            return (index, nil)
+                        }
+                        let mime = (http.mimeType ?? "").lowercased()
+                        if mime.hasPrefix("image/") || data.count > 200 || http.statusCode == 206 {
+                            return (index, url)
+                        }
+                        return (index, nil)
+                    } catch {
+                        return (index, nil)
+                    }
                 }
-                let mime = (http.mimeType ?? "").lowercased()
-                let length = http.expectedContentLength
-                // Accept image responses; some CDNs omit mime on HEAD — still allow 200 with body size.
-                if mime.hasPrefix("image/") || length > 1_000 || (mime.isEmpty && length < 0) {
-                    found.append(url)
-                    consecutiveMisses = 0
-                } else {
-                    consecutiveMisses += 1
-                }
-            } catch {
-                consecutiveMisses += 1
             }
+            var byIndex: [Int: URL] = [:]
+            for await (index, url) in group {
+                if let url { byIndex[index] = url }
+            }
+            return byIndex.keys.sorted().compactMap { byIndex[$0] }
         }
-        return found
     }
 
     func load(id: String) async {

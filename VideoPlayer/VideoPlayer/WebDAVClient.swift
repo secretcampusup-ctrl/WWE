@@ -390,10 +390,18 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
     private var currentName = ""
     private var currentSize: Int64?
     private var currentType = ""
+    private var currentLastModified: Date?
     private var currentIsDir = false
     private var isFirstEntry = true
     private var basePath = ""
     private var serverPathPrefix = ""
+    private static let httpDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return f
+    }()
 
     func parse(data: Data, basePath: String, serverPathPrefix: String) -> [WebDAVFile] {
         self.basePath = basePath
@@ -422,6 +430,7 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
             currentName = ""
             currentSize = nil
             currentType = ""
+            currentLastModified = nil
             currentIsDir = false
         }
         if currentElement == "collection" {
@@ -441,6 +450,11 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
             currentSize = Int64(trimmed)
         case "getcontenttype":
             currentType += trimmed
+        case "getlastmodified":
+            // RFC 1123 HTTP-date from PROPFIND — drives Recently Added ordering.
+            if let date = Self.httpDateFormatter.date(from: trimmed) {
+                currentLastModified = date
+            }
         default:
             break
         }
@@ -493,7 +507,8 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
             path: path,
             isDirectory: currentIsDir,
             size: currentIsDir ? nil : currentSize,
-            contentType: currentType.isEmpty ? nil : currentType
+            contentType: currentType.isEmpty ? nil : currentType,
+            lastModified: currentLastModified
         )
         files.append(file)
     }

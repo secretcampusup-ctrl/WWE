@@ -76,10 +76,11 @@ struct TMDBTitleDetails: Identifiable, Codable {
         return URL(string: "https://image.tmdb.org/t/p/w780\(path)")
     }
     var heroPosterURL: URL? {
-        guard let path = noLanguagePosterPath else { return nil }
-        // Hero is a full-bleed phone portrait. w780 is the largest TMDB poster
-        // tier before `/original` (often 2–8 MB and 2000×3000+).
-        return URL(string: "https://image.tmdb.org/t/p/w780\(path)")
+        // Prefer language-free poster, then the standard details poster.
+        // `/original` keeps Hero sharp; PersistentHeroArtwork still downsamples
+        // to screen size so scrolling stays smooth.
+        guard let path = noLanguagePosterPath ?? detailsPosterPath ?? posterPath else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
     var logoURL: URL? {
         guard let logoPath else { return nil }
