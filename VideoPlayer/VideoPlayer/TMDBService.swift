@@ -628,28 +628,9 @@ actor TMDBService {
             }
         }
 
-        // Some TMDB season responses (and caches written from them) have a nil
-        // still_path even though the episode images endpoint contains artwork.
-        // Resolve only those missing cards, preserving the one-request fast path
-        // for normal seasons.
-        var results = cachedResults()
-        for episode in requestedNumbers.sorted() where results[episode]?.stillPath == nil {
-            let key = "\(seriesID)|s\(season)|e\(episode)"
-            guard let existing = results[episode] else { continue }
-            guard let payload: EpisodeImagesPayload = try? await request(
-                "/3/tv/\(seriesID)/season/\(season)/episode/\(episode)/images",
-                query: [:]
-            ), let stillPath = payload.stills.first?.filePath else { continue }
-            let repaired = TMDBEpisodeDetails(
-                name: existing.name,
-                overview: existing.overview,
-                stillPath: stillPath
-            )
-            episodeCache[key] = repaired
-            results[episode] = repaired
-            cacheChanged = true
-        }
-
+        // Prefer the single season payload. Per-episode /images calls were
+        // serial and made library episode rows feel permanently stuck loading.
+        let results = cachedResults()
         if cacheChanged { persistCache() }
         return results
     }

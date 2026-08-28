@@ -976,13 +976,12 @@ struct UnifiedContentView: View {
             }
             .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
             .onReceive(NotificationCenter.default.publisher(for: .webDAVLibraryNeedsRefresh)) { _ in
-                // A Discover/Home play just finished offline-adding a magnet into
-                // PikPak. Rescan WebDAV so the new file is classified by TMDB
-                // (movie vs show) and appears in the library.
-                Task { await model.load(vm: vm, force: true) }
+                // Soft rescan only — never force-wipe posters/metadata the user
+                // already waited for. Pull-to-refresh remains the explicit path.
+                Task { await model.load(vm: vm, force: false) }
             }
             .onReceive(NotificationCenter.default.publisher(for: .librarySourcesDidChange)) { _ in
-                Task { await model.load(vm: vm, force: true) }
+                Task { await model.load(vm: vm, force: false) }
             }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
@@ -1196,7 +1195,12 @@ struct UnifiedPosterArtwork: View {
                     .foregroundStyle(AppPalette.gradient)
             }
         }
-        .task(id: "\(section.rawValue)|\(manualCacheKey)") {
+        .task(id: "\(entry.id)|\(manualCacheKey)") {
+            // Once we committed to a poster, never re-scan on grid recycle/scroll.
+            if cachedImage != nil {
+                hasCheckedCache = true
+                return
+            }
             if let stored = await cachedPoster() {
                 cachedImage = stored
                 hasCheckedCache = true
@@ -1477,7 +1481,14 @@ struct UnifiedMediaDetailsHost: View {
                 }
             }
         }
-        .fullScreenCover(isPresented: $showPlayer) {
+        .fullScreenCover(isPresented: $showPlayer, onDismiss: {
+            // End playback only when the cover itself closes — never when the
+            // cover body swaps from preparation → player (that used to wipe
+            // nowPlayingURL and leave a blank dismiss).
+            automaticPikPakTransferID = nil
+            pikPakPreparationError = nil
+            vm.endPlaybackPresentation()
+        }) {
             if shouldShowPikPakPreparationPlayer {
                 PikPakPreparationPlayerScreen(
                     title: currentDetailsItem.title,
@@ -1504,7 +1515,12 @@ struct UnifiedMediaDetailsHost: View {
             onDismiss: {
                 guard presentPikPakPlayerAfterChooserDismiss else { return }
                 presentPikPakPlayerAfterChooserDismiss = false
-                showPlayer = true
+                // Defer one run-loop so the sheet fully tears down before the
+                // player fullScreenCover presents (SwiftUI drops concurrent covers).
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 80_000_000)
+                    showPlayer = true
+                }
             }
         ) {
             PikPakQualityChoiceSheet(
@@ -1528,7 +1544,10 @@ struct UnifiedMediaDetailsHost: View {
                 if vm.nowPlayingURL != nil || vm.onlinePlaybackTransfer != nil {
                     _ = vm.ensurePreparedOnlinePlaybackIsActive()
                 }
-                showPlayer = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 80_000_000)
+                    showPlayer = true
+                }
             }
         ) {
             ExperimentalOnlineSourcesView(
@@ -1650,7 +1669,11 @@ struct UnifiedMediaDetailsHost: View {
         switch source {
         case let .webDAV(server, file):
             Task { @MainActor in
-                guard await vm.preparePlayback(file: file, server: server) else { return }
+                let ok = await vm.preparePlayback(file: file, server: server)
+                guard ok, vm.nowPlayingURL != nil else {
+                    DiagnosticLogger.log("[Play] WebDAV prepare failed: \(vm.errorMessage ?? "unknown")")
+                    return
+                }
                 showPlayer = true
             }
             return
@@ -1659,9 +1682,12 @@ struct UnifiedMediaDetailsHost: View {
             if let saved = vm.saveDirectLink(url.absoluteString, resolvedStream: url, source: .offcloud, title: file.name) {
                 vm.playSavedLink(saved)
             } else { _ = vm.playOnlineURL(url.absoluteString) }
+            showPlayer = true
+            return
         case let .torBox(torrent, file):
             Task { @MainActor in
-                guard await vm.playTorBoxFile(torrentId: torrent.id, file: file) else { return }
+                guard await vm.playTorBoxFile(torrentId: torrent.id, file: file),
+                      vm.nowPlayingURL != nil else { return }
                 showPlayer = true
             }
             return
@@ -1679,7 +1705,6 @@ struct UnifiedMediaDetailsHost: View {
             }
             return
         }
-        showPlayer = true
     }
 
     /// Find three useful resolution choices before handing a magnet to PikPak.
@@ -1758,15 +1783,24 @@ struct UnifiedMediaDetailsHost: View {
         case .preparing, .downloading:
             break
         case .ready:
-            automaticPikPakTransferID = nil
+            // Mount the stream first while the preparation cover is still up.
+            // Clearing the transfer id first caused ResolvedPlayerScreen to
+            // launch with a nil URL and immediately wipe playback state.
             pikPakPreparationError = nil
-            guard vm.playPreparedOnlineSource() else {
+            guard vm.playPreparedOnlineSource(), vm.nowPlayingURL != nil else {
                 pikPakPreparationError = "The stream was prepared, but the player did not receive its URL."
                 return
+            }
+            automaticPikPakTransferID = nil
+            if !showPlayer {
+                showPlayer = true
             }
         case .failed:
             automaticPikPakTransferID = nil
             pikPakPreparationError = transfer.message
+            if !showPlayer {
+                showPlayer = true
+            }
         }
     }
 

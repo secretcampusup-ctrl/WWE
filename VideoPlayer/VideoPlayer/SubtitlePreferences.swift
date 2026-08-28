@@ -59,17 +59,30 @@ struct SubtitleLanguageOption: Identifiable, Hashable {
 
 enum SubtitlePreferences {
     static var preferredLanguageCode: String {
-        let value = UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.preferredLanguage) ?? "AR"
-        return SubtitleLanguageOption.supported.contains(where: { $0.code == value }) ? value : "AR"
+        let value = UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.preferredLanguage)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased() ?? ""
+        if SubtitleLanguageOption.supported.contains(where: { $0.code == value }) {
+            return value
+        }
+        // No forced default language — fall back to English only when unset.
+        return "EN"
     }
 
     static var searchLanguageCodes: [String] {
-        let stored = UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.searchLanguages) ?? "AR"
+        let stored = UserDefaults.standard.string(forKey: SubtitlePreferenceKeys.searchLanguages) ?? ""
         let allowed = Set(SubtitleLanguageOption.supported.map(\.code))
-        var values = stored.split(separator: ",").map(String.init).filter { allowed.contains($0) }
+        var values = stored.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+            .filter { allowed.contains($0) }
         let preferred = preferredLanguageCode
-        values.removeAll(where: { $0 == preferred })
-        values.insert(preferred, at: 0)
+        if !values.contains(preferred) {
+            values.insert(preferred, at: 0)
+        } else {
+            values.removeAll(where: { $0 == preferred })
+            values.insert(preferred, at: 0)
+        }
+        if values.isEmpty { values = [preferred] }
         return values
     }
 
@@ -106,8 +119,8 @@ struct SubtitleSettingsView: View {
     @AppStorage(SubtitlePreferenceKeys.shadow) private var subtitleShadow = true
     @AppStorage(SubtitlePreferenceKeys.background) private var subtitleBackground = true
     @AppStorage(SubtitlePreferenceKeys.font) private var subtitleFontRaw = PlayerSubtitleFont.rounded.rawValue
-    @AppStorage(SubtitlePreferenceKeys.preferredLanguage) private var preferredLanguage = "AR"
-    @AppStorage(SubtitlePreferenceKeys.searchLanguages) private var searchLanguages = "AR"
+    @AppStorage(SubtitlePreferenceKeys.preferredLanguage) private var preferredLanguage = "EN"
+    @AppStorage(SubtitlePreferenceKeys.searchLanguages) private var searchLanguages = "EN"
     @AppStorage(SubtitlePreferenceKeys.automaticDownload) private var automaticDownload = false
 
     private let sizes: [SizePreset] = [
@@ -170,30 +183,21 @@ struct SubtitleSettingsView: View {
 
     private var languageCard: some View {
         card("Language & Search", icon: "captions.bubble.fill") {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Preferred Language").font(.system(size: 14, weight: .semibold))
-                    Text("Tried first for automatic subtitles").font(.caption).foregroundStyle(.white.opacity(0.45))
-                }
-                Spacer()
-                Menu {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Preferred Language").font(.system(size: 14, weight: .semibold))
+                Text("Used first for automatic download and embedded tracks. Tap any language.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.45))
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 9) {
                     ForEach(SubtitleLanguageOption.supported) { language in
-                        Button(language.title) {
-                            preferredLanguage = language.code
-                            addSearchLanguage(language.code)
-                        }
+                        preferredLanguageButton(language)
                     }
-                } label: {
-                    Text(SubtitleLanguageOption.supported.first(where: { $0.code == preferredLanguage })?.title ?? "Arabic")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(AppPalette.accent)
                 }
             }
 
             Divider().overlay(Color.white.opacity(0.08))
             Text("Search Languages")
                 .font(.system(size: 14, weight: .semibold))
-            Text("Select one or more languages. Your preferred language always stays enabled.")
+            Text("Choose which languages appear in subtitle search. Preferred is included automatically.")
                 .font(.caption).foregroundStyle(.white.opacity(0.45))
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 9) {
                 ForEach(SubtitleLanguageOption.supported) { language in
@@ -287,10 +291,37 @@ struct SubtitleSettingsView: View {
         .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.1)))
     }
 
+    private func preferredLanguageButton(_ language: SubtitleLanguageOption) -> some View {
+        let selected = preferredLanguage == language.code
+        return Button {
+            preferredLanguage = language.code
+            var values = selectedSearchLanguages
+            values.insert(language.code)
+            searchLanguages = SubtitleLanguageOption.supported.map(\.code).filter(values.contains).joined(separator: ",")
+        } label: {
+            HStack {
+                Text(language.title)
+                Spacer()
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? AppPalette.accent : Color.white.opacity(0.25))
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 11).frame(height: 42)
+            .background(Color.white.opacity(selected ? 0.14 : 0.04), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(selected ? AppPalette.accent.opacity(0.55) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     private func languageButton(_ language: SubtitleLanguageOption) -> some View {
         let selected = selectedSearchLanguages.contains(language.code) || language.code == preferredLanguage
         return Button {
-            guard language.code != preferredLanguage else { return }
+            // Preferred language stays in the search set; other languages toggle freely.
+            if language.code == preferredLanguage { return }
             var values = selectedSearchLanguages
             if selected { values.remove(language.code) } else { values.insert(language.code) }
             values.insert(preferredLanguage)
@@ -308,12 +339,6 @@ struct SubtitleSettingsView: View {
             .background(Color.white.opacity(selected ? 0.1 : 0.04), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-    }
-
-    private func addSearchLanguage(_ code: String) {
-        var values = selectedSearchLanguages
-        values.insert(code)
-        searchLanguages = SubtitleLanguageOption.supported.map(\.code).filter(values.contains).joined(separator: ",")
     }
 
     private func card<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {

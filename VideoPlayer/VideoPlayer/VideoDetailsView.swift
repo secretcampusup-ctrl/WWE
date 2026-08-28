@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import UIKit
 import Combine
+import Kingfisher
 
 struct VideoEpisodeItem: Identifiable {
     let id: String
@@ -432,10 +433,30 @@ struct VideoDetailsView: View {
                     )
                 }
             }
-            // Older snapshots may only contain a language-specific poster.
-            // Refresh those records before drawing any Details artwork.
-            if tmdbDetails?.noLanguagePosterPath == nil {
-                let loadedDetails = await TMDBService.shared.details(for: item.title)
+            // Library scan stores a lightweight search hit (poster only).
+            // Details needs full record (cast + stable series id for episode stills).
+            let needsFullDetails = tmdbDetails == nil
+                || tmdbDetails?.noLanguagePosterPath == nil
+                || (tmdbDetails?.isSeries == true && tmdbDetails?.cast.isEmpty == true)
+                || (!item.relatedEpisodes.isEmpty && tmdbDetails?.cast.isEmpty == true)
+            if needsFullDetails {
+                let preferred = (!item.relatedEpisodes.isEmpty || tmdbDetails?.isSeries == true) ? "tv" : nil
+                let loadedDetails: TMDBTitleDetails?
+                if let existing = tmdbDetails, existing.id > 0 {
+                    loadedDetails = await TMDBService.shared.details(
+                        mediaType: existing.mediaType,
+                        tmdbID: existing.id,
+                        fallbackTitle: existing.title
+                    ) ?? await TMDBService.shared.detailsOriginalFirst(
+                        for: item.title,
+                        preferredMediaType: preferred
+                    )
+                } else {
+                    loadedDetails = await TMDBService.shared.detailsOriginalFirst(
+                        for: item.title,
+                        preferredMediaType: preferred
+                    )
+                }
                 guard !Task.isCancelled, requestedItemID == item.id else { return }
                 if let loadedDetails { tmdbDetails = loadedDetails }
             }
@@ -1931,13 +1952,17 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
 
     @MainActor
     func load(seriesID: Int, season: Int, episodeNumbers: [Int]) async {
+        guard seriesID > 0 else { return }
         let seasonKey = "\(seriesID)|s\(season)"
-        guard !loadedSeasons.contains(seasonKey), !loadingSeasons.contains(seasonKey) else { return }
+        // Allow a second pass if the first returned names but no stills.
+        let needsStills = episodeNumbers.contains {
+            imageURL(seriesID: seriesID, season: season, episode: $0) == nil
+        }
+        if loadedSeasons.contains(seasonKey), !needsStills { return }
+        guard !loadingSeasons.contains(seasonKey) else { return }
         loadingSeasons.insert(seasonKey)
 
         var details: [Int: TMDBEpisodeDetails] = [:]
-        // A failed metadata request used to permanently turn the spinner into an
-        // empty placeholder. Retry short transient failures while Details is open.
         for attempt in 0..<3 {
             details = await TMDBService.shared.seasonEpisodeDetails(
                 seriesID: seriesID,
@@ -1946,7 +1971,7 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
             )
             if !details.isEmpty || Task.isCancelled { break }
             if attempt < 2 {
-                try? await Task.sleep(nanoseconds: UInt64(450_000_000 * (attempt + 1)))
+                try? await Task.sleep(nanoseconds: UInt64(350_000_000 * (attempt + 1)))
             }
         }
         guard !Task.isCancelled else {
@@ -1957,14 +1982,14 @@ private final class SeriesEpisodeArtworkModel: ObservableObject {
         var updatedNames = episodeNames
         for (episode, value) in details {
             let key = episodeKey(seriesID: seriesID, season: season, episode: episode)
-            updatedURLs[key] = value.imageURL
+            if let url = value.imageURL {
+                updatedURLs[key] = url
+            }
             if !value.name.isEmpty { updatedNames[key] = value.name }
         }
         imageURLs = updatedURLs
         episodeNames = updatedNames
         loadingSeasons.remove(seasonKey)
-        // Only finish the visual loading state when TMDB returned episode
-        // records. A total network failure remains retryable on the next task.
         if !details.isEmpty { loadedSeasons.insert(seasonKey) }
     }
 
@@ -1977,19 +2002,25 @@ private struct CachedTMDBImage: View {
     let url: URL?
     let contentMode: ContentMode
     var placeholderSystemName: String? = nil
-    @State private var image: UIImage?
-
-    init(url: URL?, contentMode: ContentMode, placeholderSystemName: String? = nil) {
-        self.url = url
-        self.contentMode = contentMode
-        self.placeholderSystemName = placeholderSystemName
-        _image = State(initialValue: nil)
-    }
 
     var body: some View {
         Group {
-            if let image {
-                Image(uiImage: image)
+            if let url {
+                KFImage(url)
+                    .placeholder {
+                        if let placeholderSystemName {
+                            Image(systemName: placeholderSystemName)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(18)
+                                .foregroundStyle(.white.opacity(0.38))
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 360, height: 200)))
+                    .scaleFactor(UIScreen.main.scale)
+                    .fade(duration: 0.12)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
             } else if let placeholderSystemName {
@@ -2001,19 +2032,6 @@ private struct CachedTMDBImage: View {
             } else {
                 Color.clear
             }
-        }
-        .task(id: url) {
-            guard image == nil, let url else { return }
-            let key = "tmdb-remote|\(url.absoluteString)"
-            if let cached = await VideoThumbnailLoader.cachedImageAsync(forStableKey: key) {
-                image = cached
-                return
-            }
-            guard let (data, _) = try? await HighPriorityNetworkManager.shared.responsiveData(from: url),
-                  let loaded = UIImage(data: data),
-                  !Task.isCancelled else { return }
-            VideoThumbnailLoader.cacheImageInBackground(loaded, forStableKey: key)
-            image = loaded
         }
     }
 }
@@ -2241,39 +2259,39 @@ struct ResolvedPlayerScreen: View {
         let headers = hasLivePlayback ? vm.nowPlayingHeaders : launchHeaders
 
         Group {
-        if let url = playbackURL, let file = playbackFile {
-            let pikPakFileID = vm.pikPakFileID(for: linkID, playbackURL: url)
-            RoutedVideoPlayerView(
-                url: url,
-                title: file.name,
-                subtitleMediaContext: subtitleContext,
-                resumeAt: resumeAt,
-                linkId: linkID,
-                httpHeaders: headers,
-                episodeOptions: episodeOptions,
-                onSelectEpisode: onSelectEpisode,
-                pikPakFileID: pikPakFileID,
-                onPikPakQualitySelected: { quality, resumeAt in
-                    vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
-                }
-            ) { seconds, duration, width, height in
-                vm.updatePlaybackProgress(
-                    seconds: seconds,
-                    duration: duration,
-                    width: width,
-                    height: height,
+            if let url = playbackURL, let file = playbackFile {
+                let pikPakFileID = vm.pikPakFileID(for: linkID, playbackURL: url)
+                RoutedVideoPlayerView(
+                    url: url,
+                    title: file.name,
+                    subtitleMediaContext: subtitleContext,
+                    resumeAt: resumeAt,
                     linkId: linkID,
-                    streamURL: url
-                )
+                    httpHeaders: headers,
+                    episodeOptions: episodeOptions,
+                    onSelectEpisode: onSelectEpisode,
+                    pikPakFileID: pikPakFileID,
+                    onPikPakQualitySelected: { quality, resumeAt in
+                        vm.switchPikPakQuality(to: quality.url, resumeAt: resumeAt)
+                    }
+                ) { seconds, duration, width, height in
+                    vm.updatePlaybackProgress(
+                        seconds: seconds,
+                        duration: duration,
+                        width: width,
+                        height: height,
+                        linkId: linkID,
+                        streamURL: url
+                    )
+                }
+                .id(url.absoluteString)
+            } else {
+                ImmediatePlayerLoadingView()
             }
-            .id(url.absoluteString)
-        } else {
-            ImmediatePlayerLoadingView()
         }
-        }
-        .onDisappear {
-            vm.endPlaybackPresentation()
-        }
+        // Do NOT call endPlaybackPresentation on disappear — content swaps
+        // inside the same fullScreenCover (preparation → player) used to wipe
+        // nowPlayingURL mid-transition and leave a blank dismiss.
     }
 }
 

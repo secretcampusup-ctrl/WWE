@@ -1809,7 +1809,9 @@ class AppViewModel: ObservableObject {
         // PikPak / TorBox / Offcloud often accept the magnet before the file is
         // visible. Retry at increasing intervals so the item appears as soon as
         // the provider surfaces it without the user pulling to refresh.
-        let delays: [TimeInterval] = [2, 5, 12, 25, 45]
+        // Few soft probes only — constant rescans were wiping posters and
+        // making Media feel like it reloads on every scroll.
+        let delays: [TimeInterval] = [4, 18]
         for delay in delays {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
