@@ -499,27 +499,82 @@ final class UnifiedContentModel: ObservableObject {
             return
         }
 
-        metadataEnrichmentTask = Task(priority: .utility) { [weak self] in
+        metadataEnrichmentTask = Task(priority: .userInitiated) { [weak self] in
             guard let self else { return }
             var metadataByQuery = initialMetadata
             var pending = Set(representatives.keys)
             var completed = previouslyScannedQueries
-            let work = representatives.sorted { $0.key < $1.key }
-            var changesSincePublish = 0
-
-            for (key, entry) in work {
-                guard !Task.isCancelled, self.metadataGeneration == generation else { return }
-                let details = await TMDBService.shared.detailsOriginalFirst(
-                    for: self.metadataLookupTitle(for: entry),
-                    preferredMediaType: self.preferredMediaType(for: entry)
+            // Skip titles already resolved so a refresh only hits unknowns.
+            let work = representatives
+                .filter { !previouslyScannedQueries.contains($0.key) || initialMetadata[$0.key] == nil }
+                .sorted { $0.key < $1.key }
+            if work.isEmpty {
+                pending = []
+                completed.formUnion(representatives.keys)
+                await self.publishClassifiedLibrary(
+                    raw: raw,
+                    metadataByQuery: metadataByQuery,
+                    previousEntriesByID: previousEntriesByID,
+                    pendingMetadataQueries: pending,
+                    completedMetadataQueries: completed,
+                    metadataSignature: metadataSignature,
+                    previousMetadataSignature: previousMetadataSignature
                 )
                 guard !Task.isCancelled, self.metadataGeneration == generation else { return }
-                if let details { metadataByQuery[key] = details }
-                pending.remove(key)
-                completed.insert(key)
-                changesSincePublish += 1
+                self.persistSnapshot()
+                self.metadataEnrichmentTask = nil
+                _ = self.startEpisodeEnrichmentIfNeeded()
+                self.startDetailsArtworkPrefetchIfNeeded()
+                return
+            }
 
-                if changesSincePublish >= 24 {
+            // Search feels instant because TMDB search returns posters in one
+            // response. Library files need one lookup each — run a small pool
+            // of concurrent requests so Home/Media fill in quickly without
+            // hammering the API.
+            let concurrency = min(8, max(2, work.count))
+            var cursor = 0
+            var changesSincePublish = 0
+
+            while cursor < work.count {
+                guard !Task.isCancelled, self.metadataGeneration == generation else { return }
+                let end = min(cursor + concurrency, work.count)
+                let batch = Array(work[cursor..<end])
+                cursor = end
+
+                let resolved: [(String, TMDBTitleDetails?)] = await withTaskGroup(
+                    of: (String, TMDBTitleDetails?).self,
+                    returning: [(String, TMDBTitleDetails?)].self
+                ) { group in
+                    for (key, entry) in batch {
+                        let title = self.metadataLookupTitle(for: entry)
+                        let mediaType = self.preferredMediaType(for: entry)
+                        group.addTask {
+                            let details = await TMDBService.shared.detailsOriginalFirst(
+                                for: title,
+                                preferredMediaType: mediaType
+                            )
+                            return (key, details)
+                        }
+                    }
+                    var collected: [(String, TMDBTitleDetails?)] = []
+                    for await item in group {
+                        collected.append(item)
+                    }
+                    return collected
+                }
+
+                guard !Task.isCancelled, self.metadataGeneration == generation else { return }
+                for (key, details) in resolved {
+                    if let details { metadataByQuery[key] = details }
+                    pending.remove(key)
+                    completed.insert(key)
+                    changesSincePublish += 1
+                }
+
+                // Publish often so posters appear progressively instead of after
+                // the entire library finishes.
+                if changesSincePublish >= 8 || cursor >= work.count {
                     await self.publishClassifiedLibrary(
                         raw: raw,
                         metadataByQuery: metadataByQuery,
@@ -533,8 +588,6 @@ final class UnifiedContentModel: ObservableObject {
                     self.persistSnapshot()
                     changesSincePublish = 0
                 }
-                // Be gentle on the connection without holding the refresh UI.
-                try? await Task.sleep(nanoseconds: 120_000_000)
             }
 
             guard !Task.isCancelled, self.metadataGeneration == generation else { return }
@@ -1772,7 +1825,10 @@ private struct OnlineLibraryAddSheet: View {
     @State private var isSearching = false
     @State private var isAdding = false
     @State private var status: String?
+    @State private var showQualitySheet = false
+    @State private var showProgressModal = false
     @State private var addedSuccess = false
+    @State private var activeQualityLabel = ""
 
     private var availableDestinations: [OnlineLibraryDestination] {
         OnlineLibraryDestination.enabledConfigured
@@ -1782,102 +1838,96 @@ private struct OnlineLibraryAddSheet: View {
         VideoTitleFormatter.title(from: episode?.title ?? entry.title)
     }
 
+    private var yearLabel: String {
+        entry.details?.releaseDate.map { String($0.prefix(4)) } ?? "—"
+    }
+
     var body: some View {
-        NavigationStack {
-            ZStack {
-                sheetAtmosphere
+        ZStack {
+            AppTheme.bg.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                headerBar
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
-                        titleCard
-                        libraryContent
+                    VStack(alignment: .leading, spacing: 28) {
+                        movieCard
+                        destinationSection
                     }
-                    .padding(18)
-                    .padding(.bottom, 40)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 120)
                 }
                 .scrollIndicators(.hidden)
-
-                if addedSuccess {
-                    successOverlay
-                }
             }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    AppAnimatedBackButton(size: 36) { dismiss() }
-                }
-                ToolbarItem(placement: .principal) {
-                    Text(destination == nil ? "Add to Library" : (destination?.title ?? "Quality"))
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
+
+            if showQualitySheet {
+                qualitySheetScrim
+                qualityBottomSheet
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(20)
+            }
+
+            if showProgressModal {
+                progressModal
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                    .zIndex(30)
             }
         }
         .preferredColorScheme(.dark)
+        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: showQualitySheet)
+        .animation(.spring(response: 0.38, dampingFraction: 0.84), value: showProgressModal)
+        .animation(.spring(response: 0.38, dampingFraction: 0.84), value: addedSuccess)
     }
 
-    private var sheetAtmosphere: some View {
+    private var headerBar: some View {
         ZStack {
-            AppTheme.bg.ignoresSafeArea()
-            RadialGradient(
-                colors: [AppPalette.purple.opacity(0.22), .clear],
-                center: .topTrailing,
-                startRadius: 20,
-                endRadius: 380
-            )
-            .ignoresSafeArea()
-            if let url = entry.posterURL {
-                KFImage(url)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 280)
-                    .blur(radius: 42)
-                    .opacity(0.22)
-                    .mask(
-                        LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
-                    )
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
+            Text("Add to Library")
+                .font(.system(size: 17, weight: .heavy, design: .rounded))
+                .foregroundStyle(.white)
+            HStack {
+                AppAnimatedBackButton(size: 36) { dismiss() }
+                Spacer()
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
     }
 
-    private var titleCard: some View {
-        HStack(spacing: 14) {
+    private var movieCard: some View {
+        HStack(spacing: 16) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.card)
+                RoundedRectangle(cornerRadius: 15, style: .continuous).fill(AppTheme.card)
                 if let url = entry.posterURL {
                     KFImage(url).resizable().scaledToFill()
                 } else {
                     Image(systemName: "film.fill").foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 72, height: 108)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .frame(width: 78, height: 118)
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 0.9)
             )
-            .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+            .shadow(color: .black.opacity(0.45), radius: 14, y: 8)
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text("SEND TO LIBRARY")
                     .font(.system(size: 10, weight: .heavy, design: .rounded))
-                    .tracking(1.6)
-                    .foregroundStyle(AppPalette.accent)
+                    .tracking(1.8)
+                    .foregroundStyle(Color(red: 0.66, green: 0.55, blue: 0.98))
                 Text(displayTitle)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .font(.system(size: 21, weight: .heavy, design: .rounded))
                     .foregroundStyle(.white)
                     .lineLimit(3)
-                if let year = entry.details?.releaseDate.map({ String($0.prefix(4)) }) {
-                    Text(year)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                if episode != nil {
-                    Text("S\(episode!.season) · E\(episode!.episode)")
+                Text(yearLabel)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.5))
+                if let episode {
+                    Text("S\(episode.season) · E\(episode.episode)")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(.white.opacity(0.7))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(Color.white.opacity(0.08), in: Capsule())
@@ -1885,247 +1935,309 @@ private struct OnlineLibraryAddSheet: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(14)
+        .padding(15)
         .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.white.opacity(0.06))
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.05))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 0.8)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 0.9)
                 )
         )
+        .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
     }
 
-    @ViewBuilder private var libraryContent: some View {
-        if destination == nil {
-            destinationList
-        } else if isSearching {
-            searchingCard
-        } else if let status, sources.isEmpty {
-            emptyQualitiesCard(status)
-        } else {
-            qualityList
-        }
-    }
+    private var destinationSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Rectangle().fill(Color.white.opacity(0.1)).frame(height: 1)
+                Text("WHERE SHOULD IT LIVE?")
+                    .font(.system(size: 11, weight: .heavy, design: .rounded))
+                    .tracking(1.6)
+                    .foregroundStyle(.white.opacity(0.42))
+                    .fixedSize()
+                Rectangle().fill(Color.white.opacity(0.1)).frame(height: 1)
+            }
 
-    private var destinationList: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("WHERE SHOULD IT LIVE?")
-                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                .tracking(1.4)
-                .foregroundStyle(.white.opacity(0.42))
-            ForEach(Array(availableDestinations.enumerated()), id: \.element.id) { index, service in
+            ForEach(availableDestinations) { service in
                 Button {
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) {
-                        destination = service
-                    }
-                    loadSources()
+                    selectDestination(service)
                 } label: {
-                    destinationRow(service, index: index)
+                    providerCard(service)
                 }
                 .buttonStyle(PremiumPressButtonStyle())
             }
         }
     }
 
-    private func destinationRow(_ service: OnlineLibraryDestination, index: Int) -> some View {
+    private func providerCard(_ service: OnlineLibraryDestination) -> some View {
         HStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(AppPalette.gradient)
-                    .frame(width: 52, height: 52)
+                    .fill(providerGradient(service))
+                    .frame(width: 54, height: 54)
                 Image(systemName: service.icon)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(.white)
             }
-            .shadow(color: AppPalette.accent.opacity(0.35), radius: 10, y: 4)
+            .shadow(color: .black.opacity(0.4), radius: 10, y: 5)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(service.title)
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                Text("Pick a quality · offline add · Home refresh")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.45))
-            }
+            Text(service.title)
+                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                .foregroundStyle(.white)
+
             Spacer()
+
             Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: 14, weight: .bold))
                 .foregroundStyle(.white.opacity(0.35))
         }
-        .padding(14)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
         .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color.white.opacity(0.055 + Double(index) * 0.008))
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.04))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.14), Color.white.opacity(0.04)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.9
-                        )
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 0.9)
                 )
         )
     }
 
-    private var qualityList: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
+    private func providerGradient(_ service: OnlineLibraryDestination) -> LinearGradient {
+        switch service {
+        case .pikpak:
+            return LinearGradient(
+                colors: [Color(red: 0.54, green: 0.17, blue: 0.89), Color(red: 0.29, green: 0.0, blue: 0.51)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        case .realDebrid:
+            return LinearGradient(
+                colors: [Color(red: 0.0, green: 0.71, blue: 0.86), Color(red: 0.0, green: 0.51, blue: 0.69)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        case .offcloud:
+            return LinearGradient(
+                colors: [Color(red: 0.2, green: 0.6, blue: 1.0), Color(red: 0.1, green: 0.35, blue: 0.75)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        case .torBox:
+            return LinearGradient(
+                colors: [Color(red: 1.0, green: 0.55, blue: 0.2), Color(red: 0.85, green: 0.3, blue: 0.1)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    // MARK: - Quality bottom sheet
+
+    private var qualitySheetScrim: some View {
+        Color.black.opacity(0.55)
+            .ignoresSafeArea()
+            .onTapGesture {
+                withAnimation { showQualitySheet = false; destination = nil }
+            }
+    }
+
+    private var qualityBottomSheet: some View {
+        VStack {
+            Spacer(minLength: 0)
+            VStack(spacing: 0) {
+                Capsule()
+                    .fill(Color.white.opacity(0.28))
+                    .frame(width: 48, height: 5)
+                    .padding(.top, 12)
+                    .padding(.bottom, 18)
+
+                Text(isSearching ? "Finding qualities…" : "Select Quality")
+                    .font(.system(size: 17, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.bottom, 18)
+
+                if isSearching {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(AppPalette.accent)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 36)
+                } else if bestQualityChoices.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "video.slash")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(status ?? "No qualities found")
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 28)
+                    .padding(.horizontal, 20)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(bestQualityChoices) { source in
+                            Button { add(source) } label: {
+                                qualityOptionRow(source)
+                            }
+                            .buttonStyle(PremiumPressButtonStyle())
+                            .disabled(isAdding)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                }
+
                 Button {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                        destination = nil; sources = []; status = nil
+                    withAnimation {
+                        showQualitySheet = false
+                        destination = nil
+                        sources = []
+                        status = nil
                     }
                 } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 12, weight: .bold))
-                        Text(destination?.title ?? "Back")
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                    }
-                    .foregroundStyle(AppPalette.accent)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(AppPalette.accent.opacity(0.12), in: Capsule())
+                    Text("Cancel")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
                 }
                 .buttonStyle(.plain)
-                Spacer()
-                Text("BEST QUALITIES")
-                    .font(.system(size: 10, weight: .heavy, design: .rounded))
-                    .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.4))
+                .padding(.bottom, 18)
             }
-            ForEach(bestQualityChoices) { source in qualityRow(source) }
-            if let status, !status.isEmpty, !sources.isEmpty {
-                Text(status)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.orange.opacity(0.9))
-                    .padding(.top, 4)
-            }
-        }
-    }
-
-    private func qualityRow(_ source: OnlineTorrentSource) -> some View {
-        Button { add(source) } label: {
-            HStack(spacing: 12) {
-                Text(source.quality.label)
-                    .font(.system(size: 15, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.black)
-                    .frame(width: 70, height: 52)
-                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(color: AppPalette.accent.opacity(0.3), radius: 8, y: 3)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(source.name)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                    HStack(spacing: 8) {
-                        Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
-                            .foregroundStyle(.green.opacity(0.9))
-                        Text(source.sizeLabel)
-                            .foregroundStyle(.white.opacity(0.45))
-                    }
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                }
-                Spacer(minLength: 0)
-                if isAdding {
-                    ProgressView().tint(.white)
-                } else {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Color.white.opacity(0.1), in: Circle())
-                }
-            }
-            .padding(12)
+            .frame(maxWidth: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(Color(red: 0.10, green: 0.10, blue: 0.14))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(Color.white.opacity(0.09), lineWidth: 0.8)
+                        RoundedRectangle(cornerRadius: 30, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 0.9)
                     )
             )
+            .shadow(color: .black.opacity(0.55), radius: 28, y: -8)
         }
-        .buttonStyle(PremiumPressButtonStyle())
-        .disabled(isAdding)
+        .ignoresSafeArea(edges: .bottom)
     }
 
-    private var searchingCard: some View {
-        VStack(spacing: 16) {
-            ProgressView().controlSize(.large).tint(AppPalette.accent)
-            Text("Finding the best qualities…")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.72))
-            Text("Comparing seeders across your search providers")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .frame(maxWidth: .infinity, minHeight: 220)
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color.white.opacity(0.05))
-        )
-    }
-
-    private func emptyQualitiesCard(_ message: String) -> some View {
-        VStack(spacing: 14) {
-            Image(systemName: "video.slash")
-                .font(.system(size: 36, weight: .semibold))
-                .foregroundStyle(Color.secondary)
-            Text("No qualities found")
-                .font(.system(size: 17, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-            Text(message)
-                .font(.system(size: 13, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.5))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 12)
-            Button {
-                destination = nil; sources = []; status = nil
-            } label: {
-                Text("Try another library")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(AppPalette.accent)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 4)
-        }
-        .frame(maxWidth: .infinity, minHeight: 240)
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color.white.opacity(0.05))
-        )
-    }
-
-    private var successOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea()
-            VStack(spacing: 14) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 48, weight: .semibold))
-                    .foregroundStyle(AppPalette.gradient)
-                Text("Added to library")
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+    private func qualityOptionRow(_ source: OnlineTorrentSource) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(source.quality.label)
+                    .font(.system(size: 17, weight: .heavy, design: .rounded))
                     .foregroundStyle(.white)
-                Text("Home & Media will refresh shortly")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
+                Text("\(qualitySubtitle(source.quality)) · \(source.sizeLabel) · \(source.seeders) seeds")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+            Spacer()
+            Text(qualityBadge(source.quality))
+                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 15)
+        .background(
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 0.8)
+                )
+        )
+    }
+
+    private func qualitySubtitle(_ q: OnlineStreamQuality) -> String {
+        switch q {
+        case .p720: return "HD Ready · Small file"
+        case .p1080: return "Full HD · Recommended"
+        case .p1440: return "QHD · High detail"
+        case .p2160: return "4K Ultra HD · Best quality"
+        }
+    }
+
+    private func qualityBadge(_ q: OnlineStreamQuality) -> String {
+        switch q {
+        case .p720: return "HD"
+        case .p1080: return "FHD"
+        case .p1440: return "QHD"
+        case .p2160: return "4K"
+        }
+    }
+
+    // MARK: - Progress modal
+
+    private var progressModal: some View {
+        ZStack {
+            Color.black.opacity(0.7).ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                if addedSuccess {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(red: 0.13, green: 0.77, blue: 0.37), Color(red: 0.09, green: 0.64, blue: 0.29)],
+                                    startPoint: .topLeading, endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 78, height: 78)
+                            .shadow(color: Color.green.opacity(0.55), radius: 22)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 34, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    Text("Download Complete!")
+                        .font(.system(size: 19, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("Added to library successfully.")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                    Button { dismiss() } label: {
+                        Text("Close")
+                            .font(.system(size: 15, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(
+                                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                    .fill(Color.white.opacity(0.1))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                            .stroke(Color.white.opacity(0.18), lineWidth: 0.9)
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                } else {
+                    Text(activeQualityLabel.isEmpty ? "Adding to library…" : "Downloading \(activeQualityLabel)…")
+                        .font(.system(size: 18, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(AppPalette.accent)
+                        .padding(.top, 6)
+                    Text(status ?? "Preparing offline task…")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .multilineTextAlignment(.center)
+                }
             }
             .padding(28)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay(
+            .frame(maxWidth: 300)
+            .background(
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+                    .fill(Color(red: 0.12, green: 0.12, blue: 0.16).opacity(0.96))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 0.9)
+                    )
             )
+            .shadow(color: .black.opacity(0.55), radius: 30, y: 12)
         }
-        .transition(.opacity.combined(with: .scale(scale: 0.94)))
     }
 
     private var bestQualityChoices: [OnlineTorrentSource] {
@@ -2137,9 +2249,17 @@ private struct OnlineLibraryAddSheet: View {
         .prefix(4).map { $0 }
     }
 
+    private func selectDestination(_ service: OnlineLibraryDestination) {
+        destination = service
+        showQualitySheet = true
+        loadSources()
+    }
+
     @MainActor private func loadSources() {
         guard let destination, case let .catalog(mediaType, tmdbID) = entry.source else { return }
-        isSearching = true; sources = []; status = nil
+        isSearching = true
+        sources = []
+        status = nil
         Task {
             var imdbID = entry.details?.imdbID
             if imdbID?.isEmpty != false {
@@ -2157,7 +2277,9 @@ private struct OnlineLibraryAddSheet: View {
                 guard self.destination == destination else { return }
                 self.sources = found
                 self.status = found.isEmpty ? "Try a different search provider or title." : nil
-            } catch { self.status = error.localizedDescription }
+            } catch {
+                self.status = error.localizedDescription
+            }
             self.isSearching = false
         }
     }
@@ -2165,16 +2287,22 @@ private struct OnlineLibraryAddSheet: View {
     @MainActor private func add(_ source: OnlineTorrentSource) {
         guard let destination, !isAdding else { return }
         isAdding = true
+        activeQualityLabel = source.quality.label
+        withAnimation {
+            showQualitySheet = false
+            showProgressModal = true
+            addedSuccess = false
+        }
         Task {
             let error = await vm.addOnlineSourceToLibrary(source, destination: destination)
             isAdding = false
             if let error {
                 status = error
             } else {
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     addedSuccess = true
                 }
-                try? await Task.sleep(nanoseconds: 900_000_000)
+                try? await Task.sleep(nanoseconds: 1_100_000_000)
                 dismiss()
             }
         }
@@ -3265,7 +3393,7 @@ private struct ServerAccountsSettingsView: View {
             List {
                 Section("Servers") {
                     serverRow("WebDAV", "PikPak, NAS and other WebDAV servers", "externaldrive.connected.to.line.below", .webdav)
-                    serverRow("PikPak", "Import a secure rclone session for Discover", "bolt.horizontal.cloud.fill", .pikpak)
+                    serverRow("PikPak", "Import a secure rclone session for Discover", "cloud.bolt.fill", .pikpak)
                     serverRow("Offcloud", "Offcloud account and cloud transfers", "cloud.fill", .offcloud)
                     serverRow("TorBox", "TorBox account and torrent library", "shippingbox.fill", .torbox)
                 }

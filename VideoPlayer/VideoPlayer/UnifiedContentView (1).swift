@@ -924,6 +924,15 @@ struct UnifiedContentView: View {
                 }
             }
             .task(id: contentRefreshID) { if isActive { await model.load(vm: vm, force: false) } }
+            .onReceive(NotificationCenter.default.publisher(for: .webDAVLibraryNeedsRefresh)) { _ in
+                // A Discover/Home play just finished offline-adding a magnet into
+                // PikPak. Rescan WebDAV so the new file is classified by TMDB
+                // (movie vs show) and appears in the library.
+                Task { await model.load(vm: vm, force: true) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .librarySourcesDidChange)) { _ in
+                Task { await model.load(vm: vm, force: true) }
+            }
             .fullScreenCover(item: $selected) { entry in detailsHost(entry) }
             .fullScreenCover(isPresented: $showPlayer) { ResolvedPlayerScreen(vm: vm) }
             .sheet(item: $manualSearch) { request in
@@ -950,7 +959,7 @@ struct UnifiedContentView: View {
                 } label: {
                     Label(value.rawValue, systemImage: value.icon)
                         .font(.system(size: 12, weight: .bold)).lineLimit(1)
-                        .foregroundStyle(section == value ? .white : .secondary)
+                        .foregroundStyle(section == value ? Color.white : Color.secondary)
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                         .background {
                             if section == value {
@@ -1120,7 +1129,8 @@ struct UnifiedPosterArtwork: View {
             } else if let url = resolvedPosterURL {
                 KFImage(url)
                     .placeholder { ProgressView().tint(AppPalette.accent) }
-                    .cacheOriginalImage()
+                    .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 240, height: 360)))
+                    .scaleFactor(UIScreen.main.scale)
                     .onSuccess { result in
                         // Kingfisher's URL cache is disposable. Keep the library
                         // poster under the same persistent key every screen reads.
@@ -1136,19 +1146,16 @@ struct UnifiedPosterArtwork: View {
             }
         }
         .task(id: "\(section.rawValue)|\(manualCacheKey)") {
-            if let manual = await cachedPoster() {
-                cachedImage = manual
+            if let stored = await cachedPoster() {
+                cachedImage = stored
                 hasCheckedCache = true
                 return
             }
-            // List/grid posters never need the clean "no-language" poster —
-            // that variant only matters on the Hero (enrichFeatured already
-            // fetches it there) and the Details screen (which fetches full
-            // title details anyway to show cast/overview/etc). Grid posters
-            // just use whatever's already in `entry.details`/`entry.posterURL`
-            // from the list response, with zero extra network calls.
-            resolvedPosterURL = entry.details?.detailsPosterURL ?? entry.posterURL
+            resolvedPosterURL = entry.posterURL ?? entry.details?.detailsPosterURL
             hasCheckedCache = true
+            guard resolvedPosterURL == nil else { return }
+            guard let frame = await loadVideoFrameFallback() else { return }
+            cachedImage = frame
         }
         .onReceive(NotificationCenter.default.publisher(for: VideoThumbnailLoader.stablePosterDidUpdateNotification)) { notification in
             guard let updatedKey = notification.object as? String,
@@ -1163,7 +1170,30 @@ struct UnifiedPosterArtwork: View {
         if let manual = await VideoThumbnailLoader.cachedImageAsync(forStableKey: manualCacheKey) {
             return manual
         }
-        return nil
+        return await VideoThumbnailLoader.cachedImageAsync(forStableKey: cacheKey)
+    }
+
+    private func loadVideoFrameFallback() async -> UIImage? {
+        let url = entry.streamURL
+        let scheme = url.scheme?.lowercased()
+        guard scheme == "http" || scheme == "https" else { return nil }
+        var headers: [String: String] = [:]
+        if case let .webDAV(server, _) = entry.source {
+            headers = WebDAVClient(server: server).streamHeaders()
+        }
+        await ThumbnailLoadGate.shared.acquire()
+        defer { Task { await ThumbnailLoadGate.shared.release() } }
+        let frame = await VideoThumbnailLoader.loadPoster(
+            for: url,
+            headers: headers,
+            stableKey: cacheKey,
+            targetPointSize: CGSize(width: 160, height: 240),
+            allowRemoteFrame: true
+        )
+        if let frame {
+            VideoThumbnailLoader.cacheImageInBackground(frame, forStableKey: cacheKey)
+        }
+        return frame
     }
 }
 
@@ -1305,6 +1335,7 @@ struct UnifiedMediaDetailsHost: View {
     @State private var activeEntry: UnifiedMediaEntry
     @State private var showPlayer = false
     @State private var showOnlineSources = false
+    @State private var showLibraryAdd = false
     @State private var presentOnlinePlayerAfterSourcesDismiss = false
     /// The source sheet is bypassed only for an explicit PikPak choice. The
     /// ID lets us ignore stale updates after changing episode or leaving.
@@ -1345,6 +1376,11 @@ struct UnifiedMediaDetailsHost: View {
         return activeEntry.episodes.first { $0.id == selectedEpisodeID }
     }
 
+    private var isCatalogueEntry: Bool {
+        if case .catalog = activeEntry.source { return true }
+        return false
+    }
+
     var body: some View {
         VideoDetailsView(
             vm: vm,
@@ -1355,6 +1391,9 @@ struct UnifiedMediaDetailsHost: View {
                 guard selection.id != episodeID else { return }
                 selection.id = episodeID
             },
+            onAddToLibrary: isCatalogueEntry && !OnlineLibraryDestination.enabledConfigured.isEmpty ? {
+                showLibraryAdd = true
+            } : nil,
             suggestionsTitle: suggestionsTitle,
             suggestions: suggestions,
             onSelectSuggestion: selectSuggestion
@@ -1391,6 +1430,7 @@ struct UnifiedMediaDetailsHost: View {
             if shouldShowPikPakPreparationPlayer {
                 PikPakPreparationPlayerScreen(
                     title: currentDetailsItem.title,
+                    phase: activePikPakTransfer?.phase,
                     message: activePikPakTransfer?.message,
                     errorMessage: pikPakPreparationError,
                     onClose: {
@@ -1425,19 +1465,18 @@ struct UnifiedMediaDetailsHost: View {
             )
             .preferredColorScheme(.dark)
         }
+        .sheet(isPresented: $showLibraryAdd) {
+            OnlineLibraryAddSheet(vm: vm, entry: activeEntry, episode: selectedEpisode)
+                .preferredColorScheme(.dark)
+        }
         .fullScreenCover(
             isPresented: $showOnlineSources,
             onDismiss: {
                 guard presentOnlinePlayerAfterSourcesDismiss else { return }
                 presentOnlinePlayerAfterSourcesDismiss = false
-                guard vm.ensurePreparedOnlinePlaybackIsActive() else {
-                    DiagnosticLogger.log("[OnlinePlayback] presentation aborted because playback state is empty")
-                    vm.errorMessage = "The stream was prepared, but the player did not receive its URL."
-                    return
+                if vm.nowPlayingURL != nil || vm.onlinePlaybackTransfer != nil {
+                    _ = vm.ensurePreparedOnlinePlaybackIsActive()
                 }
-                // onDismiss runs after the source cover has fully completed its
-                // transition, so the player cover can no longer be torn down by
-                // the outgoing cover's lifecycle.
                 showPlayer = true
             }
         ) {
@@ -1445,7 +1484,9 @@ struct UnifiedMediaDetailsHost: View {
                 vm: vm,
                 entry: activeEntry,
                 episode: selectedEpisode,
-                onPlaybackReady: {
+                onPlaybackReady: { sourceID in
+                    automaticPikPakTransferID = sourceID
+                    pikPakPreparationError = nil
                     presentOnlinePlayerAfterSourcesDismiss = true
                     showOnlineSources = false
                 }
@@ -1652,6 +1693,7 @@ struct UnifiedMediaDetailsHost: View {
     private func selectPikPakQuality(_ source: OnlineTorrentSource) {
         guard automaticPikPakTransferID == nil else { return }
         automaticPikPakTransferID = source.id
+        pikPakPreparationError = nil
         vm.prepareOnlineSource(source, historyItem: currentDetailsItem)
         presentPikPakPlayerAfterChooserDismiss = true
         showPikPakQualityChooser = false
@@ -1717,6 +1759,425 @@ struct UnifiedMediaDetailsHost: View {
         guard let next = categoryEntries.first(where: { $0.id == id }) else { return }
         activeEntry = next
         selection.id = next.episodes.first?.id
+    }
+}
+
+private struct OnlineLibraryAddSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: AppViewModel
+    let entry: UnifiedMediaEntry
+    let episode: UnifiedEpisode?
+    @State private var destination: OnlineLibraryDestination?
+    @State private var sources: [OnlineTorrentSource] = []
+    @State private var isSearching = false
+    @State private var isAdding = false
+    @State private var status: String?
+    @State private var addedSuccess = false
+
+    private var availableDestinations: [OnlineLibraryDestination] {
+        OnlineLibraryDestination.enabledConfigured
+    }
+
+    private var displayTitle: String {
+        VideoTitleFormatter.title(from: episode?.title ?? entry.title)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                sheetAtmosphere
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        titleCard
+                        libraryContent
+                    }
+                    .padding(18)
+                    .padding(.bottom, 40)
+                }
+                .scrollIndicators(.hidden)
+
+                if addedSuccess {
+                    successOverlay
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AppAnimatedBackButton(size: 36) { dismiss() }
+                }
+                ToolbarItem(placement: .principal) {
+                    Text(destination == nil ? "Add to Library" : (destination?.title ?? "Quality"))
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var sheetAtmosphere: some View {
+        ZStack {
+            AppTheme.bg.ignoresSafeArea()
+            RadialGradient(
+                colors: [AppPalette.purple.opacity(0.22), .clear],
+                center: .topTrailing,
+                startRadius: 20,
+                endRadius: 380
+            )
+            .ignoresSafeArea()
+            if let url = entry.posterURL {
+                KFImage(url)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 280)
+                    .blur(radius: 42)
+                    .opacity(0.22)
+                    .mask(
+                        LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private var titleCard: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.card)
+                if let url = entry.posterURL {
+                    KFImage(url).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "film.fill").foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 72, height: 108)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SEND TO LIBRARY")
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .tracking(1.6)
+                    .foregroundStyle(AppPalette.accent)
+                Text(displayTitle)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(3)
+                if let year = entry.details?.releaseDate.map({ String($0.prefix(4)) }) {
+                    Text(year)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                if episode != nil {
+                    Text("S\(episode!.season) · E\(episode!.episode)")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.white.opacity(0.08), in: Capsule())
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 0.8)
+                )
+        )
+    }
+
+    @ViewBuilder private var libraryContent: some View {
+        if destination == nil {
+            destinationList
+        } else if isSearching {
+            searchingCard
+        } else if let status, sources.isEmpty {
+            emptyQualitiesCard(status)
+        } else {
+            qualityList
+        }
+    }
+
+    private var destinationList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("WHERE SHOULD IT LIVE?")
+                .font(.system(size: 11, weight: .heavy, design: .rounded))
+                .tracking(1.4)
+                .foregroundStyle(.white.opacity(0.42))
+            ForEach(Array(availableDestinations.enumerated()), id: \.element.id) { index, service in
+                Button {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) {
+                        destination = service
+                    }
+                    loadSources()
+                } label: {
+                    destinationRow(service, index: index)
+                }
+                .buttonStyle(PremiumPressButtonStyle())
+            }
+        }
+    }
+
+    private func destinationRow(_ service: OnlineLibraryDestination, index: Int) -> some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(AppPalette.gradient)
+                    .frame(width: 52, height: 52)
+                Image(systemName: service.icon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .shadow(color: AppPalette.accent.opacity(0.35), radius: 10, y: 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(service.title)
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("Pick a quality · offline add · Home refresh")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white.opacity(0.35))
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.055 + Double(index) * 0.008))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.14), Color.white.opacity(0.04)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.9
+                        )
+                )
+        )
+    }
+
+    private var qualityList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        destination = nil; sources = []; status = nil
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(destination?.title ?? "Back")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(AppPalette.accent)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(AppPalette.accent.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text("BEST QUALITIES")
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            ForEach(bestQualityChoices) { source in qualityRow(source) }
+            if let status, !status.isEmpty, !sources.isEmpty {
+                Text(status)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.orange.opacity(0.9))
+                    .padding(.top, 4)
+            }
+        }
+    }
+
+    private func qualityRow(_ source: OnlineTorrentSource) -> some View {
+        Button { add(source) } label: {
+            HStack(spacing: 12) {
+                Text(source.quality.label)
+                    .font(.system(size: 15, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.black)
+                    .frame(width: 70, height: 52)
+                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: AppPalette.accent.opacity(0.3), radius: 8, y: 3)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(source.name)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    HStack(spacing: 8) {
+                        Label("\(source.seeders)", systemImage: "arrow.up.circle.fill")
+                            .foregroundStyle(.green.opacity(0.9))
+                        Text(source.sizeLabel)
+                            .foregroundStyle(.white.opacity(0.45))
+                    }
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                }
+                Spacer(minLength: 0)
+                if isAdding {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.1), in: Circle())
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Color.white.opacity(0.09), lineWidth: 0.8)
+                    )
+            )
+        }
+        .buttonStyle(PremiumPressButtonStyle())
+        .disabled(isAdding)
+    }
+
+    private var searchingCard: some View {
+        VStack(spacing: 16) {
+            ProgressView().controlSize(.large).tint(AppPalette.accent)
+            Text("Finding the best qualities…")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.72))
+            Text("Comparing seeders across your search providers")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.4))
+        }
+        .frame(maxWidth: .infinity, minHeight: 220)
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+    }
+
+    private func emptyQualitiesCard(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "video.slash")
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundStyle(Color.secondary)
+            Text("No qualities found")
+                .font(.system(size: 17, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+            Text(message)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+            Button {
+                destination = nil; sources = []; status = nil
+            } label: {
+                Text("Try another library")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(AppPalette.accent)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, minHeight: 240)
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+    }
+
+    private var successOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.55).ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48, weight: .semibold))
+                    .foregroundStyle(AppPalette.gradient)
+                Text("Added to library")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text("Home & Media will refresh shortly")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(28)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+            )
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.94)))
+    }
+
+    private var bestQualityChoices: [OnlineTorrentSource] {
+        let grouped = Dictionary(grouping: sources, by: \.quality)
+        return grouped.compactMap { _, values in
+            values.max { $0.seeders < $1.seeders }
+        }
+        .sorted { $0.quality < $1.quality }
+        .prefix(4).map { $0 }
+    }
+
+    @MainActor private func loadSources() {
+        guard let destination, case let .catalog(mediaType, tmdbID) = entry.source else { return }
+        isSearching = true; sources = []; status = nil
+        Task {
+            var imdbID = entry.details?.imdbID
+            if imdbID?.isEmpty != false {
+                imdbID = await TMDBService.shared.externalIMDbID(mediaType: mediaType, tmdbID: tmdbID)
+            }
+            let context = OnlineSourceLookupContext(
+                title: entry.details?.title ?? entry.title,
+                year: entry.details?.releaseDate.map { String($0.prefix(4)) },
+                mediaType: mediaType, tmdbID: tmdbID, imdbID: imdbID,
+                season: episode?.season ?? (mediaType == "tv" ? 1 : nil),
+                episode: episode?.episode ?? (mediaType == "tv" ? 1 : nil)
+            )
+            do {
+                let found = try await OnlineSourceSearchService.shared.search(context)
+                guard self.destination == destination else { return }
+                self.sources = found
+                self.status = found.isEmpty ? "Try a different search provider or title." : nil
+            } catch { self.status = error.localizedDescription }
+            self.isSearching = false
+        }
+    }
+
+    @MainActor private func add(_ source: OnlineTorrentSource) {
+        guard let destination, !isAdding else { return }
+        isAdding = true
+        Task {
+            let error = await vm.addOnlineSourceToLibrary(source, destination: destination)
+            isAdding = false
+            if let error {
+                status = error
+            } else {
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                    addedSuccess = true
+                }
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                dismiss()
+            }
+        }
     }
 }
 
@@ -1880,9 +2341,32 @@ private struct PikPakSourceRow: View {
 
 private struct PikPakPreparationPlayerScreen: View {
     let title: String
+    let phase: OnlinePlaybackTransfer.Phase?
     let message: String?
     let errorMessage: String?
     let onClose: () -> Void
+    @State private var stepIndex = 0
+
+    private let preparingSteps = [
+        "Fetching stream link",
+        "Selecting video file",
+        "Preparing file"
+    ]
+
+    private var headline: String {
+        if errorMessage != nil { return "Could not prepare playback" }
+        if phase == .downloading { return "Preparing file" }
+        if phase == .ready { return "Ready to play" }
+        return preparingSteps[stepIndex % preparingSteps.count]
+    }
+
+    private var detail: String {
+        if let errorMessage, !errorMessage.isEmpty { return errorMessage }
+        if phase == .downloading {
+            return "The cloud service is preparing the file. Keep this screen open until playback begins."
+        }
+        return "Preparing the stream link now."
+    }
 
     var body: some View {
         ZStack {
@@ -1897,19 +2381,28 @@ private struct PikPakPreparationPlayerScreen: View {
 
             VStack(spacing: 22) {
                 Spacer()
-                PikPakOrbitLoader(size: 132)
+                if errorMessage == nil {
+                    PikPakOrbitLoader(size: 132)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundStyle(.orange)
+                }
                 VStack(spacing: 9) {
-                    Text(errorMessage == nil ? "Preparing your stream" : "Couldn’t prepare the stream")
+                    Text(headline)
                         .font(.system(size: 23, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .id(headline)
+                        .transition(.opacity)
                     Text(VideoTitleFormatter.title(from: title))
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.white.opacity(0.64))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
-                    Text(errorMessage ?? message ?? "PikPak is connecting to the selected quality. You can stay here while it finishes.")
+                    Text(detail)
                         .font(.footnote)
-                        .foregroundStyle(errorMessage == nil ? .white.opacity(0.56) : .orange.opacity(0.9))
+                        .foregroundStyle(errorMessage == nil ? Color.white.opacity(0.56) : Color.orange.opacity(0.9))
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
                 }
@@ -1924,7 +2417,14 @@ private struct PikPakPreparationPlayerScreen: View {
                     .padding(.bottom, 35)
             }
         }
+        .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
+        .onReceive(Timer.publish(every: 1.6, on: .main, in: .common).autoconnect()) { _ in
+            guard errorMessage == nil, phase != .downloading, phase != .ready else { return }
+            withAnimation(.easeInOut(duration: 0.25)) {
+                stepIndex += 1
+            }
+        }
     }
 }
 
@@ -1964,7 +2464,7 @@ private struct ExperimentalOnlineSourcesView: View {
     @ObservedObject var vm: AppViewModel
     let entry: UnifiedMediaEntry
     let episode: UnifiedEpisode?
-    let onPlaybackReady: () -> Void
+    let onPlaybackReady: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var sources: [OnlineTorrentSource] = []
     @State private var isSearching = true
@@ -2105,7 +2605,7 @@ private struct ExperimentalOnlineSourcesView: View {
         HStack(spacing: 11) {
             Image(systemName: activeProviders.isEmpty ? "bolt.horizontal.circle.fill" : "icloud.and.arrow.up.fill")
                 .font(.title3)
-                .foregroundStyle(activeProviders.isEmpty ? AppPalette.purple : .green)
+                .foregroundStyle(activeProviders.isEmpty ? AppPalette.purple : Color.green)
             VStack(alignment: .leading, spacing: 3) {
                 Text(activeProviders.isEmpty ? "Direct Torrent Player" : activeProviders.joined(separator: " · "))
                     .font(.headline)
@@ -2134,7 +2634,7 @@ private struct ExperimentalOnlineSourcesView: View {
                 VStack(spacing: 2) {
                     Text(source.quality.label)
                         .font(.headline.bold())
-                        .foregroundStyle(isFastest ? .black : .white)
+                        .foregroundStyle(isFastest ? Color.black : Color.white)
                     if isFastest {
                         Text("FASTEST")
                             .font(.system(size: 8, weight: .black))
@@ -2173,7 +2673,7 @@ private struct ExperimentalOnlineSourcesView: View {
                         Text(currentTransfer?.phase == .downloading ? "Downloading" : "Preparing")
                             .font(.system(size: 9, weight: .bold))
                     }
-                    .foregroundStyle(currentTransfer?.phase == .downloading ? AppPalette.accent : .white)
+                    .foregroundStyle(currentTransfer?.phase == .downloading ? AppPalette.accent : Color.white)
                 } else {
                     Image(systemName: "play.fill")
                         .font(.headline)
@@ -2233,6 +2733,7 @@ private struct ExperimentalOnlineSourcesView: View {
         resolvingID = source.id
         message = nil
         vm.prepareOnlineSource(source, historyItem: playbackHistoryItem)
+        onPlaybackReady(source.id)
     }
 
     private var currentTransfer: OnlinePlaybackTransfer? {
@@ -2251,7 +2752,6 @@ private struct ExperimentalOnlineSourcesView: View {
         case .ready:
             if vm.playPreparedOnlineSource() {
                 self.resolvingID = nil
-                onPlaybackReady()
             }
         case .failed:
             message = transfer.message
@@ -2264,7 +2764,7 @@ private struct ExperimentalOnlineSourcesView: View {
         return HStack(spacing: 14) {
             Image(systemName: isDownloading ? "arrow.down.circle.fill" : "hourglass")
                 .font(.system(size: 23, weight: .semibold))
-                .foregroundStyle(isDownloading ? AppPalette.accent : .white)
+                .foregroundStyle(isDownloading ? AppPalette.accent : Color.white)
                 .frame(width: 48, height: 48)
                 .background(
                     (isDownloading ? AppPalette.accent : Color.white).opacity(0.12),
@@ -2426,6 +2926,7 @@ private struct StreamingPlatformSettingsView: View {
     @State private var stremioAddonURL = ""
     @State private var milkieKey = ""
     @State private var selectedSearchProviders = OnlineSearchProviderSelection.selected
+    @State private var selectedLibraryDestinations = OnlineLibraryDestination.selected
     @State private var status = ""
 
     var body: some View {
@@ -2454,24 +2955,27 @@ private struct StreamingPlatformSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Add to Library") {
+                    Text("Choose the connected libraries that appear when you open a search result. You can enable more than one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(OnlineLibraryDestination.allCases) { destination in
+                        Button { toggleLibraryDestination(destination) } label: {
+                            libraryDestinationRow(destination)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!destination.isConfigured)
+                        .opacity(destination.isConfigured ? 1 : 0.55)
+                    }
+                }
+
                 Section("Search Providers") {
                     Text("Choose one or more providers. Their results are combined, so you see more links for each quality.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     ForEach(OnlineSearchProviderSelection.available) { provider in
                         Button { toggleSearchProvider(provider) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: searchProviderIcon(provider))
-                                    .font(.headline)
-                                    .foregroundStyle(selectedSearchProviders.contains(provider) ? .white : AppPalette.accent)
-                                    .frame(width: 34, height: 34)
-                                    .background(selectedSearchProviders.contains(provider) ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)), in: Circle())
-                                Text(provider.title).foregroundStyle(.primary)
-                                Spacer()
-                                Image(systemName: selectedSearchProviders.contains(provider) ? "checkmark.circle.fill" : "circle")
-                                    .font(.title3)
-                                    .foregroundStyle(selectedSearchProviders.contains(provider) ? AppPalette.accent : .secondary)
-                            }
+                            searchProviderRow(provider)
                         }
                         .buttonStyle(.plain)
                     }
@@ -2538,23 +3042,58 @@ private struct StreamingPlatformSettingsView: View {
                     }
                 }
 
-                Section("Manual Stremio Add-on") {
-                    SecureField("https://…/manifest.json", text: $stremioAddonURL)
-                        .textContentType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Text("Paste a Stremio-compatible manifest URL here. If it contains a debrid token, it is stored securely in the iPhone Keychain. The add-on is searched first, alongside the existing Orion or Pirate Bay search.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Save Add-on URL") { saveStremioAddon() }
-                        .disabled(stremioAddonURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if StremioAddonStore.isConfigured {
-                        Button("Remove Add-on URL", role: .destructive) {
-                            _ = StremioAddonStore.clear()
-                            stremioAddonURL = ""
-                            status = "Manual add-on removed"
+                Section {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "puzzlepiece.extension.fill")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Add-ons").font(.headline)
+                                Text(StremioAddonStore.isConfigured ? "Connected" : "No add-on installed")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(StremioAddonStore.isConfigured ? AppPalette.accent : Color.secondary)
+                            }
+                            Spacer()
                         }
+                        Text("Paste a Stremio manifest. Tokens inside the URL are stored in the Keychain and searched first.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        SecureField("https://…/manifest.json", text: $stremioAddonURL)
+                            .textContentType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        HStack(spacing: 10) {
+                            Button(action: saveStremioAddon) {
+                                Text("Save Add-on")
+                                    .font(.subheadline.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(AppPalette.gradient, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .foregroundStyle(.white)
+                            }
+                            .disabled(stremioAddonURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            if StremioAddonStore.isConfigured {
+                                Button(role: .destructive) {
+                                    _ = StremioAddonStore.clear()
+                                    stremioAddonURL = ""
+                                    status = "Manual add-on removed"
+                                } label: {
+                                    Text("Remove")
+                                        .font(.subheadline.bold())
+                                        .frame(width: 92, height: 44)
+                                        .background(Color.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.vertical, 6)
                 }
 
                 if !status.isEmpty {
@@ -2580,6 +3119,7 @@ private struct StreamingPlatformSettingsView: View {
                 stremioAddonURL = StremioAddonStore.manifestURL
                 milkieKey = MilkieKeyStore.usesCustomKey ? MilkieKeyStore.key : ""
                 selectedSearchProviders = OnlineSearchProviderSelection.selected
+                selectedLibraryDestinations = OnlineLibraryDestination.selected
             }
         }
         .preferredColorScheme(.dark)
@@ -2626,6 +3166,51 @@ private struct StreamingPlatformSettingsView: View {
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 1))
     }
 
+    @ViewBuilder
+    private func libraryDestinationRow(_ destination: OnlineLibraryDestination) -> some View {
+        let isSelected = selectedLibraryDestinations.contains(destination)
+        HStack(spacing: 12) {
+            Image(systemName: destination.icon)
+                .font(.headline)
+                .foregroundStyle(isSelected ? Color.white : AppPalette.accent)
+                .frame(width: 34, height: 34)
+                .background(
+                    isSelected ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)),
+                    in: Circle()
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(destination.title).foregroundStyle(Color.primary)
+                Text(destination.isConfigured ? "Connected" : "Connect this account in Servers first")
+                    .font(.caption)
+                    .foregroundStyle(destination.isConfigured ? Color.white.opacity(0.55) : Color.orange)
+            }
+            Spacer()
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.title3)
+                .foregroundStyle(isSelected ? AppPalette.accent : Color.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func searchProviderRow(_ provider: OnlineSearchProviderPreference) -> some View {
+        let isSelected = selectedSearchProviders.contains(provider)
+        HStack(spacing: 12) {
+            Image(systemName: searchProviderIcon(provider))
+                .font(.headline)
+                .foregroundStyle(isSelected ? Color.white : AppPalette.accent)
+                .frame(width: 34, height: 34)
+                .background(
+                    isSelected ? AnyShapeStyle(AppPalette.gradient) : AnyShapeStyle(Color.white.opacity(0.08)),
+                    in: Circle()
+                )
+            Text(provider.title).foregroundStyle(Color.primary)
+            Spacer()
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.title3)
+                .foregroundStyle(isSelected ? AppPalette.accent : Color.secondary)
+        }
+    }
+
     private func toggleSearchProvider(_ provider: OnlineSearchProviderPreference) {
         if selectedSearchProviders.contains(provider) {
             guard selectedSearchProviders.count > 1 else {
@@ -2637,6 +3222,15 @@ private struct StreamingPlatformSettingsView: View {
             selectedSearchProviders.insert(provider)
         }
         OnlineSearchProviderSelection.selected = selectedSearchProviders
+    }
+
+    private func toggleLibraryDestination(_ destination: OnlineLibraryDestination) {
+        if selectedLibraryDestinations.contains(destination) {
+            selectedLibraryDestinations.remove(destination)
+        } else {
+            selectedLibraryDestinations.insert(destination)
+        }
+        OnlineLibraryDestination.selected = selectedLibraryDestinations
     }
 
     private func searchProviderIcon(_ provider: OnlineSearchProviderPreference) -> String {
@@ -2671,7 +3265,7 @@ private struct ServerAccountsSettingsView: View {
             List {
                 Section("Servers") {
                     serverRow("WebDAV", "PikPak, NAS and other WebDAV servers", "externaldrive.connected.to.line.below", .webdav)
-                    serverRow("PikPak", "Import a secure rclone session for Discover", "bolt.horizontal.cloud.fill", .pikpak)
+                    serverRow("PikPak", "Import a secure rclone session for Discover", "cloud.bolt.fill", .pikpak)
                     serverRow("Offcloud", "Offcloud account and cloud transfers", "cloud.fill", .offcloud)
                     serverRow("TorBox", "TorBox account and torrent library", "shippingbox.fill", .torbox)
                 }

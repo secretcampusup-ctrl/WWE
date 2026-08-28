@@ -8,6 +8,9 @@ struct MainTabView: View {
     @StateObject private var catalog = UnifiedContentModel()
     @State private var selectedTab = 0
     @State private var showPreparedOnlinePlayer = false
+    /// Bumped when the user re-taps Search while already on that tab so the
+    /// field can regain focus after returning from details.
+    @State private var searchFocusToken = 0
     @Namespace private var dockSelection
 
     var body: some View {
@@ -21,7 +24,7 @@ struct MainTabView: View {
             PirateBayView(vm: vm)
                 .opacity(selectedTab == 2 ? 1 : 0).allowsHitTesting(selectedTab == 2)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
-            LibrarySearchView(vm: vm)
+            LibrarySearchView(vm: vm, isActive: selectedTab == 3, focusToken: searchFocusToken)
                 .opacity(selectedTab == 3 ? 1 : 0).allowsHitTesting(selectedTab == 3)
                 .animation(.easeOut(duration: 0.18), value: selectedTab)
 
@@ -178,7 +181,13 @@ struct MainTabView: View {
     private var settingsSurface: some View {
         let isSelected = selectedTab == 3
         return Button {
-            selectTab(3)
+            if selectedTab == 3 {
+                // Already on Search — re-focus the field instead of doing nothing.
+                searchFocusToken &+= 1
+                UISelectionFeedbackGenerator().selectionChanged()
+            } else {
+                selectTab(3)
+            }
         } label: {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 23, weight: .medium))
@@ -275,6 +284,8 @@ struct MainTabView: View {
 /// of the user's connected libraries while this screen owns all TMDB lookups.
 private struct LibrarySearchView: View {
     @ObservedObject var vm: AppViewModel
+    var isActive: Bool = true
+    var focusToken: Int = 0
     @StateObject private var catalogue = ExperimentalOnlineCatalogModel()
     @State private var query = ""
     @State private var results: [UnifiedMediaEntry] = []
@@ -328,12 +339,31 @@ private struct LibrarySearchView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .onChange(of: query) { search($0) }
+            .onChange(of: isActive) { active in
+                if !active {
+                    // Leaving the tab — cancel in-flight work and never leave
+                    // the UI stuck on a spinner after coming back.
+                    searchTask?.cancel()
+                    isSearching = false
+                    searchFocused = false
+                }
+            }
+            .onChange(of: focusToken) { _ in
+                guard isActive else { return }
+                // Re-tap Search while already here: wake the field up.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    searchFocused = true
+                }
+            }
             .onAppear {
                 withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
                     appearPulse = true
                 }
             }
-            .onDisappear { searchTask?.cancel() }
+            .onDisappear {
+                searchTask?.cancel()
+                isSearching = false
+            }
             .fullScreenCover(item: $selectedEntry) { entry in
                 UnifiedMediaDetailsHost(
                     vm: vm,
@@ -347,24 +377,8 @@ private struct LibrarySearchView: View {
     }
 
     private var searchAtmosphere: some View {
-        ZStack {
-            AppTheme.bg.ignoresSafeArea()
-            // Soft cinematic wash — purple depth without competing with posters.
-            RadialGradient(
-                colors: [AppPalette.purple.opacity(appearPulse ? 0.28 : 0.16), .clear],
-                center: .topTrailing,
-                startRadius: 20,
-                endRadius: 420
-            )
-            .ignoresSafeArea()
-            RadialGradient(
-                colors: [AppPalette.accent.opacity(0.12), .clear],
-                center: .bottomLeading,
-                startRadius: 10,
-                endRadius: 360
-            )
-            .ignoresSafeArea()
-        }
+        // Same solid surface as Home / Media — no competing color washes.
+        AppTheme.bg.ignoresSafeArea()
     }
 
     private var searchHeroHeader: some View {
@@ -430,21 +444,14 @@ private struct LibrarySearchView: View {
         .frame(height: 56)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(AppTheme.card)
                 .overlay(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .stroke(
-                            LinearGradient(
-                                colors: searchFocused
-                                    ? [AppPalette.accent.opacity(0.85), AppPalette.purple.opacity(0.45)]
-                                    : [Color.white.opacity(0.16), Color.white.opacity(0.05)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: searchFocused ? 1.2 : 0.8
+                            searchFocused ? AppPalette.accent.opacity(0.7) : Color.white.opacity(0.1),
+                            lineWidth: searchFocused ? 1.1 : 0.8
                         )
                 )
-                .shadow(color: searchFocused ? AppPalette.accent.opacity(0.22) : .clear, radius: 16, y: 4)
         )
         .animation(.easeOut(duration: 0.22), value: searchFocused)
     }
@@ -513,15 +520,28 @@ private struct LibrarySearchView: View {
     }
 
     private func featuredSearchCard(_ entry: UnifiedMediaEntry) -> some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 24, style: .continuous).fill(AppTheme.card)
-            if let url = entry.posterURL ?? entry.details?.detailsBackdropURL {
+        // Prefer a true landscape backdrop so the wide card is not filled with
+        // a portrait poster that gets aggressively cropped.
+        let landscapeURL = entry.details?.detailsBackdropURL
+            ?? entry.details?.compactBackdropURL
+            ?? entry.details?.imageURL
+        return ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 22, style: .continuous).fill(AppTheme.card)
+            if let url = landscapeURL {
                 KFImage(url)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let poster = entry.posterURL {
+                // Last resort: poster, but keep it centered rather than stretched.
+                KFImage(poster)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .opacity(0.85)
             }
             LinearGradient(
-                colors: [.clear, .black.opacity(0.35), .black.opacity(0.92)],
+                colors: [.clear, .black.opacity(0.25), .black.opacity(0.88)],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -540,11 +560,11 @@ private struct LibrarySearchView: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 5)
-                            .background(.ultraThinMaterial, in: Capsule())
+                            .background(Color.black.opacity(0.45), in: Capsule())
                     }
                 }
                 Text(entry.title)
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                 HStack(spacing: 8) {
@@ -559,13 +579,13 @@ private struct LibrarySearchView: View {
             }
             .padding(16)
         }
-        .frame(height: 210)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        // ~16:9 landscape banner that matches backdrop proportions.
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 0.9)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
         )
-        .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
     }
 
     private func searchPoster(_ entry: UnifiedMediaEntry) -> some View {
@@ -660,16 +680,31 @@ private struct LibrarySearchView: View {
         let value = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.count >= 2 else { isSearching = false; results = []; message = nil; return }
         searchTask = Task { @MainActor in
+            defer {
+                // Never leave the spinner stuck after cancel / tab switch.
+                if Task.isCancelled || query.trimmingCharacters(in: .whitespacesAndNewlines) != value {
+                    isSearching = false
+                }
+            }
             if !immediately { try? await Task.sleep(nanoseconds: 300_000_000) }
             guard !Task.isCancelled else { return }
-            isSearching = true; message = nil
+            isSearching = true
+            message = nil
             do {
                 let found = try await catalogue.search(value)
-                guard !Task.isCancelled, query.trimmingCharacters(in: .whitespacesAndNewlines) == value else { return }
-                results = found; message = found.isEmpty ? "No results found" : nil
+                guard !Task.isCancelled else { return }
+                guard query.trimmingCharacters(in: .whitespacesAndNewlines) == value else {
+                    isSearching = false
+                    return
+                }
+                results = found
+                message = found.isEmpty ? "No results found" : nil
+            } catch is CancellationError {
+                // Ignore — user typed again or left the tab.
             } catch {
                 guard !Task.isCancelled else { return }
-                results = []; message = "Search unavailable"
+                results = []
+                message = "Search unavailable"
             }
             isSearching = false
         }
@@ -3170,28 +3205,32 @@ private struct PirateBayResult: Decodable, Identifiable {
     var byteCount: Int64 { Int64(size) ?? 0 }
     var addedDate: Date { Date(timeIntervalSince1970: TimeInterval(added) ?? 0) }
     var magnet: String {
-        // Milkie list rows sometimes omit infoHash. Jackett-style clients then
-        // download the .torrent via the authenticated API URL instead.
+        // Prefer a real magnet whenever we have an info hash. Only fall back to
+        // Milkie's authenticated .torrent URL when the list/details API omitted
+        // the hash entirely (encoded as milkie-file:{id}).
         if status == "milkie", infoHash.hasPrefix("milkie-file:") {
             let torrentID = String(infoHash.dropFirst("milkie-file:".count))
             if let url = MilkieClient.torrentDownloadURL(id: torrentID) {
                 return url.absoluteString
             }
         }
-        if status == "milkie", !infoHash.hasPrefix("milkie-file:"),
-           let url = MilkieClient.torrentDownloadURL(id: id) {
-            // Prefer the authenticated torrent file for private tracker adds —
-            // magnets alone often fail for Milkie without the site passkey.
-            return url.absoluteString
+        let hash = infoHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !hash.isEmpty, !hash.hasPrefix("milkie-file:") else {
+            return MilkieClient.torrentDownloadURL(id: id)?.absoluteString
+                ?? "magnet:?xt=urn:btih:\(infoHash)"
         }
-        var parts = URLComponents(); parts.scheme = "magnet"
+        var parts = URLComponents()
+        parts.scheme = "magnet"
         parts.queryItems = [
-            URLQueryItem(name: "xt", value: "urn:btih:\(infoHash)"), URLQueryItem(name: "dn", value: name),
+            URLQueryItem(name: "xt", value: "urn:btih:\(hash)"),
+            URLQueryItem(name: "dn", value: name),
             URLQueryItem(name: "tr", value: "udp://tracker.opentrackr.org:1337/announce"),
             URLQueryItem(name: "tr", value: "udp://open.stealth.si:80/announce"),
-            URLQueryItem(name: "tr", value: "udp://tracker.torrent.eu.org:451/announce")
+            URLQueryItem(name: "tr", value: "udp://tracker.torrent.eu.org:451/announce"),
+            URLQueryItem(name: "tr", value: "udp://exodus.desync.com:6969/announce"),
+            URLQueryItem(name: "tr", value: "udp://tracker.moeking.me:6969/announce")
         ]
-        return parts.string ?? "magnet:?xt=urn:btih:\(infoHash)"
+        return parts.string ?? "magnet:?xt=urn:btih:\(hash)&dn=\(name)"
     }
 }
 
@@ -3744,7 +3783,7 @@ private struct PirateBayDetailsView: View {
                         actionButton("TorBox", icon: "shippingbox.fill", busy: sendingTorBox) { sendToTorBox() }
                     }
                     HStack(spacing: 10) {
-                        actionButton("PikPak", icon: "bolt.horizontal.cloud.fill", busy: sendingPikPak) { sendToPikPak() }
+                        actionButton("PikPak", icon: "cloud.bolt.fill", busy: sendingPikPak) { sendToPikPak() }
                         actionButton("Copy Magnet", icon: "doc.on.doc.fill") { UIPasteboard.general.string = item.magnet; toast("Magnet copied") }
                     }
                 }
