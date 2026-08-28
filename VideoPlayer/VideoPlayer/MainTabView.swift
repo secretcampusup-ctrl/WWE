@@ -280,6 +280,33 @@ struct MainTabView: View {
 
 // MARK: - Online catalogue search
 
+/// Shared between Search tab and Home so a title played from Search can appear
+/// under Resume Playback without living in the WebDAV library.
+enum OnlineResumeCatalogStore {
+    private static let key = "home.online.resumeCandidates.v1"
+    static let didChangeNotification = Notification.Name("onlineResumeCatalogDidChange")
+
+    static func load() -> [UnifiedMediaEntry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let stored = try? JSONDecoder().decode([UnifiedMediaEntry].self, from: data) else {
+            return []
+        }
+        return Array(stored.prefix(30))
+    }
+
+    static func remember(_ entry: UnifiedMediaEntry) {
+        guard case .catalog = entry.source else { return }
+        var values = load()
+        values.removeAll { $0.id == entry.id }
+        values.insert(entry, at: 0)
+        values = Array(values.prefix(30))
+        if let data = try? JSONEncoder().encode(values) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
+    }
+}
+
 /// Search is intentionally its own tab. Home stays a fast, offline-first view
 /// of the user's connected libraries while this screen owns all TMDB lookups.
 private struct LibrarySearchView: View {
@@ -371,6 +398,10 @@ private struct LibrarySearchView: View {
                     section: entry.id.contains("|tv|") ? .shows : .movies,
                     categoryEntries: filteredResults
                 )
+                .onAppear {
+                    // Persist for Home → Resume Playback (shared store with Home).
+                    catalogue.rememberForResume(entry)
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -768,21 +799,19 @@ private final class ExperimentalOnlineCatalogModel: ObservableObject {
     @Published private(set) var error: String?
 
     private var didRestoreCache = false
-    private let resumeCandidatesKey = "home.online.resumeCandidates.v1"
 
     init() {
-        guard let data = UserDefaults.standard.data(forKey: resumeCandidatesKey),
-              let stored = try? JSONDecoder().decode([UnifiedMediaEntry].self, from: data) else { return }
-        resumeCandidates = Array(stored.prefix(30))
+        resumeCandidates = OnlineResumeCatalogStore.load()
     }
 
     func rememberForResume(_ entry: UnifiedMediaEntry) {
         guard case .catalog = entry.source else { return }
-        resumeCandidates.removeAll { $0.id == entry.id }
-        resumeCandidates.insert(entry, at: 0)
-        resumeCandidates = Array(resumeCandidates.prefix(30))
-        guard let data = try? JSONEncoder().encode(resumeCandidates) else { return }
-        UserDefaults.standard.set(data, forKey: resumeCandidatesKey)
+        OnlineResumeCatalogStore.remember(entry)
+        resumeCandidates = OnlineResumeCatalogStore.load()
+    }
+
+    func reloadResumeCandidates() {
+        resumeCandidates = OnlineResumeCatalogStore.load()
     }
 
     func load(force: Bool = false) async {
@@ -1049,12 +1078,9 @@ struct HomeLibraryView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                LinearGradient(
-                    colors: [AppTheme.bg, Color(red: 0.12, green: 0.095, blue: 0.08), AppTheme.bg],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
+                // One solid surface — mixed gradients were visible on overscroll
+                // at the bottom of Home as a different “page” color.
+                AppTheme.bg.ignoresSafeArea()
 
                 if !featuredItems.isEmpty {
                     HomeHeroZoomContainer(motion: heroMotion) {
@@ -1124,6 +1150,8 @@ struct HomeLibraryView: View {
                     .tint(AppPalette.accent)
                 }
                 .scrollIndicators(.hidden)
+                .scrollContentBackground(.hidden)
+                .background(AppTheme.bg)
 
                 if isHomeSearchExpanded {
                     homeSearchResultsOverlay
@@ -1157,6 +1185,10 @@ struct HomeLibraryView: View {
             .onReceive(catalog.$shows) { _ in scheduleDerivedDataRebuild() }
             .onReceive(catalog.$unknown) { _ in scheduleDerivedDataRebuild() }
             .onReceive(onlineCatalog.$resumeCandidates) { _ in scheduleDerivedDataRebuild() }
+            .onReceive(NotificationCenter.default.publisher(for: OnlineResumeCatalogStore.didChangeNotification)) { _ in
+                onlineCatalog.reloadResumeCandidates()
+                scheduleDerivedDataRebuild()
+            }
             .onReceive(vm.$playbackHistory) { _ in scheduleDerivedDataRebuild() }
             .onReceive(vm.$savedLinks) { _ in scheduleDerivedDataRebuild() }
             .onReceive(NotificationCenter.default.publisher(for: .librarySourcesDidChange)) { _ in
@@ -2116,7 +2148,7 @@ struct HomeLibraryView: View {
                 selectedCollection = HomeCollection(title: title, items: items)
             }
             if categories.isEmpty {
-                emptyRow("Metadata will appear after the library finishes scanning")
+                emptyRow("No genres yet — pull to refresh after titles get TMDB metadata")
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHGrid(
@@ -2445,6 +2477,7 @@ struct HomeLibraryView: View {
         var yearPairs: [(String, UnifiedMediaEntry)] = []
         var agePairs: [(String, UnifiedMediaEntry)] = []
 
+        let resumedLibraryIDs = Set(items.map(\.id))
         for (index, entry) in items.enumerated() {
             if let history = resolvedHistory(for: entry) {
                 watched.append((entry, history.watchedAt))
@@ -2471,6 +2504,15 @@ struct HomeLibraryView: View {
                 agePairs.append((age, entry))
             }
             if index.isMultiple(of: 48) { await Task.yield() }
+        }
+
+        // Titles opened from Search live outside the WebDAV library. Fold them
+        // into Resume Playback once progress has been committed.
+        let catalogResume = OnlineResumeCatalogStore.load()
+        for entry in catalogResume where !resumedLibraryIDs.contains(entry.id) {
+            guard let history = resolvedHistory(for: entry), history.hasResumePoint else { continue }
+            resumed.append(HomeMediaItem(entry: entry, history: history))
+            watched.append((entry, history.watchedAt))
         }
         guard !Task.isCancelled else { return }
 
@@ -2879,9 +2921,12 @@ private struct PersistentHeroArtwork: View {
                 VideoThumbnailLoader.cacheHeroImageInBackground(legacy, forStableKey: cacheKey)
                 onPrepared()
             } else if let remoteURL {
+                // Decode at true screen pixels (@2x/@3x). Point-size targets made
+                // Hero look soft even when the TMDB source was `/original`.
+                let scale = UIScreen.main.scale
                 let target = CGSize(
-                    width: UIScreen.main.bounds.width,
-                    height: 670
+                    width: UIScreen.main.bounds.width * scale,
+                    height: 670 * scale
                 )
                 if let downloaded = await VideoThumbnailLoader.downloadRemoteImage(
                     from: remoteURL,
@@ -2914,11 +2959,22 @@ private struct HomeHeroTitleTreatment: View {
     var body: some View {
         ZStack(alignment: .leading) {
             if !logoLoaded {
-                Text(title.uppercased())
-                    .font(.system(size: 40, weight: .black, design: .rounded))
-                    .tracking(-1.4)
+                // Cinematic fallback when TMDB has no logo asset.
+                Text(displayTitle)
+                    .font(.system(size: 42, weight: .black, design: .serif))
+                    .tracking(-0.8)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.white, Color.white.opacity(0.92)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .shadow(color: .black.opacity(0.85), radius: 8, y: 3)
+                    .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
                     .lineLimit(2)
-                    .minimumScaleFactor(0.62)
+                    .minimumScaleFactor(0.55)
+                    .multilineTextAlignment(.leading)
             }
 
             if let logoURL {
@@ -2931,15 +2987,23 @@ private struct HomeHeroTitleTreatment: View {
                     .cacheOriginalImage()
                     .resizable()
                     .scaledToFit()
-                    .frame(maxWidth: 270, maxHeight: 92, alignment: .leading)
+                    .frame(maxWidth: 300, maxHeight: 100, alignment: .leading)
+                    .shadow(color: .black.opacity(0.55), radius: 10, y: 4)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 72, maxHeight: 92, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 78, maxHeight: 100, alignment: .leading)
         .onChange(of: logoURL) { _ in logoLoaded = false }
         .task(id: logoURL?.absoluteString ?? "text-title") {
             if logoURL == nil { onPrepared() }
         }
         .onDisappear { onReleased() }
+    }
+
+    private var displayTitle: String {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return title }
+        // Prefer natural title case over all-caps for the serif treatment.
+        return cleaned
     }
 }
 

@@ -84,7 +84,8 @@ struct TMDBTitleDetails: Identifiable, Codable {
     }
     var logoURL: URL? {
         guard let logoPath else { return nil }
-        return URL(string: "https://image.tmdb.org/t/p/w500\(logoPath)")
+        // Hero title logos benefit from the sharpest TMDB render available.
+        return URL(string: "https://image.tmdb.org/t/p/original\(logoPath)")
     }
 }
 
@@ -210,11 +211,12 @@ actor TMDBService {
     }
 
     /// Fast path for Home / Media library scans.
-    /// One multi-search request → poster + title + year. Full cast/images load
-    /// later when the user opens Details (same feel as the Search tab).
+    /// Multi-search for identity + poster, then one light details hit for
+    /// genres (Home Genres section). Cast / logos still load on Details open.
     func libraryQuickDetails(for rawTitle: String, preferredMediaType: String? = nil) async -> TMDBTitleDetails? {
         guard TMDBSettings.isConfigured else { return nil }
-        if let cached = cachedDetailsOriginalFirst(for: rawTitle, preferredMediaType: preferredMediaType) {
+        if let cached = cachedDetailsOriginalFirst(for: rawTitle, preferredMediaType: preferredMediaType),
+           !cached.genres.isEmpty {
             return cached
         }
         let filtered = Self.searchTitle(from: rawTitle)
@@ -228,6 +230,26 @@ actor TMDBService {
         }
         guard let match = Self.bestMatch(in: candidates, query: query, preferredMediaType: preferredMediaType)
                 ?? candidates.first else { return nil }
+
+        // Light details (no credits/images append) → genres for Home sections.
+        if let rich = await lightTitleDetails(
+            mediaType: match.mediaType,
+            tmdbID: match.id,
+            fallbackTitle: match.title ?? match.name ?? query,
+            fallbackPoster: match.posterPath,
+            fallbackBackdrop: match.backdropPath,
+            fallbackOverview: match.overview,
+            fallbackRelease: match.releaseDate ?? match.firstAirDate,
+            fallbackVote: match.voteAverage
+        ) {
+            let base = query.lowercased()
+            detailsCache[base + "|" + (preferredMediaType ?? "any")] = rich
+            detailsCache[base + "|" + match.mediaType] = rich
+            detailsCache[base + "|any"] = rich
+            detailsCache["tmdb|\(match.mediaType)|\(match.id)"] = rich
+            persistCache()
+            return rich
+        }
 
         let title = match.title ?? match.name ?? query
         let details = TMDBTitleDetails(
@@ -260,6 +282,60 @@ actor TMDBService {
         detailsCache["tmdb|\(match.mediaType)|\(match.id)"] = details
         persistCache()
         return details
+    }
+
+    /// Basic title payload without credits/videos/images — enough for genres,
+    /// rating, and release date used by Home category rows.
+    private func lightTitleDetails(
+        mediaType: String,
+        tmdbID: Int,
+        fallbackTitle: String,
+        fallbackPoster: String?,
+        fallbackBackdrop: String?,
+        fallbackOverview: String?,
+        fallbackRelease: String?,
+        fallbackVote: Double?
+    ) async -> TMDBTitleDetails? {
+        guard mediaType == "movie" || mediaType == "tv" else { return nil }
+        struct LightPayload: Decodable {
+            let title: String?
+            let name: String?
+            let overview: String?
+            let posterPath: String?
+            let backdropPath: String?
+            let releaseDate: String?
+            let firstAirDate: String?
+            let voteAverage: Double?
+            let genres: [TMDBGenre]?
+            let runtime: Int?
+            let productionCountries: [ProductionCountry]?
+        }
+        guard let payload: LightPayload = try? await request("/3/\(mediaType)/\(tmdbID)", query: [:]) else {
+            return nil
+        }
+        return TMDBTitleDetails(
+            id: tmdbID,
+            mediaType: mediaType,
+            imdbID: nil,
+            title: payload.title ?? payload.name ?? fallbackTitle,
+            overview: payload.overview ?? fallbackOverview ?? "",
+            posterPath: payload.posterPath ?? fallbackPoster,
+            backdropPath: payload.backdropPath ?? fallbackBackdrop,
+            releaseDate: payload.releaseDate ?? payload.firstAirDate ?? fallbackRelease,
+            voteAverage: payload.voteAverage ?? fallbackVote ?? 0,
+            genres: payload.genres ?? [],
+            cast: [],
+            seasons: [],
+            trailerKey: nil,
+            runtimeMinutes: payload.runtime,
+            productionCountries: payload.productionCountries?.map(\.name),
+            certification: nil,
+            director: nil,
+            logoPath: nil,
+            noLanguageBackdropPath: payload.backdropPath ?? fallbackBackdrop,
+            noLanguagePosterPath: payload.posterPath ?? fallbackPoster,
+            detailsPosterPath: payload.posterPath ?? fallbackPoster
+        )
     }
 
     private func quickSearchCandidates(for query: String, year: String?) async -> [SearchResult] {

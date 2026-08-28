@@ -505,8 +505,13 @@ final class UnifiedContentModel: ObservableObject {
             var pending = Set(representatives.keys)
             var completed = previouslyScannedQueries
             // Skip titles already resolved so a refresh only hits unknowns.
+            // Revisit entries that still have empty genres so Home Genres can fill.
             let work = representatives
-                .filter { !previouslyScannedQueries.contains($0.key) || initialMetadata[$0.key] == nil }
+                .filter {
+                    !previouslyScannedQueries.contains($0.key)
+                        || initialMetadata[$0.key] == nil
+                        || initialMetadata[$0.key]?.genres.isEmpty == true
+                }
                 .sorted { $0.key < $1.key }
             if work.isEmpty {
                 pending = []
